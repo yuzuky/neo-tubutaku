@@ -261,6 +261,41 @@ def safe_channel_name(name: str) -> str:
     return name[:90]
 
 
+def split_text(text: str, limit: int = 1900) -> list[str]:
+    """
+    Discordの1メッセージ上限を超えないように、
+    改行をなるべく維持しながら分割する。
+    """
+    text = str(text or "")
+    if len(text) <= limit:
+        return [text]
+
+    chunks = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        cut = remaining.rfind("\n", 0, limit)
+
+        # 良い改行位置が無ければ空白、それも無ければ強制分割
+        if cut < int(limit * 0.5):
+            cut = remaining.rfind(" ", 0, limit)
+
+        if cut < int(limit * 0.5):
+            cut = limit
+
+        chunk = remaining[:cut].rstrip()
+        if chunk:
+            chunks.append(chunk)
+
+        remaining = remaining[cut:].lstrip()
+
+    return chunks
+
+
 def cleanup_old_data():
     """3か月（90日）を超えた募集と関連データ・未参照画像を削除する。"""
     cutoff = (now_jst() - timedelta(days=90)).isoformat(timespec="seconds")
