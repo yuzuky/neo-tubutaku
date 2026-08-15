@@ -224,6 +224,18 @@ def init_db():
 init_db()
 
 
+def ensure_availability_notification_column():
+    with db() as c:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(recruitments)").fetchall()}
+        if "availability_notified" not in cols:
+            c.execute(
+                "ALTER TABLE recruitments ADD COLUMN availability_notified INTEGER NOT NULL DEFAULT 0"
+            )
+
+ensure_availability_notification_column()
+
+
+
 # ------------------------ Helpers -------------------------
 
 def now_jst() -> datetime:
@@ -1210,6 +1222,81 @@ async def send_long(channel, text: str):
     for chunk in split_text(text):
         await channel.send(chunk)
 
+def in_quiet_hours(dt: datetime | None = None) -> bool:
+    """
+    21:00〜翌09:00はDiscord通知をサイレント送信する。
+    """
+    dt = dt or now_jst()
+    return dt.hour >= 21 or dt.hour < 9
+
+
+async def notify_availability_if_needed(rid: int):
+    """
+    最小募集人数を初めて満たす開催候補日ができた瞬間だけ、
+    日程調整チャンネルへ通知する。
+    """
+    r = get_recruitment(rid)
+    if not r:
+        return
+
+    # 既に通知済みなら何もしない
+    try:
+        already = int(r["availability_notified"] or 0)
+    except Exception:
+        already = 0
+    if already:
+        return
+
+    candidates = [
+        x for x in candidate_rows(rid)
+        if len(x["yes"]) >= int(r["min_players"])
+    ]
+    if not candidates:
+        return
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild or not r["waiting_channel_id"]:
+        return
+
+    ch = guild.get_channel(int(r["waiting_channel_id"]))
+    if not ch:
+        try:
+            ch = await guild.fetch_channel(int(r["waiting_channel_id"]))
+        except Exception:
+            ch = None
+    if not ch:
+        return
+
+    lines = [
+        f'・{x["date"]}：○ {len(x["yes"])}人'
+        for x in candidates
+    ]
+
+    message = (
+        "🎉 **開催できるようになりました！**\n\n"
+        "必要人数を満たした日程があります。\n"
+        + "\n".join(lines)
+        + f"\n\nGMは開催日を決定できます。\n{BASE_URL}/r/{rid}/decide"
+    )
+
+    await ch.send(
+        message,
+        silent=in_quiet_hours(),
+    )
+
+    with db() as c:
+        c.execute(
+            "UPDATE recruitments SET availability_notified=1 WHERE id=?",
+            (rid,),
+        )
+
+    print(
+        f"[AVAILABILITY] notified rid={rid} quiet={in_quiet_hours()}",
+        flush=True,
+    )
+
+
+
 
 async def create_waiting_channel(rid: int) -> discord.TextChannel:
     r = get_recruitment(rid)
@@ -1281,8 +1368,11 @@ async def post_recruitment(rid: int):
         else f'{r["min_players"]}〜{r["max_players"]}'
     )
 
+    gm_name = user_display(str(r["gm_discord_id"]))
+
     header = (
         f'## 『{r["scenario_name"]}』\n'
+        f'GM：**{gm_name}**\n'
         f'募集人数：**{player_text}人**\n'
         f'プレイ時間：**{r["play_time"]}**\n\n'
         f'{r["description"]}\n\n'
@@ -1517,31 +1607,75 @@ async def on_raw_reaction_remove(payload):
 
 
 async def deadline_check():
-    now = now_jst()
+    """
+    募集期限日の20:00に、その日が期限の卓だけ1回通知する。
+    20:00を逃した過去日の卓には後追い通知しない。
+    """
+    today = now_jst().date()
+
     with db() as c:
-        rows = c.execute("SELECT * FROM recruitments WHERE status='RECRUITING' AND deadline_notified=0").fetchall()
+        rows = c.execute(
+            """SELECT *
+               FROM recruitments
+               WHERE deadline_notified=0
+                 AND status IN ('RECRUITING','WAITING_GM_DECISION','FAILED')"""
+        ).fetchall()
+
     for r in rows:
         deadline = datetime.fromisoformat(r["deadline"]).astimezone(JST)
-        if now < deadline:
+
+        # 当日だけ。昨日以前・明日以降は通知しない。
+        if deadline.date() != today:
             continue
-        candidates = [x for x in candidate_rows(r["id"]) if len(x["yes"]) >= r["min_players"]]
+
+        candidates = [
+            x for x in candidate_rows(r["id"])
+            if len(x["yes"]) >= int(r["min_players"])
+        ]
+
         guild = bot.get_guild(GUILD_ID)
-        ch = guild.get_channel(int(r["waiting_channel_id"])) if guild and r["waiting_channel_id"] else None
+        ch = (
+            guild.get_channel(int(r["waiting_channel_id"]))
+            if guild and r["waiting_channel_id"]
+            else None
+        )
+
+        if not ch and guild and r["waiting_channel_id"]:
+            try:
+                ch = await guild.fetch_channel(int(r["waiting_channel_id"]))
+            except Exception:
+                ch = None
+
         if ch:
             if candidates:
-                lines = [f'・{x["date"]}：○ {len(x["yes"])}人' for x in candidates]
+                lines = [
+                    f'・{x["date"]}：○ {len(x["yes"])}人'
+                    for x in candidates
+                ]
                 await ch.send(
-                    '⏰ **募集期限になりました。**\n\n募集人数に到達した開催候補日があります！\n'
+                    '⏰ **本日が募集期限です。**\n\n'
+                    '現在、募集人数に到達している開催候補日があります。\n'
                     + "\n".join(lines)
-                    + f'\n\nGMは以下から開催日を選択してください。\n{BASE_URL}/r/{r["id"]}/decide'
+                    + f'\n\nGMは以下から開催日を選択できます。\n{BASE_URL}/r/{r["id"]}/decide'
                 )
             else:
                 await ch.send(
-                    '⏰ **募集期限になりました。**\n\n今回の日程調整では必要人数が集まりませんでした。\n'
-                    f'また後日、以下より再調整できます。\n{BASE_URL}/r/{r["id"]}/reschedule'
+                    '⏰ **本日が募集期限です。**\n\n'
+                    '現時点では必要人数が集まっている日程がありません。\n'
+                    f'必要に応じて、以下より再日程調整できます。\n'
+                    f'{BASE_URL}/r/{r["id"]}/reschedule'
                 )
+
         with db() as c:
-            c.execute("UPDATE recruitments SET deadline_notified=1,status=? WHERE id=?", ("WAITING_GM_DECISION" if candidates else "FAILED", r["id"]))
+            c.execute(
+                "UPDATE recruitments SET deadline_notified=1 WHERE id=?",
+                (r["id"],),
+            )
+
+        print(
+            f"[DEADLINE] notified once for deadline date rid={r['id']}",
+            flush=True,
+        )
 
 
 reminder_tasks: dict[int, asyncio.Task] = {}
@@ -1604,7 +1738,7 @@ async def restore_reminder_tasks():
         schedule_session_reminder(int(row["id"]))
 
 
-@tasks.loop(time=time(hour=21, minute=0, tzinfo=JST))
+@tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def deadline_scheduler():
     try:
         await deadline_check()
@@ -2396,6 +2530,13 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
             if d in allowed_dates and a in {"yes","maybe"}:
                 c.execute("INSERT INTO answers(recruitment_id,discord_id,event_date,answer,updated_at) VALUES(?,?,?,?,?)", (rid, uid, d, a, iso_now()))
         c.execute("INSERT INTO comments(recruitment_id,discord_id,comment,updated_at) VALUES(?,?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET comment=excluded.comment,updated_at=excluded.updated_at", (rid, uid, comment.strip(), iso_now()))
+
+    # 回答保存後、初めて必要人数を満たした瞬間だけ通知
+    try:
+        await notify_availability_if_needed(rid)
+    except Exception as e:
+        log_error(f"availability_notify rid={rid}", e)
+
     return RedirectResponse(f"/r/{rid}", status_code=303)
 
 
@@ -2476,7 +2617,7 @@ async def decide_submit(request: Request, rid: int, event_date: str = Form(...),
                 overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
         ch = await guild.create_text_channel(safe_channel_name(f'{r["scenario_name"]}-{round_no}陣'), category=category, overwrites=overwrites, topic=f"つぶ卓 成立卓 ID:{sid}")
         mentions = "\n".join(f"・<@{x}>" for x in selected)
-        msg = f'# 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日：**{event_date}**\n開催時間：**{r["start_time"]}〜**\n\nGM：<@{uid}>\n参加者：\n{mentions}'
+        msg = f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日：**{event_date}**\n開催時間：**{r["start_time"]}〜**\n\nGM：<@{uid}>\n参加者：\n{mentions}'
         if r["guide_message"]:
             msg += f'\n\n## 【事前準備】\n{r["guide_message"]}'
         await send_long(ch, msg)
