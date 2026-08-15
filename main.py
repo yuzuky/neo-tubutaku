@@ -213,6 +213,75 @@ def iso_now() -> str:
     return now_jst().isoformat(timespec="seconds")
 
 
+def cleanup_old_data():
+    """3か月（90日）を超えた募集と関連データを削除する。"""
+    cutoff = (now_jst() - timedelta(days=90)).isoformat(timespec="seconds")
+    image_paths = []
+    session_ids = []
+
+    with db() as c:
+        old = c.execute(
+            "SELECT id, image_path FROM recruitments WHERE created_at < ?",
+            (cutoff,),
+        ).fetchall()
+
+        if not old:
+            return 0
+
+        ids = [int(x["id"]) for x in old]
+        marks = ",".join("?" for _ in ids)
+
+        # 古い親募集を参照している新しい再調整卓があっても削除できるようにする
+        c.execute(
+            f"UPDATE recruitments SET parent_id=NULL WHERE parent_id IN ({marks}) AND id NOT IN ({marks})",
+            tuple(ids) + tuple(ids),
+        )
+
+        srows = c.execute(
+            f"SELECT id FROM sessions WHERE recruitment_id IN ({marks})",
+            tuple(ids),
+        ).fetchall()
+        session_ids = [int(x["id"]) for x in srows]
+
+        if session_ids:
+            smarks = ",".join("?" for _ in session_ids)
+            c.execute(
+                f"DELETE FROM session_members WHERE session_id IN ({smarks})",
+                tuple(session_ids),
+            )
+
+        c.execute(
+            f"DELETE FROM sessions WHERE recruitment_id IN ({marks})",
+            tuple(ids),
+        )
+
+        # gm_dates / members / answers / comments は recruitment 削除時にCASCADE
+        c.execute(
+            f"DELETE FROM recruitments WHERE id IN ({marks})",
+            tuple(ids),
+        )
+
+        image_paths = [x["image_path"] for x in old if x["image_path"]]
+
+    # DB削除後に画像ファイルも削除
+    for p in image_paths:
+        try:
+            path = Path(p)
+            if path.exists() and UPLOAD_DIR in path.parents:
+                path.unlink()
+        except Exception as e:
+            log_error("cleanup_old_image", e)
+
+    # 既に予約済みのリマインドタスクも止める
+    for sid in session_ids:
+        task = reminder_tasks.get(sid) if "reminder_tasks" in globals() else None
+        if task and not task.done():
+            task.cancel()
+
+    print(f"[CLEANUP] deleted {len(ids)} recruitments older than 90 days", flush=True)
+    return len(ids)
+
+
 def safe_channel_name(text: str, fallback: str = "taku") -> str:
     text = unicodedata.normalize("NFKC", text).strip().lower()
     text = re.sub(r"\s+", "-", text)
@@ -664,6 +733,115 @@ tr:last-child td{border-bottom:0}
 .members label{margin:8px 0;display:block}
 hr{border:0;border-top:1px solid var(--line);margin:24px 0}
 .mobile-only{display:none}
+
+.list-title{
+  color:#a8b4c6;
+  font-size:1.05rem;
+  font-weight:900;
+  margin:8px 4px 22px;
+}
+.session-list{display:grid;gap:16px}
+.session-card{
+  position:relative;
+  display:block;
+  color:var(--text);
+  text-decoration:none;
+  background:linear-gradient(145deg,#151d29,#101620);
+  border:1px solid var(--line);
+  border-radius:22px;
+  padding:22px 24px;
+  box-shadow:0 10px 30px rgba(0,0,0,.20);
+  transition:.17s ease;
+}
+.session-card:hover{transform:translateY(-2px);border-color:#43516a}
+.session-card-title{
+  font-size:1.25rem;
+  font-weight:900;
+  letter-spacing:-.035em;
+  margin-bottom:11px;
+}
+.session-card-meta{color:#94a1b5;font-size:.91rem}
+.kebab{
+  position:absolute;
+  right:18px;
+  top:19px;
+  color:#64748b;
+  font-size:1.55rem;
+  letter-spacing:2px;
+}
+.status-badge{
+  position:absolute;
+  right:52px;
+  bottom:20px;
+  border-radius:7px;
+  padding:6px 9px;
+  font-size:.75rem;
+  font-weight:900;
+  color:white;
+  background:#ef4444;
+}
+.status-badge.confirmed{background:#22a06b}
+.status-badge.closed{background:#536174}
+.detail-head{
+  background:linear-gradient(145deg,#151d29,#101620);
+  border:1px solid var(--line);
+  border-radius:22px;
+  padding:24px;
+  margin-bottom:18px;
+  box-shadow:var(--shadow);
+}
+.detail-head h2{margin:0 0 14px;font-size:1.55rem}
+.detail-meta{
+  display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  border-top:1px solid var(--line);
+  padding-top:14px;color:#a6b1c2;
+}
+.copy-card{
+  display:flex;align-items:center;gap:12px;
+  padding:14px 16px;
+  border:1px solid var(--line);
+  border-radius:18px;
+  background:#121923;
+  margin:18px 0;
+}
+.copy-url{
+  min-width:0;flex:1;
+  color:#8492a7;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  font-size:.87rem;
+}
+.copy-btn{
+  flex:0 0 auto;
+  background:#2d6cf6;
+  box-shadow:none;
+  border-radius:12px;
+  padding:11px 15px;
+}
+.all-no-form{margin:18px 0}
+.all-no-btn{
+  width:100%;
+  background:rgba(239,68,68,.04);
+  color:#ff5364;
+  border:2px solid rgba(255,83,100,.45);
+  box-shadow:none;
+  min-height:62px;
+}
+.answer-title{margin:22px 4px 12px;font-size:1rem;color:#dce4ef}
+.answer-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+.answer-grid .day{min-height:124px}
+.answer-grid .day span:first-child{font-size:.93rem}
+.answer-grid .state{font-size:1.6rem}
+.save-answer{width:100%;margin-top:18px;min-height:58px}
+.viewer-note{
+  border:1px dashed #3a4659;border-radius:16px;padding:16px;
+  color:#909db0;background:rgba(255,255,255,.015)
+}
+@media(max-width:620px){
+  .answer-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .session-card{padding:21px 20px}
+  .copy-card{padding:12px}
+}
+
 @media(max-width:620px){
   .wrap{padding:0 14px 48px}
   .top{margin:0 -14px 20px;padding:0 18px;min-height:70px}
@@ -1098,6 +1276,12 @@ async def deadline_scheduler():
     except Exception as e:
         log_error("deadline_scheduler", e)
 
+    # DB肥大化防止：3か月を超えた卓を1日1回だけ削除
+    try:
+        cleanup_old_data()
+    except Exception as e:
+        log_error("old_data_cleanup", e)
+
 
 @deadline_scheduler.before_loop
 async def before_deadline_scheduler():
@@ -1183,68 +1367,9 @@ async def logout(request: Request):
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
     uid = request.session.get("user_id")
-    if not uid:
-        return page(
-            "ホーム",
-            """
-            <section class='hero'>
-              <div class='hero-kicker'>TRPG・マダミス日程調整</div>
-              <h1>○と△だけで、<br>もっと手軽に。</h1>
-              <p>募集から日程調整、卓成立までをDiscordと一緒にまとめます。</p>
-            </section>
 
-            <div class='menu-stack'>
-              <a class='menu-card primary' href='/login?next=/new'>
-                <div class='menu-icon'>📅</div>
-                <div>
-                  <div class='menu-title'>卓を立てる</div>
-                  <div class='menu-sub'>GM・募集と日程調整を作成</div>
-                </div>
-                <div class='chev'>›</div>
-              </a>
-              <a class='menu-card' href='/login'>
-                <div class='menu-icon'>👥</div>
-                <div>
-                  <div class='menu-title'>卓に参加する</div>
-                  <div class='menu-sub'>PL・Discordでログイン</div>
-                </div>
-                <div class='chev'>›</div>
-              </a>
-            </div>
-
-            <div class='info-card'>
-              <h3>✦ つぶたくとは？</h3>
-              <div class='muted'>TRPG・マダミスの募集から日程調整までを、できるだけ少ない操作で進めるためのサービスです。</div>
-            </div>
-            """,
-            request,
-        )
-
-    uid_s = str(uid)
-    with db() as c:
-        mine = c.execute(
-            "SELECT * FROM recruitments WHERE gm_discord_id=? ORDER BY id DESC LIMIT 30",
-            (uid_s,),
-        ).fetchall()
-        joined = c.execute(
-            """SELECT DISTINCT r.*
-               FROM recruitments r
-               JOIN members m ON m.recruitment_id=r.id
-               WHERE m.discord_id=? AND m.active=1
-               ORDER BY r.id DESC LIMIT 30""",
-            (uid_s,),
-        ).fetchall()
-
-    gm_rows = "".join(
-        f"<tr><td>{esc(r['scenario_name'])}</td><td>{esc(r['game_type'])}</td>"
-        f"<td>{esc(r['status'])}</td><td><a href='/r/{r['id']}'>開く</a></td></tr>"
-        for r in mine
-    )
-    pl_rows = "".join(
-        f"<tr><td>{esc(r['scenario_name'])}</td><td>{esc(r['game_type'])}</td>"
-        f"<td><a href='/r/{r['id']}'>回答する</a></td></tr>"
-        for r in joined
-    )
+    new_href = "/new" if uid else "/login?next=/new"
+    join_href = "/join" if uid else "/login?next=/join"
 
     return page(
         "ホーム",
@@ -1255,7 +1380,7 @@ async def home(request: Request):
         </section>
 
         <div class='menu-stack'>
-          <a class='menu-card primary' href='/new'>
+          <a class='menu-card primary' href='{new_href}'>
             <div class='menu-icon'>📅</div>
             <div>
               <div class='menu-title'>卓を立てる</div>
@@ -1264,39 +1389,101 @@ async def home(request: Request):
             <div class='chev'>›</div>
           </a>
 
-          <a class='menu-card' href='#joined'>
+          <a class='menu-card' href='{join_href}'>
             <div class='menu-icon'>👥</div>
             <div>
               <div class='menu-title'>卓に参加する</div>
-              <div class='menu-sub'>PL・参加中の卓を確認</div>
+              <div class='menu-sub'>PL・募集一覧と回答状況を見る</div>
             </div>
             <div class='chev'>›</div>
           </a>
         </div>
+        """,
+        request,
+    )
 
-        <div class='info-card'>
-          <h3>✦ つぶたくとは？</h3>
-          <div class='muted'>Discord募集・日程回答・卓成立までをひとつにつなげます。</div>
-        </div>
 
-        <div class='card'>
-          <h2>自分がGMの卓</h2>
-          <div class='scroll'>
-            <table>
-              <tr><th>シナリオ</th><th>種別</th><th>状態</th><th></th></tr>
-              {gm_rows or '<tr><td colspan="4" class="muted">まだありません</td></tr>'}
-            </table>
-          </div>
-        </div>
+@app.get("/join", response_class=HTMLResponse)
+async def join_list(request: Request):
+    uid = request.session.get("user_id")
+    if not uid:
+        return RedirectResponse("/login?next=/join")
 
-        <div class='card' id='joined'>
-          <h2>参加中の卓</h2>
-          <div class='scroll'>
-            <table>
-              <tr><th>シナリオ</th><th>種別</th><th></th></tr>
-              {pl_rows or '<tr><td colspan="3" class="muted">参加中の卓はありません</td></tr>'}
-            </table>
-          </div>
+    # 一覧を開いたタイミングでも軽量な90日整理を実行
+    try:
+        cleanup_old_data()
+    except Exception as e:
+        log_error("join_cleanup", e)
+
+    cutoff = (now_jst() - timedelta(days=90)).isoformat(timespec="seconds")
+
+    with db() as c:
+        rows = c.execute(
+            """SELECT r.*,
+                      COALESCE(u.display_name, u.username, r.gm_discord_id) AS gm_name,
+                      (
+                        SELECT COUNT(DISTINCT a.discord_id)
+                        FROM answers a
+                        JOIN members m
+                          ON m.recruitment_id=a.recruitment_id
+                         AND m.discord_id=a.discord_id
+                         AND m.member_type='participant'
+                         AND m.active=1
+                        WHERE a.recruitment_id=r.id
+                      ) AS answered_count,
+                      (
+                        SELECT COUNT(*)
+                        FROM sessions s
+                        WHERE s.recruitment_id=r.id
+                      ) AS session_count
+               FROM recruitments r
+               LEFT JOIN users u ON u.discord_id=r.gm_discord_id
+               WHERE r.created_at >= ?
+               ORDER BY r.id DESC
+               LIMIT 100""",
+            (cutoff,),
+        ).fetchall()
+
+    cards = []
+    for r in rows:
+        try:
+            possible = any(
+                len(x["yes"]) >= int(r["min_players"])
+                for x in candidate_rows(int(r["id"]))
+            )
+        except Exception:
+            possible = False
+
+        if r["session_count"]:
+            badge = "<span class='status-badge confirmed'>開催決定</span>"
+        elif possible:
+            badge = "<span class='status-badge'>開催可能！</span>"
+        elif r["status"] in ("FAILED", "ERROR"):
+            badge = "<span class='status-badge closed'>調整終了</span>"
+        else:
+            badge = ""
+
+        cards.append(
+            f"""
+            <a class='session-card' href='/r/{r["id"]}'>
+              <div class='kebab'>⋮</div>
+              {badge}
+              <div class='session-card-title'>{esc(r["scenario_name"])}</div>
+              <div class='session-card-meta'>
+                GM: {esc(r["gm_name"] or r["gm_discord_id"])}
+                &nbsp;/&nbsp; {int(r["answered_count"])}人回答
+              </div>
+            </a>
+            """
+        )
+
+    return page(
+        "卓に参加する",
+        f"""
+        <a class='back-link' href='/'>‹ 戻る</a>
+        <div class='list-title'>最近3か月の卓一覧</div>
+        <div class='session-list'>
+          {''.join(cards) if cards else "<div class='viewer-note'>現在表示できる卓はありません。</div>"}
         </div>
         """,
         request,
@@ -1555,55 +1742,260 @@ async def recruitment_page(rid: int, request: Request):
     r = get_recruitment(rid)
     if not r:
         raise HTTPException(404)
+
     uid = request.session.get("user_id")
     if not uid:
         return RedirectResponse(f"/login?next=/r/{rid}")
     uid = str(uid)
+
     gm = uid == r["gm_discord_id"]
     participant = is_active_member(rid, uid, "participant")
     spectator = is_active_member(rid, uid, "spectator")
-    if not (gm or participant or spectator):
-        return page("アクセス不可", "<div class='card'>参加または観戦希望リアクションを押してから開いてください。</div>", request)
+
+    # 一覧からタップしたログインユーザーは回答状況を閲覧可能。
+    # 回答操作だけ参加リアクション済みPLに限定する。
     dates = get_gm_dates(rid)
+
     with db() as c:
-        my_answers = {x["event_date"]: x["answer"] for x in c.execute("SELECT * FROM answers WHERE recruitment_id=? AND discord_id=?", (rid, uid)).fetchall()}
-        cm = c.execute("SELECT comment FROM comments WHERE recruitment_id=? AND discord_id=?", (rid, uid)).fetchone()
+        my_answers = {
+            x["event_date"]: x["answer"]
+            for x in c.execute(
+                "SELECT * FROM answers WHERE recruitment_id=? AND discord_id=?",
+                (rid, uid),
+            ).fetchall()
+        }
+        cm = c.execute(
+            "SELECT comment FROM comments WHERE recruitment_id=? AND discord_id=?",
+            (rid, uid),
+        ).fetchone()
+        gm_user = c.execute(
+            "SELECT display_name, username FROM users WHERE discord_id=?",
+            (r["gm_discord_id"],),
+        ).fetchone()
+
     comment = cm["comment"] if cm else ""
+    gm_name = (
+        (gm_user["display_name"] or gm_user["username"])
+        if gm_user else user_display(r["gm_discord_id"])
+    )
+
+    deadline_dt = datetime.fromisoformat(r["deadline"])
+    deadline_label = deadline_dt.strftime("%Y-%m-%d")
+    answer_url = f"{BASE_URL}/r/{rid}"
+
+    # -------- PL回答コントロール --------
     controls = ""
     if participant:
-        controls = ("<h3>あなたの日程回答</h3><p>タップ：無回答 → ○ → △ → 無回答</p><form method='post' action='/r/%d/answer'>" % rid) + csrf_field(request) + "<input type='hidden' name='answers' id='answers'><div class='grid'>"
-        state_map = {"yes":"yes","maybe":"maybe"}
+        weekday_jp = ["月","火","水","木","金","土","日"]
         js_obj = json.dumps(my_answers, ensure_ascii=False)
-        for d in dates:
-            st = state_map.get(my_answers.get(d), "")
-            label = "○" if st == "yes" else "△" if st == "maybe" else ""
-            controls += f'<div class="day {st}" data-date="{d}" onclick="togglePL(this)">{d[5:]}<br><b>{label}</b></div>'
-        controls += f"</div><label>コメント（任意）<textarea name='comment' rows='3'>{esc(comment)}</textarea></label><button>回答を保存</button></form><script>let ans={js_obj};function togglePL(el){{let d=el.dataset.date,s=ans[d]||'';s=s==''?'yes':s=='yes'?'maybe':'';if(s)ans[d]=s;else delete ans[d];el.classList.remove('yes','maybe');if(s)el.classList.add(s);el.querySelector('b').textContent=s=='yes'?'○':s=='maybe'?'△':'';document.getElementById('answers').value=JSON.stringify(ans)}}document.getElementById('answers').value=JSON.stringify(ans);</script>"
+
+        cards = []
+        for ds in dates:
+            d = date.fromisoformat(ds)
+            day_label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+            current = my_answers.get(ds, "")
+            cls = "yes" if current == "yes" else "maybe" if current == "maybe" else ""
+            symbol = "○" if current == "yes" else "△" if current == "maybe" else "-"
+            cards.append(
+                f'<div class="day {cls}" data-date="{ds}" onclick="togglePL(this)">'
+                f'<span>{day_label}</span><span class="state">{symbol}</span></div>'
+            )
+
+        controls = f"""
+        <form class='all-no-form' method='post' action='/r/{rid}/all-unavailable'
+              onsubmit="return confirm('すべての日程を参加不可にしますか？')">
+          {csrf_field(request)}
+          <button class='all-no-btn' type='submit'>✕ 全ての日程が無理</button>
+        </form>
+
+        <div class='answer-title'>あなたの日程回答</div>
+        <div class='muted small' style='margin:0 4px 12px'>
+          タップ：未回答 → ○ → △ → 未回答
+        </div>
+
+        <form method='post' action='/r/{rid}/answer'>
+          {csrf_field(request)}
+          <input type='hidden' name='answers' id='answers'>
+          <div class='answer-grid'>{''.join(cards)}</div>
+
+          <label class='field' style='margin-top:18px'>
+            <div class='field-box tall'>
+              <div class='field-icon'>💬</div>
+              <textarea name='comment' rows='3' placeholder='日程についてGMへコメント（任意）'>{esc(comment)}</textarea>
+            </div>
+          </label>
+
+          <button class='save-answer' type='submit'>回答を保存</button>
+        </form>
+
+        <script>
+        let ans={js_obj};
+
+        function refreshHidden(){{
+          document.getElementById('answers').value=JSON.stringify(ans);
+        }}
+
+        function togglePL(el){{
+          const d=el.dataset.date;
+          let s=ans[d]||'';
+
+          s = s==='' ? 'yes' : (s==='yes' ? 'maybe' : '');
+
+          if(s) ans[d]=s;
+          else delete ans[d];
+
+          el.classList.remove('yes','maybe');
+          if(s) el.classList.add(s);
+
+          el.querySelector('.state').textContent =
+            s==='yes' ? '○' : (s==='maybe' ? '△' : '-');
+
+          refreshHidden();
+        }}
+
+        refreshHidden();
+        </script>
+        """
+    elif gm:
+        controls = "<div class='viewer-note'>GMは回答対象ではありません。PLの回答状況を下で確認できます。</div>"
+    elif spectator:
+        controls = "<div class='viewer-note'>観戦希望では日程回答はありません。回答状況は下で確認できます。</div>"
+    else:
+        controls = "<div class='viewer-note'>回答するにはDiscord募集メッセージの「参加」リアクションを押してください。</div>"
+
+    # -------- 回答状況（GM回答は表示しない） --------
     rows = candidate_rows(rid)
     with db() as c:
-        active = c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1 ORDER BY joined_at", (rid,)).fetchall()
-        comments = c.execute("SELECT * FROM comments WHERE recruitment_id=? AND comment<>''", (rid,)).fetchall()
-    uids = [x[0] for x in active]
-    table = "<div class='scroll'><table><tr><th>名前</th>" + "".join(f"<th>{d[5:]}</th>" for d in dates) + "</tr>"
-    with db() as c:
-        allans = {(x["discord_id"],x["event_date"]):x["answer"] for x in c.execute("SELECT * FROM answers WHERE recruitment_id=?", (rid,)).fetchall()}
+        active = c.execute(
+            """SELECT discord_id FROM members
+               WHERE recruitment_id=?
+                 AND member_type='participant'
+                 AND active=1
+               ORDER BY joined_at""",
+            (rid,),
+        ).fetchall()
+
+        comments = c.execute(
+            "SELECT * FROM comments WHERE recruitment_id=? AND comment<>''",
+            (rid,),
+        ).fetchall()
+
+        allans = {
+            (x["discord_id"], x["event_date"]): x["answer"]
+            for x in c.execute(
+                "SELECT * FROM answers WHERE recruitment_id=?",
+                (rid,),
+            ).fetchall()
+        }
+
+    uids = [x["discord_id"] for x in active]
+
+    table = (
+        "<div class='scroll'><table><tr><th>名前</th>"
+        + "".join(f"<th>{d[5:]}</th>" for d in dates)
+        + "</tr>"
+    )
+
     for puid in uids:
         table += f"<tr><td>{esc(user_display(puid))}</td>"
         for d in dates:
-            a = allans.get((puid,d),"")
-            table += "<td class='ok'>○</td>" if a=="yes" else "<td class='maybe'>△</td>" if a=="maybe" else "<td>—</td>"
+            a = allans.get((puid, d), "")
+            if a == "yes":
+                table += "<td class='ok'>○</td>"
+            elif a == "maybe":
+                table += "<td class='maybe'>△</td>"
+            else:
+                table += "<td>—</td>"
         table += "</tr>"
-    table += "<tr><th>○人数</th>" + "".join(f"<th>{len(x['yes'])}</th>" for x in rows) + "</tr></table></div>"
-    comment_html = "".join(f"<p><b>{esc(user_display(x['discord_id']))}</b>：{esc(x['comment'])}</p>" for x in comments)
+
+    if dates:
+        table += (
+            "<tr><th>○人数</th>"
+            + "".join(f"<th>{len(x['yes'])}</th>" for x in rows)
+            + "</tr>"
+        )
+    table += "</table></div>"
+
+    comment_html = "".join(
+        f"<p><b>{esc(user_display(x['discord_id']))}</b>：{esc(x['comment'])}</p>"
+        for x in comments
+    )
+
     gm_buttons = ""
     if gm:
-        gm_buttons = f"<p><a class='btn green' href='/r/{rid}/decide'>開催日を決定</a> <a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a></p>"
-    return page(r["scenario_name"], f"""
-    <div class='card'><h2>『{esc(r['scenario_name'])}』</h2><span class='pill'>{esc(r['game_type'])}</span><span class='pill'>{esc(r['status'])}</span><p>募集人数：{r['min_players']}〜{r['max_players']}人 / 開始：{esc(r['start_time'])}</p>{gm_buttons}</div>
-    <div class='card'>{controls or '<p class="muted">観戦希望者は日程回答の対象外です。</p>'}</div>
-    <div class='card'><h3>回答状況</h3>{table}</div>
-    <div class='card'><h3>コメント</h3>{comment_html or '<p class="muted">コメントはありません。</p>'}</div>
-    """, request)
+        gm_buttons = (
+            f"<p style='margin:18px 0 0'>"
+            f"<a class='btn green' href='/r/{rid}/decide'>開催日を決定</a> "
+            f"<a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a>"
+            f"</p>"
+        )
+
+    return page(
+        r["scenario_name"],
+        f"""
+        <a class='back-link' href='/join'>‹ 戻る</a>
+
+        <div class='detail-head'>
+          <h2>{esc(r["scenario_name"])}</h2>
+          <div class='detail-meta'>
+            <span>GM: {esc(gm_name)}</span>
+            <span>期限: {esc(deadline_label)}</span>
+          </div>
+          {gm_buttons}
+        </div>
+
+        <div class='copy-card'>
+          <div class='copy-url' id='answerUrl'>{esc(answer_url)}</div>
+          <button type='button' class='copy-btn'
+                  onclick="copyAnswerUrl()">URLコピー</button>
+        </div>
+
+        {controls}
+
+        <div class='card'>
+          <h3>回答状況</h3>
+          {table}
+        </div>
+
+        <div class='card'>
+          <h3>コメント</h3>
+          {comment_html or '<p class="muted">コメントはありません。</p>'}
+        </div>
+
+        <script>
+        async function copyAnswerUrl(){{
+          const url=document.getElementById('answerUrl').textContent.trim();
+          try{{
+            await navigator.clipboard.writeText(url);
+            const btn=document.querySelector('.copy-btn');
+            const old=btn.textContent;
+            btn.textContent='コピーしました';
+            setTimeout(()=>btn.textContent=old,1300);
+          }}catch(e){{
+            window.prompt('このURLをコピーしてください',url);
+          }}
+        }}
+        </script>
+        """,
+        request,
+    )
+
+
+@app.post("/r/{rid}/all-unavailable")
+async def all_unavailable(rid: int, request: Request):
+    uid = require_login(request)
+    await require_csrf(request)
+
+    if not is_active_member(rid, uid, "participant"):
+        raise HTTPException(403, "参加者のみ回答できます")
+
+    with db() as c:
+        c.execute(
+            "DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",
+            (rid, uid),
+        )
+
+    return RedirectResponse(f"/r/{rid}", status_code=303)
 
 
 @app.post("/r/{rid}/answer")
