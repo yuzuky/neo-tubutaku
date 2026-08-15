@@ -558,7 +558,7 @@ button,input,textarea,select{font:inherit}
 .info-card{margin-top:24px}
 .info-card h3{color:#ae76ff;margin:0 0 7px}
 .section-title{
-  margin:18px 0 16px;
+  margin:10px 0 12px;
   text-align:center;
   font-size:1.4rem;
   font-weight:900;
@@ -566,7 +566,7 @@ button,input,textarea,select{font:inherit}
 }
 .form-shell{padding-bottom:24px}
 .form-section{
-  margin:20px 0 30px;
+  margin:10px 0 18px;
 }
 .form-section-title{
   color:#dce3ee;
@@ -589,7 +589,6 @@ button,input,textarea,select{font:inherit}
   min-height:76px;
   display:flex;
   align-items:center;
-  gap:12px;
 }
 .field-box.tall{align-items:flex-start;padding-top:14px}
 .field-icon{
@@ -639,10 +638,10 @@ button,input,textarea,select{font:inherit}
 .checkbox-row input{width:auto;margin:0;accent-color:#8b5cf6}
 input[type=file]{font-size:.85rem}
 .date-heading{
-  margin:28px 0 12px 2px;
-  color:#dce4ef;
+  margin:24px 0 12px 2px;
+  color:#9aa6b8;
   font-size:.95rem;
-  font-weight:900;
+  font-weight:500;
 }
 .date-scroll{
   max-height:410px;
@@ -1511,20 +1510,19 @@ async def new_form(request: Request):
     day_html = "".join(cards)
 
     return page(
-        "卓を新しく立てる",
+        "卓を立てる",
         f"""
         <a class='back-link' href='/'>‹ 戻る</a>
-        <div class='section-title'>卓を新しく立てる</div>
+        <div class='section-title'>卓を立てる</div>
 
         <form class='form-shell' action='/new' method='post' enctype='multipart/form-data'>
           {csrf_field(request)}
 
           <div class='form-section'>
-            <div class='form-section-title'>基本情報</div>
+            
 
             <label class='field'>
               <div class='field-box'>
-                <div class='field-icon'>🎲</div>
                 <select name='game_type' required>
                   <option value='TRPG'>TRPG</option>
                   <option value='マダミス'>マダミス</option>
@@ -1534,7 +1532,6 @@ async def new_form(request: Request):
 
             <label class='field' style='margin-top:12px'>
               <div class='field-box'>
-                <div class='field-icon'>📦</div>
                 <input name='scenario_name' placeholder='シナリオ名を入力' required>
               </div>
             </label>
@@ -1542,7 +1539,6 @@ async def new_form(request: Request):
             <div class='field-row'>
               <label>
                 <div class='field-box'>
-                  <div class='field-icon'>👥</div>
                   <div class='field-stack'>
                     <span class='field-label'>募集人数</span>
                     <input id='fixed_players' type='number' min='1' name='fixed_players' value='4'>
@@ -1551,7 +1547,6 @@ async def new_form(request: Request):
               </label>
               <label>
                 <div class='field-box'>
-                  <div class='field-icon'>⏱️</div>
                   <div class='field-stack'>
                     <span class='field-label'>プレイ時間</span>
                     <input name='play_time' placeholder='例：4〜5時間' required>
@@ -1586,18 +1581,16 @@ async def new_form(request: Request):
           </div>
 
           <div class='form-section'>
-            <div class='form-section-title'>募集内容</div>
+            
 
             <label class='field'>
               <div class='field-box tall'>
-                <div class='field-icon'>📝</div>
                 <textarea name='description' placeholder='シナリオ概要を入力' required></textarea>
               </div>
             </label>
 
             <label class='field' style='margin-top:12px'>
               <div class='field-box'>
-                <div class='field-icon'>🖼️</div>
                 <div class='field-stack'>
                   <span class='field-label'>関連画像（任意）</span>
                   <input type='file' name='image' accept='image/*'>
@@ -1607,7 +1600,6 @@ async def new_form(request: Request):
 
             <label class='field' style='margin-top:12px'>
               <div class='field-box tall'>
-                <div class='field-icon'>📌</div>
                 <textarea name='guide_message' placeholder='卓成立時の案内文（任意）&#10;事前準備・キャラクター作成など'></textarea>
               </div>
             </label>
@@ -1619,7 +1611,6 @@ async def new_form(request: Request):
             <div class='field-row'>
               <label>
                 <div class='field-box'>
-                  <div class='field-icon'>🕘</div>
                   <div class='field-stack'>
                     <span class='field-label'>開始時間</span>
                     <input type='time' name='start_time' value='21:00' required>
@@ -1628,9 +1619,8 @@ async def new_form(request: Request):
               </label>
               <label>
                 <div class='field-box'>
-                  <div class='field-icon'>📅</div>
                   <div class='field-stack'>
-                    <span class='field-label'>回答期限（21:00）</span>
+                    <span class='field-label'>回答期限</span>
                     <input type='date' name='deadline_date' value='{default_deadline}' required>
                   </div>
                 </div>
@@ -1638,16 +1628,13 @@ async def new_form(request: Request):
             </div>
 
             <div class='date-heading'>開催候補日を選択（今月と来月末まで）</div>
-            <div class='muted small' style='margin:0 0 10px 2px'>
-              GMが開催できる日だけタップしてください。
-            </div>
 
             <input type='hidden' id='gm_dates' name='gm_dates'>
             <div class='date-scroll'><div class='grid'>{day_html}</div></div>
 
             <div class='legend'>
               <span><b style='color:#22c55e'>○</b> 開催できる</span>
-              <span><b>-</b> 未回答 / 開催できない</span>
+              <span><b>-</b> 開催できない</span>
             </div>
           </div>
 
@@ -1820,7 +1807,6 @@ async def recruitment_page(rid: int, request: Request):
 
           <label class='field' style='margin-top:18px'>
             <div class='field-box tall'>
-              <div class='field-icon'>💬</div>
               <textarea name='comment' rows='3' placeholder='日程についてGMへコメント（任意）'>{esc(comment)}</textarea>
             </div>
           </label>
