@@ -1,0 +1,6 @@
+discord.py
+fastapi
+uvicorn
+python-multipart
+httpx
+itsdangerous
