@@ -141,6 +141,7 @@ def init_db():
                 recruitment_channel_id TEXT,
                 waiting_channel_id TEXT,
                 deadline_notified INTEGER NOT NULL DEFAULT 0,
+                schedule_pending INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(parent_id) REFERENCES recruitments(id)
             );
@@ -224,15 +225,28 @@ def init_db():
 init_db()
 
 
-def ensure_availability_notification_column():
+def ensure_recruitment_columns():
     with db() as c:
-        cols = {r["name"] for r in c.execute("PRAGMA table_info(recruitments)").fetchall()}
+        cols = {
+            r["name"]
+            for r in c.execute(
+                "PRAGMA table_info(recruitments)"
+            ).fetchall()
+        }
+
         if "availability_notified" not in cols:
             c.execute(
-                "ALTER TABLE recruitments ADD COLUMN availability_notified INTEGER NOT NULL DEFAULT 0"
+                "ALTER TABLE recruitments "
+                "ADD COLUMN availability_notified INTEGER NOT NULL DEFAULT 0"
             )
 
-ensure_availability_notification_column()
+        if "schedule_pending" not in cols:
+            c.execute(
+                "ALTER TABLE recruitments "
+                "ADD COLUMN schedule_pending INTEGER NOT NULL DEFAULT 0"
+            )
+
+ensure_recruitment_columns()
 
 
 
@@ -1382,12 +1396,25 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
     )
     with db() as c:
         c.execute("UPDATE recruitments SET waiting_channel_id=? WHERE id=?", (str(ch.id), rid))
-    deadline = datetime.fromisoformat(r["deadline"]).astimezone(JST)
-    await ch.send(
-        f'🎲 **「{r["scenario_name"]}」日程調整**\n\n'
-        f'回答期限：**{deadline.strftime("%Y/%m/%d 21:00")}**\n'
-        f'参加リアクションを押した方は、こちらから回答してください。\n{BASE_URL}/r/{rid}'
-    )
+    if int(r["schedule_pending"] or 0):
+        await ch.send(
+            f'🎲 **「{r["scenario_name"]}」募集開始**\n\n'
+            '日程調整は後日行われます。\n'
+            '参加リアクションを押した方はこちらのチャンネルへ追加されます。\n'
+            'GMからの日程調整開始の案内をお待ちください。'
+        )
+    else:
+        deadline = datetime.fromisoformat(
+            r["deadline"]
+        ).astimezone(JST)
+
+        await ch.send(
+            f'🎲 **「{r["scenario_name"]}」日程調整**\n\n'
+            f'回答期限：**{deadline.strftime("%Y/%m/%d 21:00")}**\n'
+            '参加リアクションを押した方は、こちらから回答してください。\n'
+            f'{BASE_URL}/r/{rid}'
+        )
+
     return ch
 
 
@@ -1430,14 +1457,24 @@ async def post_recruitment(rid: int):
 
     gm_name = user_display(str(r["gm_discord_id"]))
 
+    if int(r["schedule_pending"] or 0):
+        closing = (
+            '参加希望の方は「参加」リアクションを押してください！\n'
+            '日程調整は後日行います。'
+        )
+    else:
+        closing = (
+            '参加希望の方は「参加」リアクションを押して'
+            '日程調整への回答をお願いします！'
+        )
+
     header = (
         f'## 『{r["scenario_name"]}』\n'
         f'GM：**{gm_name}**\n'
         f'募集人数：**{player_text}人**\n'
         f'プレイ時間：**{r["play_time"]}**\n\n'
         f'{r["description"]}\n\n'
-        '参加希望の方は「参加」リアクションを押して'
-        '日程調整への回答をお願いします！'
+        f'{closing}'
     )
 
     chunks = split_text(header)
@@ -2151,7 +2188,16 @@ async def new_form(request: Request):
             </label>
           </div>
 
-          <div class='form-section'>
+          <label class='checkbox-row' style='margin-top:18px'>
+            <input type='checkbox'
+                   id='schedule_later'
+                   name='schedule_later'
+                   value='1'
+                   onchange='toggleScheduleLater()'>
+            日程募集は後日行う
+          </label>
+
+          <div id='scheduleFields' class='form-section'>
             <div class='form-section-title'>日程調整</div>
 
             <div class='field-row'>
@@ -2194,6 +2240,18 @@ async def new_form(request: Request):
           document.getElementById('fixed_players').disabled=checked;
         }}
 
+        function toggleScheduleLater(){{
+          const checked=document.getElementById('schedule_later').checked;
+          const fields=document.getElementById('scheduleFields');
+          const deadline=document.querySelector('[name="deadline_date"]');
+
+          fields.style.display=checked?'none':'block';
+
+          if(deadline){{
+            deadline.required=!checked;
+          }}
+        }}
+
         let selected=[];
         function toggleGM(el){{
           const d=el.dataset.date;
@@ -2223,7 +2281,8 @@ async def new_submit(
     game_type: str = Form(...), scenario_name: str = Form(...), play_time: str = Form(...),
     description: str = Form(...), guide_message: str = Form(""), variable_players: Optional[str] = Form(None),
     fixed_players: int = Form(4), min_players: int = Form(2), max_players: int = Form(4),
-    start_time: str = Form("21:00"), deadline_date: str = Form(...), gm_dates: str = Form(...),
+    start_time: str = Form("21:00"), deadline_date: str = Form(""), gm_dates: str = Form(""),
+    schedule_later: Optional[str] = Form(None),
     images: list[UploadFile] = File(default=[]),
 ):
     uid = request.session.get("user_id")
@@ -2237,10 +2296,33 @@ async def new_submit(
         var = 0
     if mn < 1 or mx < mn:
         raise HTTPException(400, "募集人数が不正です")
-    dates = sorted({d for d in gm_dates.split(",") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)})
-    if not dates:
-        raise HTTPException(400, "開催可能日を1日以上選んでください")
-    deadline = datetime.fromisoformat(deadline_date + "T21:00:00").replace(tzinfo=JST)
+    pending_schedule = bool(schedule_later)
+
+    dates = sorted({
+        d for d in gm_dates.split(",")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)
+    })
+
+    if not pending_schedule and not dates:
+        raise HTTPException(
+            400,
+            "開催可能日を1日以上選んでください"
+        )
+
+    if not deadline_date:
+        deadline_date = (
+            now_jst().date() + timedelta(days=7)
+        ).isoformat()
+
+    deadline = datetime.fromisoformat(
+        deadline_date + "T21:00:00"
+    ).replace(tzinfo=JST)
+
+    initial_status = (
+        "SCHEDULE_PENDING"
+        if pending_schedule
+        else "RECRUITING"
+    )
     saved_images = []
     uploads = [x for x in (images or []) if x and x.filename]
     if len(uploads) > 10:
@@ -2268,9 +2350,30 @@ async def new_submit(
     image_path = saved_images[0] if saved_images else None
     with db() as c:
         cur = c.execute(
-            """INSERT INTO recruitments(game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,created_at)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (game_type, scenario_name.strip(), str(uid), mn, mx, var, play_time.strip(), description.strip(), guide_message.strip(), image_path, start_time, deadline.isoformat(), "RECRUITING", iso_now()),
+            """INSERT INTO recruitments(
+                   game_type,scenario_name,gm_discord_id,
+                   min_players,max_players,variable_players,
+                   play_time,description,guide_message,image_path,
+                   start_time,deadline,status,schedule_pending,created_at
+               )
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                game_type,
+                scenario_name.strip(),
+                str(uid),
+                mn,
+                mx,
+                var,
+                play_time.strip(),
+                description.strip(),
+                guide_message.strip(),
+                image_path,
+                start_time,
+                deadline.isoformat(),
+                initial_status,
+                1 if pending_schedule else 0,
+                iso_now(),
+            ),
         )
         rid = cur.lastrowid
         c.executemany("INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)", [(rid, d) for d in dates])
@@ -2520,6 +2623,9 @@ async def recruitment_page(rid: int, request: Request):
     participant = is_active_member(rid, uid, "participant")
     spectator = is_active_member(rid, uid, "spectator")
     dates = get_gm_dates(rid)
+    schedule_pending = bool(
+        int(r["schedule_pending"] or 0)
+    )
 
     with db() as c:
         my_answers = {
@@ -2582,7 +2688,11 @@ async def recruitment_page(rid: int, request: Request):
     available = any(len(x["yes"]) >= int(r["min_players"]) for x in rows)
 
     deadline_dt = datetime.fromisoformat(r["deadline"])
-    deadline_label = deadline_dt.strftime("%Y-%m-%d")
+    deadline_label = (
+        "未設定"
+        if schedule_pending
+        else deadline_dt.strftime("%Y-%m-%d")
+    )
     answer_url = f"{BASE_URL}/r/{rid}"
 
     # --------------------------------------------------------
@@ -2635,7 +2745,25 @@ async def recruitment_page(rid: int, request: Request):
 
     schedule_block = ""
 
-    if participant:
+    if schedule_pending:
+        if gm:
+            pending_note = (
+                "<div class='viewer-note'>"
+                "現在は参加者だけを募集しています。"
+                "日程を決める準備ができたら「日程調整を開始」から設定してください。"
+                "</div>"
+            )
+        else:
+            pending_note = (
+                "<div class='viewer-note'>"
+                "日程調整は後日行われます。"
+                "GMからの案内をお待ちください。"
+                "</div>"
+            )
+
+        schedule_block = pending_note
+
+    elif participant:
         schedule_block = f"""
         <form class='all-no-form' method='post' action='/r/{rid}/all-unavailable'
               onsubmit="return confirm('すべての日程を参加不可にしますか？')">
@@ -2726,18 +2854,28 @@ async def recruitment_page(rid: int, request: Request):
     )
 
     gm_buttons = ""
+
     if gm:
-        gm_buttons = (
-            f"<div class='gm-actions'>"
-            f"<a class='btn green' href='/r/{rid}/decide'>開催日を決定</a>"
-            f"<a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a>"
-            f"</div>"
-        )
+        if schedule_pending:
+            gm_buttons = (
+                f"<div class='gm-actions'>"
+                f"<a class='btn green' href='/r/{rid}/schedule/start'>"
+                "日程調整を開始"
+                "</a>"
+                "</div>"
+            )
+        else:
+            gm_buttons = (
+                f"<div class='gm-actions'>"
+                f"<a class='btn green' href='/r/{rid}/decide'>開催日を決定</a>"
+                f"<a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a>"
+                f"</div>"
+            )
 
     detail_cls = "detail-head available" if available else "detail-head"
     available_label = (
         "<div class='detail-available-label'>● 開催可能な日程があります</div>"
-        if available else ""
+        if available and not schedule_pending else ""
     )
 
     return page(
@@ -2920,6 +3058,270 @@ async def decide_submit(request: Request, rid: int, event_date: str = Form(...),
         log_error(f"decide_submit rid={rid}", e)
         return page("Discordエラー", "<div class='card'><p class='warn'>Discord側でエラーが発生し、卓の作成に失敗しました。権限やチャンネル設定を確認するか、再度お試しください。詳細はサーバーログをご確認ください。</p></div>", request)
     return page("卓成立", f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} {round_no}陣が成立しました！</h2><p>{event_date} {esc(r['start_time'])}〜</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>", request)
+
+
+
+@app.get("/r/{rid}/schedule/start", response_class=HTMLResponse)
+async def schedule_start_form(rid: int, request: Request):
+    uid = request.session.get("user_id")
+
+    if not uid:
+        return RedirectResponse(
+            f"/login?next=/r/{rid}/schedule/start"
+        )
+
+    r = get_recruitment(rid)
+
+    if (
+        not r
+        or str(uid) != str(r["gm_discord_id"])
+    ):
+        raise HTTPException(403)
+
+    if not int(r["schedule_pending"] or 0):
+        return RedirectResponse(
+            f"/r/{rid}/reschedule",
+            status_code=303,
+        )
+
+    default_deadline = (
+        now_jst().date() + timedelta(days=7)
+    ).isoformat()
+
+    weekday_jp = [
+        "月", "火", "水", "木", "金", "土", "日"
+    ]
+
+    cards = []
+
+    for ds in month_dates():
+        d = date.fromisoformat(ds)
+        label = (
+            f"{d.month}/{d.day}"
+            f"({weekday_jp[d.weekday()]})"
+        )
+
+        cards.append(
+            f'<div class="day" '
+            f'data-date="{ds}" '
+            f'onclick="toggleGM(this)">'
+            f'<span>{label}</span>'
+            f'<span class="state">-</span>'
+            f'</div>'
+        )
+
+    return page(
+        "日程調整を開始",
+        f"""
+        <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
+        <div class='section-title'>日程調整を開始</div>
+
+        <form class='form-shell'
+              method='post'
+              action='/r/{rid}/schedule/start'>
+          {csrf_field(request)}
+
+          <div class='form-section compact'>
+            <div class='field-row'>
+              <label>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>開始時間</span>
+                    <input type='time'
+                           name='start_time'
+                           value='{esc(r["start_time"] or "21:00")}'
+                           required>
+                  </div>
+                </div>
+              </label>
+
+              <label>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>回答期限</span>
+                    <input type='date'
+                           name='deadline_date'
+                           value='{default_deadline}'
+                           required>
+                  </div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class='create-date-heading'>
+            開催候補日を選択（今月と来月末まで）
+          </div>
+
+          <input type='hidden'
+                 id='gm_dates'
+                 name='gm_dates'>
+
+          <div class='date-scroll'>
+            <div class='grid'>
+              {''.join(cards)}
+            </div>
+          </div>
+
+          <div class='legend'>
+            <span>
+              <b style='color:#22c55e'>○</b>
+              開催できる
+            </span>
+            <span>
+              <b>-</b>
+              開催できない
+            </span>
+          </div>
+
+          <button class='submit-btn' type='submit'>
+            日程調整を開始する
+          </button>
+        </form>
+
+        <script>
+        let selected=[];
+
+        function toggleGM(el){{
+          const d=el.dataset.date;
+          const state=el.querySelector('.state');
+
+          if(selected.includes(d)){{
+            selected=selected.filter(x=>x!==d);
+            el.classList.remove('yes');
+            state.textContent='-';
+          }}else{{
+            selected.push(d);
+            el.classList.add('yes');
+            state.textContent='○';
+          }}
+
+          document.getElementById('gm_dates').value=
+            selected.join(',');
+        }}
+        </script>
+        """,
+        request,
+    )
+
+
+@app.post("/r/{rid}/schedule/start")
+async def schedule_start_submit(
+    rid: int,
+    request: Request,
+    start_time: str = Form(...),
+    deadline_date: str = Form(...),
+    gm_dates: str = Form(...),
+):
+    uid = require_login(request)
+    await require_csrf(request)
+
+    r = get_recruitment(rid)
+
+    if (
+        not r
+        or str(uid) != str(r["gm_discord_id"])
+    ):
+        raise HTTPException(403)
+
+    if not int(r["schedule_pending"] or 0):
+        raise HTTPException(
+            400,
+            "この卓の日程調整は既に開始されています"
+        )
+
+    dates = sorted({
+        d
+        for d in gm_dates.split(",")
+        if re.fullmatch(
+            r"\d{4}-\d{2}-\d{2}",
+            d,
+        )
+    })
+
+    if not dates:
+        raise HTTPException(
+            400,
+            "開催可能日を1日以上選択してください"
+        )
+
+    deadline = datetime.fromisoformat(
+        deadline_date + "T21:00:00"
+    ).replace(tzinfo=JST)
+
+    with db() as c:
+        c.execute(
+            "DELETE FROM gm_dates "
+            "WHERE recruitment_id=?",
+            (rid,),
+        )
+
+        c.executemany(
+            "INSERT INTO gm_dates("
+            "recruitment_id,event_date"
+            ") VALUES(?,?)",
+            [(rid, d) for d in dates],
+        )
+
+        c.execute(
+            """UPDATE recruitments
+               SET start_time=?,
+                   deadline=?,
+                   status='RECRUITING',
+                   schedule_pending=0,
+                   deadline_notified=0,
+                   availability_notified=0
+               WHERE id=?""",
+            (
+                start_time,
+                deadline.isoformat(),
+                rid,
+            ),
+        )
+
+    # 既存の日程調整チャンネルへ案内
+    guild = bot.get_guild(GUILD_ID)
+    channel = None
+
+    updated = get_recruitment(rid)
+
+    if guild and updated["waiting_channel_id"]:
+        channel_id = int(
+            updated["waiting_channel_id"]
+        )
+
+        channel = guild.get_channel(channel_id)
+
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(
+                    channel_id
+                )
+            except Exception:
+                channel = None
+
+    # 万一チャンネルが消えていた場合だけ再作成
+    if channel is None:
+        channel = await create_waiting_channel(rid)
+
+    await channel.send(
+        "## 📅 日程調整を開始しました\n\n"
+        f"開始時間：**{start_time}〜**\n"
+        f"回答期限：**{deadline_date} 21:00**\n\n"
+        "以下のリンクから日程を回答してください。\n"
+        f"{BASE_URL}/r/{rid}"
+    )
+
+    print(
+        f"[SCHEDULE START] rid={rid} "
+        f"dates={len(dates)}",
+        flush=True,
+    )
+
+    return RedirectResponse(
+        f"/r/{rid}",
+        status_code=303,
+    )
 
 
 @app.get("/r/{rid}/reschedule", response_class=HTMLResponse)
