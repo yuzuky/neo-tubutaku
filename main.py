@@ -365,7 +365,170 @@ def log_error(context: str, e: Exception) -> None:
 
 
 CSS = """
-:root{--bg:#111827;--card:#1f2937;--line:#374151;--text:#f9fafb;--muted:#9ca3af;--accent:#8b5cf6;--green:#22c55e;--yellow:#eab308;--red:#ef4444}*{box-sizing:border-box}body{margin:0;background:linear-gradient(160deg,#111827,#1f1833);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}.wrap{max-width:920px;margin:auto;padding:24px}.card{background:rgba(31,41,55,.94);border:1px solid var(--line);border-radius:18px;padding:20px;margin:16px 0;box-shadow:0 10px 30px #0004}h1,h2,h3{margin-top:0}a{color:#c4b5fd}.btn,button{background:var(--accent);color:white;border:0;border-radius:10px;padding:11px 16px;font-weight:700;cursor:pointer;text-decoration:none;display:inline-block}.btn.alt{background:#374151}.btn.green{background:var(--green)}input,textarea,select{width:100%;padding:11px;border-radius:10px;border:1px solid #4b5563;background:#111827;color:white;margin-top:6px}label{display:block;margin:14px 0;font-weight:650}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px}.day{padding:10px;border:1px solid #4b5563;border-radius:10px;background:#111827;text-align:center;cursor:pointer}.day.yes{background:#14532d;border-color:#22c55e}.day.maybe{background:#713f12;border-color:#eab308}.muted{color:var(--muted)}table{border-collapse:collapse;width:100%;overflow:auto}th,td{padding:9px;border-bottom:1px solid var(--line);text-align:center}.ok{color:#4ade80;font-weight:800}.maybe{color:#facc15;font-weight:800}.warn{color:#f87171}.flash{padding:12px;background:#312e81;border-radius:10px;margin:10px 0}.top{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}.pill{display:inline-block;padding:4px 9px;border-radius:99px;background:#374151;margin:2px}.scroll{overflow:auto}.small{font-size:.9rem}.candidate{border:1px solid #4b5563;border-radius:12px;padding:14px;margin:10px 0}.candidate.good{border-color:#22c55e}.members label{margin:7px 0;font-weight:400}hr{border:0;border-top:1px solid #374151;margin:20px 0}
+:root{
+  --bg:#090b10;
+  --panel:#11141b;
+  --panel2:#171b24;
+  --line:#252b37;
+  --text:#f7f8fb;
+  --muted:#9199aa;
+  --accent:#8b5cf6;
+  --accent2:#6d4aff;
+  --green:#32d583;
+  --yellow:#fdb022;
+  --red:#f97066;
+  --shadow:0 20px 60px rgba(0,0,0,.32);
+}
+*{box-sizing:border-box}
+html{background:var(--bg)}
+body{
+  margin:0;
+  min-height:100vh;
+  color:var(--text);
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;
+  background:
+    radial-gradient(circle at 15% 0%,rgba(139,92,246,.16),transparent 34rem),
+    radial-gradient(circle at 90% 15%,rgba(56,189,248,.08),transparent 28rem),
+    var(--bg);
+}
+body:before{
+  content:"";
+  position:fixed;
+  inset:0;
+  pointer-events:none;
+  opacity:.22;
+  background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
+  background-size:32px 32px;
+}
+.wrap{position:relative;max-width:1040px;margin:auto;padding:28px 22px 70px}
+.top{
+  position:sticky;
+  top:14px;
+  z-index:20;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:14px;
+  flex-wrap:wrap;
+  padding:13px 16px;
+  margin-bottom:28px;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:18px;
+  background:rgba(13,16,23,.76);
+  backdrop-filter:blur(18px);
+  box-shadow:0 10px 35px rgba(0,0,0,.28);
+}
+.top h1{font-size:1.12rem;margin:0;letter-spacing:.02em}
+.card{
+  position:relative;
+  overflow:hidden;
+  background:linear-gradient(145deg,rgba(24,28,38,.97),rgba(15,18,25,.97));
+  border:1px solid rgba(255,255,255,.075);
+  border-radius:24px;
+  padding:26px;
+  margin:18px 0;
+  box-shadow:var(--shadow);
+}
+.card:before{
+  content:"";
+  position:absolute;
+  width:180px;height:180px;
+  border-radius:50%;
+  right:-90px;top:-110px;
+  background:rgba(139,92,246,.10);
+  filter:blur(6px);
+}
+h1,h2,h3{margin-top:0;letter-spacing:-.025em}
+h2{font-size:1.55rem}
+h3{font-size:1.05rem;color:#e8eaf0}
+p{line-height:1.75}
+a{color:#cfc3ff}
+.btn,button{
+  appearance:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:white;
+  border:1px solid rgba(255,255,255,.08);
+  border-radius:13px;
+  padding:11px 17px;
+  font-weight:750;
+  cursor:pointer;
+  text-decoration:none;
+  display:inline-block;
+  transition:.18s ease;
+  box-shadow:0 8px 20px rgba(109,74,255,.22);
+}
+.btn:hover,button:hover{transform:translateY(-1px);filter:brightness(1.06)}
+.btn.alt{background:#202532;box-shadow:none;color:#e8eaf0}
+.btn.green{background:linear-gradient(135deg,#12b76a,#039855)}
+input,textarea,select{
+  width:100%;
+  padding:13px 14px;
+  border-radius:13px;
+  border:1px solid #303747;
+  background:#0d1016;
+  color:white;
+  margin-top:7px;
+  outline:none;
+  transition:.16s ease;
+}
+input:focus,textarea:focus,select:focus{border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,.13)}
+textarea{resize:vertical}
+label{display:block;margin:17px 0;font-weight:700;color:#e3e6ed}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.day{
+  min-height:68px;
+  padding:12px 9px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  border:1px solid #303747;
+  border-radius:15px;
+  background:#0c0f15;
+  text-align:center;
+  cursor:pointer;
+  transition:.16s ease;
+}
+.day:hover{transform:translateY(-2px);border-color:#565f72}
+.day.yes{background:rgba(18,183,106,.15);border-color:#12b76a;box-shadow:inset 0 0 0 1px rgba(18,183,106,.08)}
+.day.maybe{background:rgba(253,176,34,.13);border-color:#fdb022}
+.muted{color:var(--muted)}
+table{border-collapse:separate;border-spacing:0;width:100%;overflow:hidden}
+th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:center;background:rgba(255,255,255,.01)}
+th{font-size:.86rem;color:#b8becb}
+tr:last-child td,tr:last-child th{border-bottom:0}
+.ok{color:#47e39a;font-weight:850}
+.maybe{color:#ffc34d;font-weight:850}
+.warn{color:#ff8b82}
+.flash{padding:13px 15px;background:rgba(139,92,246,.14);border:1px solid rgba(139,92,246,.28);border-radius:14px;margin:12px 0}
+.pill{
+  display:inline-flex;
+  align-items:center;
+  padding:5px 10px;
+  border-radius:999px;
+  background:#222733;
+  border:1px solid #303747;
+  color:#cbd0db;
+  margin:2px;
+  font-size:.82rem;
+}
+.scroll{overflow:auto;border:1px solid var(--line);border-radius:16px}
+.small{font-size:.88rem}
+.candidate{
+  border:1px solid #303747;
+  border-radius:17px;
+  padding:16px;
+  margin:12px 0;
+  background:#0e1118;
+}
+.candidate.good{border-color:rgba(50,213,131,.55)}
+.members label{margin:8px 0;font-weight:500}
+hr{border:0;border-top:1px solid var(--line);margin:22px 0}
+@media(max-width:620px){
+  .wrap{padding:15px 13px 50px}
+  .top{top:8px;border-radius:15px}
+  .card{border-radius:19px;padding:19px}
+  h2{font-size:1.28rem}
+}
 """
 
 
@@ -375,7 +538,7 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
         nav = f'<a class="btn alt" href="/">ホーム</a> <a class="btn alt" href="/logout">ログアウト</a>'
     else:
         nav = '<a class="btn" href="/login">Discordでログイン</a>'
-    return HTMLResponse(f"""<!doctype html><html lang='ja'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{esc(title)} - つぶ卓</title><style>{CSS}</style></head><body><div class='wrap'><div class='top'><h1>🎲 つぶ卓</h1><div>{nav}</div></div>{body}</div></body></html>""")
+    return HTMLResponse(f"""<!doctype html><html lang='ja'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#090b10'><title>{esc(title)} - つぶ卓</title><style>{CSS}</style></head><body><div class='wrap'><div class='top'><h1>🎲 つぶ卓 <span style="color:#7d8597;font-size:.78rem;font-weight:600">Schedule Hub</span></h1><div>{nav}</div></div>{body}</div></body></html>""")
 
 
 # ---------------------- Discord Bot ----------------------
@@ -486,63 +649,174 @@ async def post_recruitment(rid: int):
 async def set_waiting_access(rid: int, uid: str, allow: bool):
     r = get_recruitment(rid)
     if not r or not r["waiting_channel_id"]:
-        return
+        raise RuntimeError(f"待機チャンネルが未設定です rid={rid}")
     guild = bot.get_guild(GUILD_ID)
-    channel = guild.get_channel(int(r["waiting_channel_id"])) if guild else None
-    if not guild or not channel:
-        return
+    if not guild:
+        raise RuntimeError("Guildが見つかりません")
+    channel = guild.get_channel(int(r["waiting_channel_id"]))
+    if not channel:
+        try:
+            channel = await guild.fetch_channel(int(r["waiting_channel_id"]))
+        except discord.HTTPException:
+            channel = None
+    if not channel:
+        raise RuntimeError(f"待機チャンネルが見つかりません id={r['waiting_channel_id']}")
     member = await fetch_member(guild, uid)
     if not member:
-        return
+        raise RuntimeError(f"Discordメンバーが見つかりません user={uid}")
     if allow:
-        await channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True, reason="つぶ卓 リアクション参加")
+        await channel.set_permissions(
+            member,
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            reason="つぶ卓 リアクション参加",
+        )
     else:
-        await channel.set_permissions(member, overwrite=None, reason="つぶ卓 リアクション取消")
+        await channel.set_permissions(
+            member,
+            overwrite=None,
+            reason="つぶ卓 リアクション取消",
+        )
 
 
 async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
-    if payload.user_id == (bot.user.id if bot.user else 0) or payload.guild_id != GUILD_ID:
-        return
-    eid = payload.emoji.id
-    if eid not in (JOIN_EMOJI_ID, WATCH_EMOJI_ID):
-        return
-    with db() as c:
-        r = c.execute("SELECT * FROM recruitments WHERE recruitment_message_id=?", (str(payload.message_id),)).fetchone()
-    if not r:
-        return
-    kind = "participant" if eid == JOIN_EMOJI_ID else "spectator"
-    uid = str(payload.user_id)
-    guild = bot.get_guild(GUILD_ID)
-    member = await fetch_member(guild, uid) if guild else None
-    if member:
+    action = "ADD" if added else "REMOVE"
+    try:
+        if payload.user_id == (bot.user.id if bot.user else 0):
+            return
+        if payload.guild_id != GUILD_ID:
+            return
+
+        eid = payload.emoji.id
+        print(
+            f"[REACTION:{action}] message={payload.message_id} user={payload.user_id} "
+            f"emoji={eid} guild={payload.guild_id}",
+            flush=True,
+        )
+
+        if eid not in (JOIN_EMOJI_ID, WATCH_EMOJI_ID):
+            print(f"[REACTION:{action}] ignored: emoji id mismatch", flush=True)
+            return
+
+        with db() as c:
+            r = c.execute(
+                "SELECT * FROM recruitments WHERE recruitment_message_id=?",
+                (str(payload.message_id),),
+            ).fetchone()
+
+        if not r:
+            print(
+                f"[REACTION:{action}] recruitment not found for message={payload.message_id}",
+                flush=True,
+            )
+            return
+
+        kind = "participant" if eid == JOIN_EMOJI_ID else "spectator"
+        uid = str(payload.user_id)
+        guild = bot.get_guild(GUILD_ID)
+        if not guild:
+            print(f"[REACTION:{action}] ERROR: guild cache not found", flush=True)
+            return
+
+        # リアクション追加時はGatewayからMemberが渡されるので、それを最優先で使用。
+        member = getattr(payload, "member", None)
+        if member is None:
+            member = await fetch_member(guild, uid)
+
+        if not member:
+            print(
+                f"[REACTION:{action}] ERROR: member not found user={uid}. "
+                f"Server Members Intent / bot membership を確認",
+                flush=True,
+            )
+            return
+
+        print(
+            f"[REACTION:{action}] member found: {member} ({member.id}) / type={kind}",
+            flush=True,
+        )
+
         with db() as c:
             c.execute(
-                "INSERT INTO users(discord_id,username,display_name,avatar_url,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(discord_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,avatar_url=excluded.avatar_url,updated_at=excluded.updated_at",
+                """INSERT INTO users(discord_id,username,display_name,avatar_url,updated_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(discord_id) DO UPDATE SET
+                     username=excluded.username,
+                     display_name=excluded.display_name,
+                     avatar_url=excluded.avatar_url,
+                     updated_at=excluded.updated_at""",
                 (uid, member.name, member.display_name, str(member.display_avatar.url), iso_now()),
             )
-    if added:
-        if not member:
-            # ギルドに存在しないユーザーは登録しない
-            return
-        with db() as c:
-            c.execute(
-                "INSERT INTO members(recruitment_id,discord_id,member_type,active,joined_at) VALUES(?,?,?,?,?) ON CONFLICT(recruitment_id,discord_id,member_type) DO UPDATE SET active=1,joined_at=excluded.joined_at",
-                (r["id"], uid, kind, 1, iso_now()),
+
+        if added:
+            with db() as c:
+                c.execute(
+                    """INSERT INTO members(recruitment_id,discord_id,member_type,active,joined_at)
+                       VALUES(?,?,?,?,?)
+                       ON CONFLICT(recruitment_id,discord_id,member_type)
+                       DO UPDATE SET active=1,joined_at=excluded.joined_at""",
+                    (r["id"], uid, kind, 1, iso_now()),
+                )
+
+            print(
+                f"[REACTION:{action}] DB member activated rid={r['id']} user={uid}",
+                flush=True,
             )
-        await set_waiting_access(r["id"], uid, True)
-        if r["waiting_channel_id"] and guild:
-            ch = guild.get_channel(int(r["waiting_channel_id"]))
-            if ch:
-                label = "参加" if kind == "participant" else "観戦希望"
-                await ch.send(f'<@{uid}> が「{label}」リアクションを押しました。')
-    else:
-        with db() as c:
-            c.execute("UPDATE members SET active=0 WHERE recruitment_id=? AND discord_id=? AND member_type=?", (r["id"], uid, kind))
-            if kind == "participant":
-                c.execute("DELETE FROM answers WHERE recruitment_id=? AND discord_id=?", (r["id"], uid))
-        # もう片方のリアクションが残っている場合はアクセス維持
-        still = is_active_member(r["id"], uid)
-        await set_waiting_access(r["id"], uid, still)
+
+            await set_waiting_access(r["id"], uid, True)
+            print(
+                f"[REACTION:{action}] waiting channel permission granted user={uid}",
+                flush=True,
+            )
+
+            if r["waiting_channel_id"]:
+                ch = guild.get_channel(int(r["waiting_channel_id"]))
+                if ch:
+                    label = "参加" if kind == "participant" else "観戦希望"
+                    await ch.send(f'<@{uid}> が「{label}」リアクションを押しました。')
+                    print(
+                        f"[REACTION:{action}] notification sent channel={ch.id}",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"[REACTION:{action}] WARNING: waiting channel not found id={r['waiting_channel_id']}",
+                        flush=True,
+                    )
+
+        else:
+            with db() as c:
+                c.execute(
+                    "UPDATE members SET active=0 WHERE recruitment_id=? AND discord_id=? AND member_type=?",
+                    (r["id"], uid, kind),
+                )
+                if kind == "participant":
+                    c.execute(
+                        "DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",
+                        (r["id"], uid),
+                    )
+
+            # もう片方のリアクションが残っている場合はアクセス維持
+            still = is_active_member(r["id"], uid)
+            await set_waiting_access(r["id"], uid, still)
+            print(
+                f"[REACTION:{action}] deactivated user={uid}; channel_access={still}",
+                flush=True,
+            )
+
+    except discord.Forbidden as e:
+        print(
+            f"[REACTION:{action}] DISCORD FORBIDDEN: {e}. "
+            f"Botの「チャンネルの管理」と対象カテゴリー/チャンネル権限を確認してください。",
+            flush=True,
+        )
+    except Exception as e:
+        print(
+            f"[REACTION:{action}] ERROR {type(e).__name__}: {e}",
+            flush=True,
+        )
+        log_error(f"reaction_{action.lower()}", e)
 
 
 @bot.event
