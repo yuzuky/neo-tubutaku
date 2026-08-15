@@ -366,18 +366,21 @@ def log_error(context: str, e: Exception) -> None:
 
 CSS = """
 :root{
-  --bg:#090b10;
-  --panel:#11141b;
-  --panel2:#171b24;
-  --line:#252b37;
-  --text:#f7f8fb;
-  --muted:#9199aa;
-  --accent:#8b5cf6;
-  --accent2:#6d4aff;
-  --green:#32d583;
-  --yellow:#fdb022;
-  --red:#f97066;
-  --shadow:0 20px 60px rgba(0,0,0,.32);
+  --bg:#080c14;
+  --panel:#111722;
+  --panel2:#171e2a;
+  --panel3:#1c2431;
+  --line:#263142;
+  --text:#f7f9fc;
+  --muted:#8f9aae;
+  --muted2:#647086;
+  --purple:#8b5cf6;
+  --purple2:#a855f7;
+  --blue:#3b82f6;
+  --green:#22c55e;
+  --orange:#f59e0b;
+  --red:#ef4444;
+  --shadow:0 24px 70px rgba(0,0,0,.30);
 }
 *{box-sizing:border-box}
 html{background:var(--bg)}
@@ -387,158 +390,329 @@ body{
   color:var(--text);
   font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans JP",sans-serif;
   background:
-    radial-gradient(circle at 15% 0%,rgba(139,92,246,.16),transparent 34rem),
-    radial-gradient(circle at 90% 15%,rgba(56,189,248,.08),transparent 28rem),
-    var(--bg);
+    radial-gradient(circle at 50% -15%,rgba(85,74,255,.18),transparent 34rem),
+    linear-gradient(180deg,#090e17 0%,#070a11 100%);
 }
-body:before{
-  content:"";
-  position:fixed;
-  inset:0;
-  pointer-events:none;
-  opacity:.22;
-  background-image:linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px);
-  background-size:32px 32px;
-}
-.wrap{position:relative;max-width:1040px;margin:auto;padding:28px 22px 70px}
+a{color:inherit}
+button,input,textarea,select{font:inherit}
+.wrap{max-width:760px;margin:0 auto;padding:0 18px 70px}
 .top{
-  position:sticky;
-  top:14px;
-  z-index:20;
+  min-height:78px;
   display:flex;
-  justify-content:space-between;
   align-items:center;
+  justify-content:space-between;
   gap:14px;
-  flex-wrap:wrap;
-  padding:13px 16px;
-  margin-bottom:28px;
-  border:1px solid rgba(255,255,255,.08);
-  border-radius:18px;
-  background:rgba(13,16,23,.76);
-  backdrop-filter:blur(18px);
-  box-shadow:0 10px 35px rgba(0,0,0,.28);
+  border-bottom:1px solid rgba(255,255,255,.07);
+  margin:0 -18px 28px;
+  padding:0 24px;
 }
-.top h1{font-size:1.12rem;margin:0;letter-spacing:.02em}
-.card{
-  position:relative;
-  overflow:hidden;
-  background:linear-gradient(145deg,rgba(24,28,38,.97),rgba(15,18,25,.97));
-  border:1px solid rgba(255,255,255,.075);
-  border-radius:24px;
-  padding:26px;
-  margin:18px 0;
-  box-shadow:var(--shadow);
-}
-.card:before{
-  content:"";
-  position:absolute;
-  width:180px;height:180px;
-  border-radius:50%;
-  right:-90px;top:-110px;
-  background:rgba(139,92,246,.10);
-  filter:blur(6px);
-}
-h1,h2,h3{margin-top:0;letter-spacing:-.025em}
-h2{font-size:1.55rem}
-h3{font-size:1.05rem;color:#e8eaf0}
-p{line-height:1.75}
-a{color:#cfc3ff}
-.btn,button{
-  appearance:none;
-  background:linear-gradient(135deg,var(--accent),var(--accent2));
-  color:white;
-  border:1px solid rgba(255,255,255,.08);
-  border-radius:13px;
-  padding:11px 17px;
-  font-weight:750;
-  cursor:pointer;
+.brand{
+  font-weight:900;
+  font-size:1.78rem;
+  letter-spacing:-.08em;
   text-decoration:none;
-  display:inline-block;
+  white-space:nowrap;
+}
+.brand .b1{color:#4a8cff}
+.brand .b2{color:#ff5a49}
+.brand .b3{color:#f6aa1c}
+.brand .b4{color:#36c66b}
+.top-actions{display:flex;gap:8px;align-items:center}
+.icon-btn,.back-link{
+  border:1px solid var(--line);
+  color:#dce3ee;
+  background:#101722;
+  border-radius:12px;
+  padding:9px 12px;
+  text-decoration:none;
+  font-weight:700;
+}
+.back-link{display:inline-flex;align-items:center;gap:7px;margin-bottom:16px}
+.hero{
+  padding:18px 2px 20px;
+  text-align:center;
+}
+.hero-kicker{
+  color:#9d70ff;
+  font-size:.85rem;
+  font-weight:850;
+  letter-spacing:.13em;
+  margin-bottom:12px;
+}
+.hero h1{
+  margin:0;
+  font-size:clamp(2rem,7vw,3.25rem);
+  line-height:1.25;
+  letter-spacing:-.06em;
+}
+.hero p{color:var(--muted);margin:16px 0 0}
+.menu-stack{display:grid;gap:18px;margin-top:28px}
+.menu-card{
+  min-height:150px;
+  display:flex;
+  align-items:center;
+  gap:18px;
+  padding:24px;
+  border:1px solid var(--line);
+  border-radius:24px;
+  background:linear-gradient(145deg,#151c28,#101620);
+  text-decoration:none;
+  box-shadow:var(--shadow);
   transition:.18s ease;
-  box-shadow:0 8px 20px rgba(109,74,255,.22);
 }
-.btn:hover,button:hover{transform:translateY(-1px);filter:brightness(1.06)}
-.btn.alt{background:#202532;box-shadow:none;color:#e8eaf0}
-.btn.green{background:linear-gradient(135deg,#12b76a,#039855)}
-input,textarea,select{
+.menu-card:hover{transform:translateY(-2px);border-color:#3d4a60}
+.menu-card.primary{
+  background:linear-gradient(135deg,#6d4aff 0%,#9d4edd 100%);
+  border-color:rgba(255,255,255,.13);
+}
+.menu-icon{
+  width:56px;height:56px;
+  flex:0 0 56px;
+  border-radius:50%;
+  display:grid;place-items:center;
+  font-size:1.5rem;
+  background:rgba(255,255,255,.10);
+}
+.menu-title{font-size:1.35rem;font-weight:900;letter-spacing:-.03em}
+.menu-sub{color:#aeb7c7;font-size:.9rem;margin-top:6px}
+.primary .menu-sub{color:rgba(255,255,255,.72)}
+.chev{margin-left:auto;font-size:1.7rem;color:#bac3d1}
+.primary .chev{color:white}
+.info-card,.card{
+  background:linear-gradient(145deg,#141b26,#0f151e);
+  border:1px solid var(--line);
+  border-radius:22px;
+  padding:22px;
+  box-shadow:var(--shadow);
+  margin:20px 0;
+}
+.info-card{margin-top:24px}
+.info-card h3{color:#ae76ff;margin:0 0 7px}
+.section-title{
+  margin:18px 0 16px;
+  text-align:center;
+  font-size:1.4rem;
+  font-weight:900;
+  letter-spacing:-.035em;
+}
+.form-shell{padding-bottom:24px}
+.form-section{
+  margin:20px 0 30px;
+}
+.form-section-title{
+  color:#dce3ee;
+  font-size:.95rem;
+  font-weight:850;
+  margin:0 0 12px 4px;
+}
+.field,
+.field-row > label,
+.field-row > div{
+  display:block;
+  margin:0;
+}
+.field-box{
+  position:relative;
+  background:linear-gradient(145deg,#171e2a,#121823);
+  border:1px solid #293446;
+  border-radius:20px;
+  padding:7px 16px;
+  min-height:76px;
+  display:flex;
+  align-items:center;
+  gap:12px;
+}
+.field-box.tall{align-items:flex-start;padding-top:14px}
+.field-icon{
+  width:38px;height:38px;
+  flex:0 0 38px;
+  border-radius:12px;
+  display:grid;place-items:center;
+  background:rgba(139,92,246,.15);
+}
+.field-box input,
+.field-box textarea,
+.field-box select{
   width:100%;
-  padding:13px 14px;
-  border-radius:13px;
-  border:1px solid #303747;
-  background:#0d1016;
-  color:white;
-  margin-top:7px;
-  outline:none;
-  transition:.16s ease;
+  border:0;
+  outline:0;
+  background:transparent;
+  color:var(--text);
+  padding:12px 4px;
+  margin:0;
+  font-size:1rem;
 }
-input:focus,textarea:focus,select:focus{border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,.13)}
-textarea{resize:vertical}
-label{display:block;margin:17px 0;font-weight:700;color:#e3e6ed}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.field-box textarea{resize:vertical;min-height:110px}
+.field-box select{appearance:none}
+.field-box input::placeholder,
+.field-box textarea::placeholder{color:#778397}
+.field-label{
+  display:block;
+  color:#aab4c4;
+  font-size:.76rem;
+  font-weight:800;
+  margin:2px 0 -5px 4px;
+}
+.field-stack{width:100%}
+.field-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px}
+.checkbox-row{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  background:#121923;
+  border:1px solid #293446;
+  border-radius:15px;
+  padding:13px 15px;
+  margin-top:12px;
+  color:#d7deea;
+  font-weight:700;
+}
+.checkbox-row input{width:auto;margin:0;accent-color:#8b5cf6}
+input[type=file]{font-size:.85rem}
+.date-heading{
+  margin:28px 0 12px 2px;
+  color:#dce4ef;
+  font-size:.95rem;
+  font-weight:900;
+}
+.date-scroll{
+  max-height:410px;
+  overflow:auto;
+  padding:2px 3px 8px 0;
+  scrollbar-color:#667084 transparent;
+}
+.grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:10px;
+}
 .day{
-  min-height:68px;
-  padding:12px 9px;
+  min-height:105px;
+  border:1px solid #2a3546;
+  border-radius:15px;
+  background:linear-gradient(145deg,#171f2c,#121923);
+  color:#a9b3c3;
   display:flex;
   flex-direction:column;
   justify-content:center;
-  border:1px solid #303747;
-  border-radius:15px;
-  background:#0c0f15;
+  align-items:center;
   text-align:center;
+  padding:9px 6px;
   cursor:pointer;
   transition:.16s ease;
+  user-select:none;
+  font-weight:750;
 }
-.day:hover{transform:translateY(-2px);border-color:#565f72}
-.day.yes{background:rgba(18,183,106,.15);border-color:#12b76a;box-shadow:inset 0 0 0 1px rgba(18,183,106,.08)}
-.day.maybe{background:rgba(253,176,34,.13);border-color:#fdb022}
-.muted{color:var(--muted)}
-table{border-collapse:separate;border-spacing:0;width:100%;overflow:hidden}
-th,td{padding:12px 10px;border-bottom:1px solid var(--line);text-align:center;background:rgba(255,255,255,.01)}
-th{font-size:.86rem;color:#b8becb}
-tr:last-child td,tr:last-child th{border-bottom:0}
-.ok{color:#47e39a;font-weight:850}
-.maybe{color:#ffc34d;font-weight:850}
-.warn{color:#ff8b82}
-.flash{padding:13px 15px;background:rgba(139,92,246,.14);border:1px solid rgba(139,92,246,.28);border-radius:14px;margin:12px 0}
-.pill{
-  display:inline-flex;
-  align-items:center;
-  padding:5px 10px;
-  border-radius:999px;
-  background:#222733;
-  border:1px solid #303747;
-  color:#cbd0db;
-  margin:2px;
+.day:hover{transform:translateY(-1px);border-color:#4a586f}
+.day .state{
+  display:block;
+  margin-top:10px;
+  font-size:1.35rem;
+  line-height:1;
+}
+.day.yes{
+  background:rgba(34,197,94,.12);
+  border-color:#22c55e;
+  color:#61d88c;
+}
+.day.maybe{
+  background:rgba(245,158,11,.12);
+  border-color:#f59e0b;
+  color:#f5b74d;
+}
+.legend{
+  display:flex;
+  flex-wrap:wrap;
+  gap:14px;
+  color:#9ca7b8;
   font-size:.82rem;
+  margin:14px 2px 20px;
 }
-.scroll{overflow:auto;border:1px solid var(--line);border-radius:16px}
-.small{font-size:.88rem}
+.legend span{display:flex;align-items:center;gap:6px}
+.submit-btn,.btn,button{
+  border:0;
+  cursor:pointer;
+  color:white;
+  text-decoration:none;
+  font-weight:900;
+  border-radius:16px;
+  padding:15px 20px;
+  background:linear-gradient(135deg,#7447ee,#a13ddb);
+  box-shadow:0 12px 30px rgba(123,71,238,.24);
+  display:inline-block;
+}
+.submit-btn{width:100%;font-size:1.1rem;min-height:62px}
+.btn.alt{background:#18202c;box-shadow:none;border:1px solid #2b3749}
+.btn.green{background:linear-gradient(135deg,#12b76a,#039855)}
+.scroll{overflow:auto;border:1px solid var(--line);border-radius:15px}
+table{width:100%;border-collapse:collapse}
+th,td{padding:12px;border-bottom:1px solid var(--line);text-align:center}
+th{color:#96a2b5;font-size:.83rem}
+tr:last-child td{border-bottom:0}
+.pill{
+  display:inline-flex;padding:5px 9px;border-radius:999px;background:#202938;
+  color:#c6cfdd;font-size:.78rem;margin:2px
+}
+.muted{color:var(--muted)}
+.ok{color:#48dc86;font-weight:900}
+.maybe{color:#f6b64a;font-weight:900}
+.warn{color:#ff7e75}
 .candidate{
-  border:1px solid #303747;
-  border-radius:17px;
-  padding:16px;
-  margin:12px 0;
-  background:#0e1118;
+  border:1px solid #2c3748;border-radius:16px;padding:16px;margin:12px 0;background:#111823
 }
-.candidate.good{border-color:rgba(50,213,131,.55)}
-.members label{margin:8px 0;font-weight:500}
-hr{border:0;border-top:1px solid var(--line);margin:22px 0}
+.candidate.good{border-color:#259357}
+.members label{margin:8px 0;display:block}
+hr{border:0;border-top:1px solid var(--line);margin:24px 0}
+.mobile-only{display:none}
 @media(max-width:620px){
-  .wrap{padding:15px 13px 50px}
-  .top{top:8px;border-radius:15px}
-  .card{border-radius:19px;padding:19px}
-  h2{font-size:1.28rem}
+  .wrap{padding:0 14px 48px}
+  .top{margin:0 -14px 20px;padding:0 18px;min-height:70px}
+  .brand{font-size:1.55rem}
+  .hero{padding-top:18px}
+  .menu-card{min-height:132px;padding:20px;border-radius:20px}
+  .menu-icon{width:48px;height:48px;flex-basis:48px}
+  .menu-title{font-size:1.2rem}
+  .field-row{grid-template-columns:1fr 1fr}
+  .grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
+  .day{min-height:98px;font-size:.83rem}
+  .info-card,.card{padding:18px;border-radius:19px}
 }
 """
 
 
 def page(title: str, body: str, request: Optional[Request] = None) -> HTMLResponse:
-    nav = ""
-    if request and request.session.get("user_id"):
-        nav = f'<a class="btn alt" href="/">ホーム</a> <a class="btn alt" href="/logout">ログアウト</a>'
+    logged_in = bool(request and request.session.get("user_id"))
+    actions = ""
+    if logged_in:
+        actions = '<a class="icon-btn" href="/logout">ログアウト</a>'
     else:
-        nav = '<a class="btn" href="/login">Discordでログイン</a>'
-    return HTMLResponse(f"""<!doctype html><html lang='ja'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><meta name='theme-color' content='#090b10'><title>{esc(title)} - つぶ卓</title><style>{CSS}</style></head><body><div class='wrap'><div class='top'><h1>🎲 つぶ卓 <span style="color:#7d8597;font-size:.78rem;font-weight:600">Schedule Hub</span></h1><div>{nav}</div></div>{body}</div></body></html>""")
+        actions = '<a class="icon-btn" href="/login">ログイン</a>'
+
+    brand = (
+        '<a class="brand" href="/">'
+        '<span class="b1">つ</span><span class="b2">ぶ</span>'
+        '<span class="b3">た</span><span class="b4">く</span>'
+        '</a>'
+    )
+
+    return HTMLResponse(
+        f"""<!doctype html>
+<html lang='ja'>
+<head>
+<meta charset='utf-8'>
+<meta name='viewport' content='width=device-width,initial-scale=1'>
+<meta name='theme-color' content='#080c14'>
+<title>{esc(title)} - つぶたく</title>
+<style>{CSS}</style>
+</head>
+<body>
+<div class='wrap'>
+  <header class='top'>{brand}<div class='top-actions'>{actions}</div></header>
+  {body}
+</div>
+</body>
+</html>"""
+    )
 
 
 # ---------------------- Discord Bot ----------------------
@@ -1010,14 +1184,123 @@ async def logout(request: Request):
 async def home(request: Request):
     uid = request.session.get("user_id")
     if not uid:
-        return page("ホーム", "<div class='card'><h2>募集から日程調整まで自動化</h2><p>Discordでログインして募集を作成してください。</p><a class='btn' href='/login'>Discordでログイン</a></div>", request)
+        return page(
+            "ホーム",
+            """
+            <section class='hero'>
+              <div class='hero-kicker'>TRPG・マダミス日程調整</div>
+              <h1>○と△だけで、<br>もっと手軽に。</h1>
+              <p>募集から日程調整、卓成立までをDiscordと一緒にまとめます。</p>
+            </section>
+
+            <div class='menu-stack'>
+              <a class='menu-card primary' href='/login?next=/new'>
+                <div class='menu-icon'>📅</div>
+                <div>
+                  <div class='menu-title'>卓を立てる</div>
+                  <div class='menu-sub'>GM・募集と日程調整を作成</div>
+                </div>
+                <div class='chev'>›</div>
+              </a>
+              <a class='menu-card' href='/login'>
+                <div class='menu-icon'>👥</div>
+                <div>
+                  <div class='menu-title'>卓に参加する</div>
+                  <div class='menu-sub'>PL・Discordでログイン</div>
+                </div>
+                <div class='chev'>›</div>
+              </a>
+            </div>
+
+            <div class='info-card'>
+              <h3>✦ つぶたくとは？</h3>
+              <div class='muted'>TRPG・マダミスの募集から日程調整までを、できるだけ少ない操作で進めるためのサービスです。</div>
+            </div>
+            """,
+            request,
+        )
+
+    uid_s = str(uid)
     with db() as c:
-        mine = c.execute("SELECT * FROM recruitments WHERE gm_discord_id=? ORDER BY id DESC LIMIT 30", (str(uid),)).fetchall()
-    rows = "".join(f"<tr><td>{esc(r['scenario_name'])}</td><td>{esc(r['game_type'])}</td><td>{esc(r['status'])}</td><td><a href='/r/{r['id']}'>開く</a></td></tr>" for r in mine)
-    return page("ホーム", f"""
-    <div class='card'><a class='btn green' href='/new'>＋ 新しい募集を作成</a></div>
-    <div class='card'><h2>自分がGMの募集</h2><div class='scroll'><table><tr><th>シナリオ</th><th>種別</th><th>状態</th><th></th></tr>{rows or '<tr><td colspan=4>まだありません</td></tr>'}</table></div></div>
-    """, request)
+        mine = c.execute(
+            "SELECT * FROM recruitments WHERE gm_discord_id=? ORDER BY id DESC LIMIT 30",
+            (uid_s,),
+        ).fetchall()
+        joined = c.execute(
+            """SELECT DISTINCT r.*
+               FROM recruitments r
+               JOIN members m ON m.recruitment_id=r.id
+               WHERE m.discord_id=? AND m.active=1
+               ORDER BY r.id DESC LIMIT 30""",
+            (uid_s,),
+        ).fetchall()
+
+    gm_rows = "".join(
+        f"<tr><td>{esc(r['scenario_name'])}</td><td>{esc(r['game_type'])}</td>"
+        f"<td>{esc(r['status'])}</td><td><a href='/r/{r['id']}'>開く</a></td></tr>"
+        for r in mine
+    )
+    pl_rows = "".join(
+        f"<tr><td>{esc(r['scenario_name'])}</td><td>{esc(r['game_type'])}</td>"
+        f"<td><a href='/r/{r['id']}'>回答する</a></td></tr>"
+        for r in joined
+    )
+
+    return page(
+        "ホーム",
+        f"""
+        <section class='hero'>
+          <div class='hero-kicker'>TRPG・マダミス日程調整</div>
+          <h1>○と△だけで、<br>もっと手軽に。</h1>
+        </section>
+
+        <div class='menu-stack'>
+          <a class='menu-card primary' href='/new'>
+            <div class='menu-icon'>📅</div>
+            <div>
+              <div class='menu-title'>卓を立てる</div>
+              <div class='menu-sub'>GM・募集と日程調整を作成</div>
+            </div>
+            <div class='chev'>›</div>
+          </a>
+
+          <a class='menu-card' href='#joined'>
+            <div class='menu-icon'>👥</div>
+            <div>
+              <div class='menu-title'>卓に参加する</div>
+              <div class='menu-sub'>PL・参加中の卓を確認</div>
+            </div>
+            <div class='chev'>›</div>
+          </a>
+        </div>
+
+        <div class='info-card'>
+          <h3>✦ つぶたくとは？</h3>
+          <div class='muted'>Discord募集・日程回答・卓成立までをひとつにつなげます。</div>
+        </div>
+
+        <div class='card'>
+          <h2>自分がGMの卓</h2>
+          <div class='scroll'>
+            <table>
+              <tr><th>シナリオ</th><th>種別</th><th>状態</th><th></th></tr>
+              {gm_rows or '<tr><td colspan="4" class="muted">まだありません</td></tr>'}
+            </table>
+          </div>
+        </div>
+
+        <div class='card' id='joined'>
+          <h2>参加中の卓</h2>
+          <div class='scroll'>
+            <table>
+              <tr><th>シナリオ</th><th>種別</th><th></th></tr>
+              {pl_rows or '<tr><td colspan="3" class="muted">参加中の卓はありません</td></tr>'}
+            </table>
+          </div>
+        </div>
+        """,
+        request,
+    )
 
 
 @app.get("/new", response_class=HTMLResponse)
@@ -1025,35 +1308,193 @@ async def new_form(request: Request):
     uid = request.session.get("user_id")
     if not uid:
         return RedirectResponse("/login?next=/new")
+
     default_deadline = (now_jst().date() + timedelta(days=7)).isoformat()
     days = month_dates()
-    day_html = "".join(f'<div class="day" data-date="{d}" onclick="toggleGM(this)">{d[5:]}</div>' for d in days)
-    return page("募集作成", f"""
-    <form class='card' action='/new' method='post' enctype='multipart/form-data'>
-      {csrf_field(request)}
-      <h2>1. 募集内容</h2>
-      <label>種類<select name='game_type'><option>TRPG</option><option>マダミス</option></select></label>
-      <label>シナリオ名<input name='scenario_name' required></label>
-      <label>プレイ時間<input name='play_time' placeholder='例：4〜5時間' required></label>
-      <label><input style='width:auto' type='checkbox' id='variable' name='variable_players' value='1' onchange='vp()'> 人数可変</label>
-      <div id='fixed'><label>募集人数（GMを含まない）<input type='number' min='1' name='fixed_players' value='4'></label></div>
-      <div id='range' style='display:none'><label>最小人数<input type='number' min='1' name='min_players' value='2'></label><label>最大人数<input type='number' min='1' name='max_players' value='4'></label></div>
-      <label>シナリオ概要<textarea name='description' rows='10' required></textarea></label>
-      <label>関連画像（任意）<input type='file' name='image' accept='image/*'></label>
-      <label>卓成立時の案内文（任意）<textarea name='guide_message' rows='5' placeholder='事前準備やキャラクター作成についてなど'></textarea></label>
-      <hr><h2>2. 日程調整</h2>
-      <label>開始時間<input type='time' name='start_time' value='21:00' required></label>
-      <label>回答期限（21:00締切）<input type='date' name='deadline_date' value='{default_deadline}' required></label>
-      <p>GMが開催可能な日だけタップしてください。もう一度押すと解除されます。</p>
-      <input type='hidden' id='gm_dates' name='gm_dates'>
-      <div class='grid'>{day_html}</div>
-      <br><button type='submit'>募集を開始する</button>
-    </form>
-    <script>
-    function vp(){{document.getElementById('fixed').style.display=document.getElementById('variable').checked?'none':'block';document.getElementById('range').style.display=document.getElementById('variable').checked?'block':'none'}}
-    let selected=[];function toggleGM(el){{let d=el.dataset.date;if(selected.includes(d)){{selected=selected.filter(x=>x!==d);el.classList.remove('yes')}}else{{selected.push(d);el.classList.add('yes')}}document.getElementById('gm_dates').value=selected.join(',')}}
-    </script>
-    """, request)
+
+    weekday_jp = ["月","火","水","木","金","土","日"]
+    cards = []
+    for ds in days:
+        d = date.fromisoformat(ds)
+        label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+        cards.append(
+            f'<div class="day" data-date="{ds}" onclick="toggleGM(this)">'
+            f'<span>{label}</span><span class="state">-</span></div>'
+        )
+    day_html = "".join(cards)
+
+    return page(
+        "卓を新しく立てる",
+        f"""
+        <a class='back-link' href='/'>‹ 戻る</a>
+        <div class='section-title'>卓を新しく立てる</div>
+
+        <form class='form-shell' action='/new' method='post' enctype='multipart/form-data'>
+          {csrf_field(request)}
+
+          <div class='form-section'>
+            <div class='form-section-title'>基本情報</div>
+
+            <label class='field'>
+              <div class='field-box'>
+                <div class='field-icon'>🎲</div>
+                <select name='game_type' required>
+                  <option value='TRPG'>TRPG</option>
+                  <option value='マダミス'>マダミス</option>
+                </select>
+              </div>
+            </label>
+
+            <label class='field' style='margin-top:12px'>
+              <div class='field-box'>
+                <div class='field-icon'>📦</div>
+                <input name='scenario_name' placeholder='シナリオ名を入力' required>
+              </div>
+            </label>
+
+            <div class='field-row'>
+              <label>
+                <div class='field-box'>
+                  <div class='field-icon'>👥</div>
+                  <div class='field-stack'>
+                    <span class='field-label'>募集人数</span>
+                    <input id='fixed_players' type='number' min='1' name='fixed_players' value='4'>
+                  </div>
+                </div>
+              </label>
+              <label>
+                <div class='field-box'>
+                  <div class='field-icon'>⏱️</div>
+                  <div class='field-stack'>
+                    <span class='field-label'>プレイ時間</span>
+                    <input name='play_time' placeholder='例：4〜5時間' required>
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <label class='checkbox-row'>
+              <input type='checkbox' id='variable' name='variable_players' value='1' onchange='vp()'>
+              人数を可変にする
+            </label>
+
+            <div id='range' class='field-row' style='display:none'>
+              <label>
+                <div class='field-box'>
+                  <div class='field-stack'>
+                    <span class='field-label'>最小人数</span>
+                    <input type='number' min='1' name='min_players' value='2'>
+                  </div>
+                </div>
+              </label>
+              <label>
+                <div class='field-box'>
+                  <div class='field-stack'>
+                    <span class='field-label'>最大人数</span>
+                    <input type='number' min='1' name='max_players' value='4'>
+                  </div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class='form-section'>
+            <div class='form-section-title'>募集内容</div>
+
+            <label class='field'>
+              <div class='field-box tall'>
+                <div class='field-icon'>📝</div>
+                <textarea name='description' placeholder='シナリオ概要を入力' required></textarea>
+              </div>
+            </label>
+
+            <label class='field' style='margin-top:12px'>
+              <div class='field-box'>
+                <div class='field-icon'>🖼️</div>
+                <div class='field-stack'>
+                  <span class='field-label'>関連画像（任意）</span>
+                  <input type='file' name='image' accept='image/*'>
+                </div>
+              </div>
+            </label>
+
+            <label class='field' style='margin-top:12px'>
+              <div class='field-box tall'>
+                <div class='field-icon'>📌</div>
+                <textarea name='guide_message' placeholder='卓成立時の案内文（任意）&#10;事前準備・キャラクター作成など'></textarea>
+              </div>
+            </label>
+          </div>
+
+          <div class='form-section'>
+            <div class='form-section-title'>日程調整</div>
+
+            <div class='field-row'>
+              <label>
+                <div class='field-box'>
+                  <div class='field-icon'>🕘</div>
+                  <div class='field-stack'>
+                    <span class='field-label'>開始時間</span>
+                    <input type='time' name='start_time' value='21:00' required>
+                  </div>
+                </div>
+              </label>
+              <label>
+                <div class='field-box'>
+                  <div class='field-icon'>📅</div>
+                  <div class='field-stack'>
+                    <span class='field-label'>回答期限（21:00）</span>
+                    <input type='date' name='deadline_date' value='{default_deadline}' required>
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <div class='date-heading'>開催候補日を選択（今月と来月末まで）</div>
+            <div class='muted small' style='margin:0 0 10px 2px'>
+              GMが開催できる日だけタップしてください。
+            </div>
+
+            <input type='hidden' id='gm_dates' name='gm_dates'>
+            <div class='date-scroll'><div class='grid'>{day_html}</div></div>
+
+            <div class='legend'>
+              <span><b style='color:#22c55e'>○</b> 開催できる</span>
+              <span><b>-</b> 未回答 / 開催できない</span>
+            </div>
+          </div>
+
+          <button class='submit-btn' type='submit'>卓を作成する</button>
+        </form>
+
+        <script>
+        function vp(){{
+          const checked=document.getElementById('variable').checked;
+          document.getElementById('range').style.display=checked?'grid':'none';
+          document.getElementById('fixed_players').disabled=checked;
+        }}
+
+        let selected=[];
+        function toggleGM(el){{
+          const d=el.dataset.date;
+          const state=el.querySelector('.state');
+
+          if(selected.includes(d)){{
+            selected=selected.filter(x=>x!==d);
+            el.classList.remove('yes');
+            state.textContent='-';
+          }}else{{
+            selected.push(d);
+            el.classList.add('yes');
+            state.textContent='○';
+          }}
+
+          document.getElementById('gm_dates').value=selected.join(',');
+        }}
+        </script>
+        """,
+        request,
+    )
 
 
 @app.post("/new")
