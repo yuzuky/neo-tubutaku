@@ -2258,38 +2258,247 @@ async def reschedule_form(rid: int, request: Request):
     uid = request.session.get("user_id")
     if not uid:
         return RedirectResponse(f"/login?next=/r/{rid}/reschedule")
+
     r = get_recruitment(rid)
     if not r or str(uid) != r["gm_discord_id"]:
         raise HTTPException(403)
+
     default_deadline = (now_jst().date() + timedelta(days=7)).isoformat()
-    day_html = "".join(f'<div class="day" data-date="{d}" onclick="toggleGM(this)">{d[5:]}</div>' for d in month_dates())
-    return page("再日程調整", f"""
-    <form class='card' method='post' action='/r/{rid}/reschedule'>{csrf_field(request)}<h2>『{esc(r['scenario_name'])}』を再日程調整</h2><p>シナリオ概要・募集人数・案内文などはそのまま引き継ぎます。</p><label>開始時間<input type='time' name='start_time' value='{esc(r['start_time'])}' required></label><label>回答期限<input type='date' name='deadline_date' value='{default_deadline}' required></label><input type='hidden' id='gm_dates' name='gm_dates'><div class='grid'>{day_html}</div><br><button>新しい日程調整を作成</button></form>
-    <script>let selected=[];function toggleGM(el){{let d=el.dataset.date;if(selected.includes(d)){{selected=selected.filter(x=>x!==d);el.classList.remove('yes')}}else{{selected.push(d);el.classList.add('yes')}}document.getElementById('gm_dates').value=selected.join(',')}}</script>
-    """, request)
+    weekday_jp = ["月","火","水","木","金","土","日"]
+
+    cards = []
+    for ds in month_dates():
+        d = date.fromisoformat(ds)
+        label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+        cards.append(
+            f'<div class="day" data-date="{ds}" onclick="toggleGM(this)">'
+            f'<span>{label}</span><span class="state">-</span></div>'
+        )
+
+    return page(
+        "再日程調整",
+        f"""
+        <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
+        <div class='section-title'>再日程調整</div>
+
+        <form class='form-shell' method='post' action='/r/{rid}/reschedule'>
+          {csrf_field(request)}
+
+          <div class='form-section compact'>
+            <div class='field-row'>
+              <label>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>開始時間</span>
+                    <input type='time' name='start_time'
+                           value='{esc(r["start_time"])}' required>
+                  </div>
+                </div>
+              </label>
+
+              <label>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>回答期限</span>
+                    <input type='date' name='deadline_date'
+                           value='{default_deadline}' required>
+                  </div>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <div class='create-date-heading'>
+            開催候補日を選択（今月と来月末まで）
+          </div>
+
+          <input type='hidden' id='gm_dates' name='gm_dates'>
+          <div class='date-scroll'>
+            <div class='grid'>
+              {''.join(cards)}
+            </div>
+          </div>
+
+          <div class='legend'>
+            <span><b style='color:#22c55e'>○</b> 開催できる</span>
+            <span><b>-</b> 開催できない</span>
+          </div>
+
+          <button class='submit-btn' type='submit'>
+            再日程調整を開始する
+          </button>
+        </form>
+
+        <script>
+        let selected=[];
+
+        function toggleGM(el){{
+          const d=el.dataset.date;
+          const state=el.querySelector('.state');
+
+          if(selected.includes(d)){{
+            selected=selected.filter(x=>x!==d);
+            el.classList.remove('yes');
+            state.textContent='-';
+          }}else{{
+            selected.push(d);
+            el.classList.add('yes');
+            state.textContent='○';
+          }}
+
+          document.getElementById('gm_dates').value=selected.join(',');
+        }}
+        </script>
+        """,
+        request,
+    )
 
 
 @app.post("/r/{rid}/reschedule")
-async def reschedule_submit(rid: int, request: Request, start_time: str = Form(...), deadline_date: str = Form(...), gm_dates: str = Form(...)):
+async def reschedule_submit(
+    rid: int,
+    request: Request,
+    start_time: str = Form(...),
+    deadline_date: str = Form(...),
+    gm_dates: str = Form(...),
+):
     uid = require_login(request)
     await require_csrf(request)
+
     r = get_recruitment(rid)
     if not r or uid != r["gm_discord_id"]:
         raise HTTPException(403)
-    dates = sorted({d for d in gm_dates.split(",") if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)})
+
+    dates = sorted({
+        d for d in gm_dates.split(",")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", d)
+    })
     if not dates:
         raise HTTPException(400, "開催可能日を選択してください")
-    deadline = datetime.fromisoformat(deadline_date + "T21:00:00").replace(tzinfo=JST)
+
+    deadline = datetime.fromisoformat(
+        deadline_date + "T21:00:00"
+    ).replace(tzinfo=JST)
+
+    # 元の参加者/観戦者を先に取得
     with db() as c:
+        old_members = c.execute(
+            """SELECT discord_id, member_type, active, joined_at
+               FROM members
+               WHERE recruitment_id=? AND active=1""",
+            (rid,),
+        ).fetchall()
+
         cur = c.execute(
-            """INSERT INTO recruitments(parent_id,game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,created_at)
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (rid, r["game_type"], r["scenario_name"], uid, r["min_players"], r["max_players"], r["variable_players"], r["play_time"], r["description"], r["guide_message"], r["image_path"], start_time, deadline.isoformat(), "RECRUITING", iso_now()),
+            """INSERT INTO recruitments(
+                parent_id,
+                game_type,
+                scenario_name,
+                gm_discord_id,
+                min_players,
+                max_players,
+                variable_players,
+                play_time,
+                description,
+                guide_message,
+                image_path,
+                start_time,
+                deadline,
+                status,
+                created_at,
+                waiting_channel_id
+            )
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                rid,
+                r["game_type"],
+                r["scenario_name"],
+                uid,
+                r["min_players"],
+                r["max_players"],
+                r["variable_players"],
+                r["play_time"],
+                r["description"],
+                r["guide_message"],
+                r["image_path"],
+                start_time,
+                deadline.isoformat(),
+                "RECRUITING",
+                iso_now(),
+                r["waiting_channel_id"],
+            ),
         )
         new_id = cur.lastrowid
-        c.executemany("INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)", [(new_id,d) for d in dates])
-    await create_waiting_channel(new_id)
-    await post_recruitment(new_id)
+
+        c.executemany(
+            "INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)",
+            [(new_id, d) for d in dates],
+        )
+
+        # 参加者・観戦者を新しい日程調整にも引き継ぐ
+        for m in old_members:
+            c.execute(
+                """INSERT INTO members(
+                    recruitment_id,
+                    discord_id,
+                    member_type,
+                    active,
+                    joined_at
+                )
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(recruitment_id,discord_id,member_type)
+                DO UPDATE SET active=1""",
+                (
+                    new_id,
+                    m["discord_id"],
+                    m["member_type"],
+                    1,
+                    m["joined_at"] or iso_now(),
+                ),
+            )
+
+        # 元の日程調整は再調整済みにする
+        c.execute(
+            "UPDATE recruitments SET status='RESCHEDULED' WHERE id=?",
+            (rid,),
+        )
+
+    # 元の日程調整チャンネルが残っていれば、そこへ送信
+    channel = None
+    guild = bot.get_guild(GUILD_ID)
+
+    if guild and r["waiting_channel_id"]:
+        channel = guild.get_channel(int(r["waiting_channel_id"]))
+        if not channel:
+            try:
+                channel = await guild.fetch_channel(
+                    int(r["waiting_channel_id"])
+                )
+            except Exception:
+                channel = None
+
+    # 何らかの理由で元チャンネルが無い場合だけ新規作成
+    if channel is None:
+        await create_waiting_channel(new_id)
+        nr = get_recruitment(new_id)
+        if guild and nr and nr["waiting_channel_id"]:
+            channel = guild.get_channel(int(nr["waiting_channel_id"]))
+
+    if channel:
+        try:
+            await send_long(
+                channel,
+                (
+                    "## 🔄 再日程調整を開始しました\n\n"
+                    f"開始時間：**{start_time}〜**\n"
+                    f"回答期限：**{deadline_date} 21:00**\n\n"
+                    "以下のリンクから新しい日程を回答してください。\n"
+                    f"{BASE_URL}/r/{new_id}"
+                ),
+            )
+        except Exception as e:
+            log_error(f"reschedule_message rid={new_id}", e)
+
     return RedirectResponse(f"/r/{new_id}", status_code=303)
 
 
