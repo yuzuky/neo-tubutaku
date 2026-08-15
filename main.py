@@ -558,7 +558,7 @@ button,input,textarea,select{font:inherit}
 .info-card{margin-top:24px}
 .info-card h3{color:#ae76ff;margin:0 0 7px}
 .section-title{
-  margin:10px 0 12px;
+  margin:18px 0 16px;
   text-align:center;
   font-size:1.4rem;
   font-weight:900;
@@ -566,7 +566,7 @@ button,input,textarea,select{font:inherit}
 }
 .form-shell{padding-bottom:24px}
 .form-section{
-  margin:10px 0 18px;
+  margin:20px 0 30px;
 }
 .form-section-title{
   color:#dce3ee;
@@ -589,6 +589,7 @@ button,input,textarea,select{font:inherit}
   min-height:76px;
   display:flex;
   align-items:center;
+  gap:12px;
 }
 .field-box.tall{align-items:flex-start;padding-top:14px}
 .field-icon{
@@ -638,10 +639,10 @@ button,input,textarea,select{font:inherit}
 .checkbox-row input{width:auto;margin:0;accent-color:#8b5cf6}
 input[type=file]{font-size:.85rem}
 .date-heading{
-  margin:24px 0 12px 2px;
-  color:#9aa6b8;
+  margin:28px 0 12px 2px;
+  color:#dce4ef;
   font-size:.95rem;
-  font-weight:500;
+  font-weight:900;
 }
 .date-scroll{
   max-height:410px;
@@ -853,6 +854,136 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
   .grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px}
   .day{min-height:98px;font-size:.83rem}
   .info-card,.card{padding:18px;border-radius:19px}
+}
+
+/* ===== UI v3: 卓作成 / 参加回答 ===== */
+.detail-head h2{
+  font-size:1.28rem;
+  margin-bottom:14px;
+}
+.detail-head.available{
+  border-color:rgba(34,197,94,.34);
+  background:
+    linear-gradient(145deg,rgba(34,197,94,.08),rgba(16,22,32,.98));
+  box-shadow:0 18px 48px rgba(34,197,94,.06);
+}
+.detail-available-label{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  margin:0 0 12px;
+  padding:5px 9px;
+  border-radius:999px;
+  color:#65df94;
+  background:rgba(34,197,94,.10);
+  border:1px solid rgba(34,197,94,.20);
+  font-size:.76rem;
+  font-weight:850;
+}
+.gm-actions{
+  display:flex;
+  gap:12px;
+  flex-wrap:wrap;
+  margin-top:20px;
+}
+.gm-actions .btn{margin:0}
+.answer-title{
+  margin:24px 4px 8px;
+  font-size:1.08rem;
+  font-weight:800;
+}
+.answer-legend{
+  display:flex;
+  flex-wrap:wrap;
+  gap:14px;
+  margin:0 4px 14px;
+  color:#9da9ba;
+  font-size:.86rem;
+}
+.answer-legend .yes-mark{color:#35d978;font-weight:900}
+.answer-legend .maybe-mark{color:#f4a619;font-weight:900}
+.answer-legend .no-mark{color:#9aa5b5;font-weight:900}
+
+.answer-grid.status-grid{
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+}
+.answer-day{
+  position:relative;
+  min-height:150px;
+  border:1px solid #2b3749;
+  border-radius:16px;
+  background:linear-gradient(145deg,#171f2c,#111823);
+  color:#aab5c6;
+  padding:12px 10px 10px;
+  transition:.16s ease;
+  overflow:hidden;
+}
+.answer-day.clickable{cursor:pointer}
+.answer-day.clickable:hover{transform:translateY(-1px);border-color:#47566f}
+.answer-day.yes{
+  border-color:#22c55e;
+  background:rgba(34,197,94,.10);
+}
+.answer-day.maybe{
+  border-color:#f59e0b;
+  background:rgba(245,158,11,.10);
+}
+.answer-day-head{
+  text-align:center;
+  font-weight:850;
+  font-size:.92rem;
+}
+.answer-day-state{
+  text-align:center;
+  font-size:1.55rem;
+  line-height:1;
+  margin:11px 0 10px;
+  font-weight:900;
+}
+.answer-day.yes .answer-day-head,
+.answer-day.yes .answer-day-state{color:#58df8c}
+.answer-day.maybe .answer-day-head,
+.answer-day.maybe .answer-day-state{color:#f6b545}
+.answer-members{
+  border-top:1px solid rgba(255,255,255,.07);
+  padding-top:8px;
+  display:grid;
+  gap:4px;
+}
+.answer-member{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:6px;
+  min-width:0;
+  font-size:.72rem;
+  color:#9aa6b8;
+}
+.answer-member-name{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.answer-member-symbol{font-weight:900;flex:0 0 auto}
+.answer-member-symbol.yes{color:#35d978}
+.answer-member-symbol.maybe{color:#f4a619}
+.answer-member-symbol.no{color:#8490a2}
+.field-box.no-icon{padding-left:16px}
+.create-date-heading{
+  margin:26px 2px 12px;
+  color:#9da9ba;
+  font-size:.95rem;
+  font-weight:600;
+}
+.form-section.compact{margin:8px 0 18px}
+.form-section.compact + .form-section.compact{margin-top:12px}
+@media(max-width:620px){
+  .answer-grid.status-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+  .answer-day{min-height:142px;padding:11px 8px 9px}
+  .answer-member{font-size:.69rem}
+  .gm-actions{gap:10px}
 }
 """
 
@@ -1518,11 +1649,9 @@ async def new_form(request: Request):
         <form class='form-shell' action='/new' method='post' enctype='multipart/form-data'>
           {csrf_field(request)}
 
-          <div class='form-section'>
-            
-
+          <div class='form-section compact'>
             <label class='field'>
-              <div class='field-box'>
+              <div class='field-box no-icon'>
                 <select name='game_type' required>
                   <option value='TRPG'>TRPG</option>
                   <option value='マダミス'>マダミス</option>
@@ -1531,14 +1660,14 @@ async def new_form(request: Request):
             </label>
 
             <label class='field' style='margin-top:12px'>
-              <div class='field-box'>
+              <div class='field-box no-icon'>
                 <input name='scenario_name' placeholder='シナリオ名を入力' required>
               </div>
             </label>
 
             <div class='field-row'>
               <label>
-                <div class='field-box'>
+                <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>募集人数</span>
                     <input id='fixed_players' type='number' min='1' name='fixed_players' value='4'>
@@ -1546,7 +1675,7 @@ async def new_form(request: Request):
                 </div>
               </label>
               <label>
-                <div class='field-box'>
+                <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>プレイ時間</span>
                     <input name='play_time' placeholder='例：4〜5時間' required>
@@ -1562,7 +1691,7 @@ async def new_form(request: Request):
 
             <div id='range' class='field-row' style='display:none'>
               <label>
-                <div class='field-box'>
+                <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>最小人数</span>
                     <input type='number' min='1' name='min_players' value='2'>
@@ -1570,7 +1699,7 @@ async def new_form(request: Request):
                 </div>
               </label>
               <label>
-                <div class='field-box'>
+                <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>最大人数</span>
                     <input type='number' min='1' name='max_players' value='4'>
@@ -1580,17 +1709,15 @@ async def new_form(request: Request):
             </div>
           </div>
 
-          <div class='form-section'>
-            
-
+          <div class='form-section compact'>
             <label class='field'>
-              <div class='field-box tall'>
+              <div class='field-box tall no-icon'>
                 <textarea name='description' placeholder='シナリオ概要を入力' required></textarea>
               </div>
             </label>
 
             <label class='field' style='margin-top:12px'>
-              <div class='field-box'>
+              <div class='field-box no-icon'>
                 <div class='field-stack'>
                   <span class='field-label'>関連画像（任意）</span>
                   <input type='file' name='image' accept='image/*'>
@@ -1599,8 +1726,9 @@ async def new_form(request: Request):
             </label>
 
             <label class='field' style='margin-top:12px'>
-              <div class='field-box tall'>
-                <textarea name='guide_message' placeholder='卓成立時の案内文（任意）&#10;事前準備・キャラクター作成など'></textarea>
+              <div class='field-box tall no-icon'>
+                <textarea name='guide_message'
+                  placeholder='卓成立時の案内文（任意）&#10;事前準備・キャラクター作成など'></textarea>
               </div>
             </label>
           </div>
@@ -1610,7 +1738,7 @@ async def new_form(request: Request):
 
             <div class='field-row'>
               <label>
-                <div class='field-box'>
+                <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>開始時間</span>
                     <input type='time' name='start_time' value='21:00' required>
@@ -1618,7 +1746,7 @@ async def new_form(request: Request):
                 </div>
               </label>
               <label>
-                <div class='field-box'>
+                <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>回答期限</span>
                     <input type='date' name='deadline_date' value='{default_deadline}' required>
@@ -1627,7 +1755,7 @@ async def new_form(request: Request):
               </label>
             </div>
 
-            <div class='date-heading'>開催候補日を選択（今月と来月末まで）</div>
+            <div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div>
 
             <input type='hidden' id='gm_dates' name='gm_dates'>
             <div class='date-scroll'><div class='grid'>{day_html}</div></div>
@@ -1738,9 +1866,6 @@ async def recruitment_page(rid: int, request: Request):
     gm = uid == r["gm_discord_id"]
     participant = is_active_member(rid, uid, "participant")
     spectator = is_active_member(rid, uid, "spectator")
-
-    # 一覧からタップしたログインユーザーは回答状況を閲覧可能。
-    # 回答操作だけ参加リアクション済みPLに限定する。
     dates = get_gm_dates(rid)
 
     with db() as c:
@@ -1751,14 +1876,45 @@ async def recruitment_page(rid: int, request: Request):
                 (rid, uid),
             ).fetchall()
         }
+
         cm = c.execute(
             "SELECT comment FROM comments WHERE recruitment_id=? AND discord_id=?",
             (rid, uid),
         ).fetchone()
+
         gm_user = c.execute(
             "SELECT display_name, username FROM users WHERE discord_id=?",
             (r["gm_discord_id"],),
         ).fetchone()
+
+        # GMは回答状況のPL一覧には出さない
+        active = c.execute(
+            """SELECT discord_id
+               FROM members
+               WHERE recruitment_id=?
+                 AND member_type='participant'
+                 AND active=1
+                 AND discord_id<>?
+               ORDER BY joined_at""",
+            (rid, r["gm_discord_id"]),
+        ).fetchall()
+
+        comments = c.execute(
+            """SELECT *
+               FROM comments
+               WHERE recruitment_id=?
+                 AND comment<>''
+                 AND discord_id<>?""",
+            (rid, r["gm_discord_id"]),
+        ).fetchall()
+
+        allans = {
+            (x["discord_id"], x["event_date"]): x["answer"]
+            for x in c.execute(
+                "SELECT * FROM answers WHERE recruitment_id=?",
+                (rid,),
+            ).fetchall()
+        }
 
     comment = cm["comment"] if cm else ""
     gm_name = (
@@ -1766,48 +1922,93 @@ async def recruitment_page(rid: int, request: Request):
         if gm_user else user_display(r["gm_discord_id"])
     )
 
+    pl_uids = [x["discord_id"] for x in active]
+    weekday_jp = ["月","火","水","木","金","土","日"]
+
+    rows = candidate_rows(rid)
+    available = any(len(x["yes"]) >= int(r["min_players"]) for x in rows)
+
     deadline_dt = datetime.fromisoformat(r["deadline"])
     deadline_label = deadline_dt.strftime("%Y-%m-%d")
     answer_url = f"{BASE_URL}/r/{rid}"
 
-    # -------- PL回答コントロール --------
-    controls = ""
-    if participant:
-        weekday_jp = ["月","火","水","木","金","土","日"]
-        js_obj = json.dumps(my_answers, ensure_ascii=False)
+    # --------------------------------------------------------
+    # 日程カード
+    # 自分が参加者ならクリック可能。回答状況もカード内に表示。
+    # --------------------------------------------------------
+    js_obj = json.dumps(my_answers, ensure_ascii=False)
+    cards = []
 
-        cards = []
-        for ds in dates:
-            d = date.fromisoformat(ds)
-            day_label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
-            current = my_answers.get(ds, "")
-            cls = "yes" if current == "yes" else "maybe" if current == "maybe" else ""
-            symbol = "○" if current == "yes" else "△" if current == "maybe" else "-"
-            cards.append(
-                f'<div class="day {cls}" data-date="{ds}" onclick="togglePL(this)">'
-                f'<span>{day_label}</span><span class="state">{symbol}</span></div>'
+    for ds in dates:
+        d = date.fromisoformat(ds)
+        day_label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+
+        current = my_answers.get(ds, "") if participant else ""
+        cls = "yes" if current == "yes" else "maybe" if current == "maybe" else ""
+        symbol = "○" if current == "yes" else "△" if current == "maybe" else "-"
+
+        member_lines = []
+        for puid in pl_uids:
+            a = allans.get((puid, ds), "")
+            if a == "yes":
+                mark = "○"
+                mcls = "yes"
+            elif a == "maybe":
+                mark = "△"
+                mcls = "maybe"
+            else:
+                mark = "-"
+                mcls = "no"
+
+            member_lines.append(
+                f"<div class='answer-member'>"
+                f"<span class='answer-member-name'>{esc(user_display(puid))}</span>"
+                f"<span class='answer-member-symbol {mcls}'>{mark}</span>"
+                f"</div>"
             )
 
-        controls = f"""
+        onclick = " onclick='togglePL(this)'" if participant else ""
+        clickable = " clickable" if participant else ""
+
+        cards.append(
+            f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
+            f"<div class='answer-day-head'>{day_label}</div>"
+            f"<div class='answer-day-state'>{symbol}</div>"
+            f"<div class='answer-members'>"
+            f"{''.join(member_lines) if member_lines else '<div class=\"muted small\">まだ回答なし</div>'}"
+            f"</div>"
+            f"</div>"
+        )
+
+    schedule_block = ""
+
+    if participant:
+        schedule_block = f"""
         <form class='all-no-form' method='post' action='/r/{rid}/all-unavailable'
               onsubmit="return confirm('すべての日程を参加不可にしますか？')">
           {csrf_field(request)}
           <button class='all-no-btn' type='submit'>✕ 全ての日程が無理</button>
         </form>
 
-        <div class='answer-title'>あなたの日程回答</div>
-        <div class='muted small' style='margin:0 4px 12px'>
-          タップ：未回答 → ○ → △ → 未回答
+        <div class='answer-title'>日程回答</div>
+        <div class='answer-legend'>
+          <span><b class='yes-mark'>○</b>：参加可能</span>
+          <span><b class='maybe-mark'>△</b>：未定</span>
+          <span><b class='no-mark'>-</b>：無理</span>
         </div>
 
         <form method='post' action='/r/{rid}/answer'>
           {csrf_field(request)}
           <input type='hidden' name='answers' id='answers'>
-          <div class='answer-grid'>{''.join(cards)}</div>
+
+          <div class='answer-grid status-grid'>
+            {''.join(cards)}
+          </div>
 
           <label class='field' style='margin-top:18px'>
-            <div class='field-box tall'>
-              <textarea name='comment' rows='3' placeholder='日程についてGMへコメント（任意）'>{esc(comment)}</textarea>
+            <div class='field-box tall no-icon'>
+              <textarea name='comment' rows='3'
+                placeholder='GMへコメント（任意）'>{esc(comment)}</textarea>
             </div>
           </label>
 
@@ -1818,7 +2019,8 @@ async def recruitment_page(rid: int, request: Request):
         let ans={js_obj};
 
         function refreshHidden(){{
-          document.getElementById('answers').value=JSON.stringify(ans);
+          const hidden=document.getElementById('answers');
+          if(hidden) hidden.value=JSON.stringify(ans);
         }}
 
         function togglePL(el){{
@@ -1833,7 +2035,7 @@ async def recruitment_page(rid: int, request: Request):
           el.classList.remove('yes','maybe');
           if(s) el.classList.add(s);
 
-          el.querySelector('.state').textContent =
+          el.querySelector('.answer-day-state').textContent =
             s==='yes' ? '○' : (s==='maybe' ? '△' : '-');
 
           refreshHidden();
@@ -1842,65 +2044,28 @@ async def recruitment_page(rid: int, request: Request):
         refreshHidden();
         </script>
         """
-    elif gm:
-        controls = "<div class='viewer-note'>GMは回答対象ではありません。PLの回答状況を下で確認できます。</div>"
-    elif spectator:
-        controls = "<div class='viewer-note'>観戦希望では日程回答はありません。回答状況は下で確認できます。</div>"
     else:
-        controls = "<div class='viewer-note'>回答するにはDiscord募集メッセージの「参加」リアクションを押してください。</div>"
+        if gm:
+            note = "GMは回答対象ではありません。PLの回答状況を確認できます。"
+        elif spectator:
+            note = "観戦希望では日程回答はありません。PLの回答状況を確認できます。"
+        else:
+            note = "回答するにはDiscord募集メッセージの「参加」リアクションを押してください。"
 
-    # -------- 回答状況（GM回答は表示しない） --------
-    rows = candidate_rows(rid)
-    with db() as c:
-        active = c.execute(
-            """SELECT discord_id FROM members
-               WHERE recruitment_id=?
-                 AND member_type='participant'
-                 AND active=1
-               ORDER BY joined_at""",
-            (rid,),
-        ).fetchall()
+        schedule_block = f"""
+        <div class='viewer-note'>{note}</div>
 
-        comments = c.execute(
-            "SELECT * FROM comments WHERE recruitment_id=? AND comment<>''",
-            (rid,),
-        ).fetchall()
+        <div class='answer-title'>日程回答</div>
+        <div class='answer-legend'>
+          <span><b class='yes-mark'>○</b>：参加可能</span>
+          <span><b class='maybe-mark'>△</b>：未定</span>
+          <span><b class='no-mark'>-</b>：無理</span>
+        </div>
 
-        allans = {
-            (x["discord_id"], x["event_date"]): x["answer"]
-            for x in c.execute(
-                "SELECT * FROM answers WHERE recruitment_id=?",
-                (rid,),
-            ).fetchall()
-        }
-
-    uids = [x["discord_id"] for x in active]
-
-    table = (
-        "<div class='scroll'><table><tr><th>名前</th>"
-        + "".join(f"<th>{d[5:]}</th>" for d in dates)
-        + "</tr>"
-    )
-
-    for puid in uids:
-        table += f"<tr><td>{esc(user_display(puid))}</td>"
-        for d in dates:
-            a = allans.get((puid, d), "")
-            if a == "yes":
-                table += "<td class='ok'>○</td>"
-            elif a == "maybe":
-                table += "<td class='maybe'>△</td>"
-            else:
-                table += "<td>—</td>"
-        table += "</tr>"
-
-    if dates:
-        table += (
-            "<tr><th>○人数</th>"
-            + "".join(f"<th>{len(x['yes'])}</th>" for x in rows)
-            + "</tr>"
-        )
-    table += "</table></div>"
+        <div class='answer-grid status-grid'>
+          {''.join(cards)}
+        </div>
+        """
 
     comment_html = "".join(
         f"<p><b>{esc(user_display(x['discord_id']))}</b>：{esc(x['comment'])}</p>"
@@ -1910,18 +2075,25 @@ async def recruitment_page(rid: int, request: Request):
     gm_buttons = ""
     if gm:
         gm_buttons = (
-            f"<p style='margin:18px 0 0'>"
-            f"<a class='btn green' href='/r/{rid}/decide'>開催日を決定</a> "
+            f"<div class='gm-actions'>"
+            f"<a class='btn green' href='/r/{rid}/decide'>開催日を決定</a>"
             f"<a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a>"
-            f"</p>"
+            f"</div>"
         )
+
+    detail_cls = "detail-head available" if available else "detail-head"
+    available_label = (
+        "<div class='detail-available-label'>● 開催可能な日程があります</div>"
+        if available else ""
+    )
 
     return page(
         r["scenario_name"],
         f"""
         <a class='back-link' href='/join'>‹ 戻る</a>
 
-        <div class='detail-head'>
+        <div class='{detail_cls}'>
+          {available_label}
           <h2>{esc(r["scenario_name"])}</h2>
           <div class='detail-meta'>
             <span>GM: {esc(gm_name)}</span>
@@ -1936,12 +2108,7 @@ async def recruitment_page(rid: int, request: Request):
                   onclick="copyAnswerUrl()">URLコピー</button>
         </div>
 
-        {controls}
-
-        <div class='card'>
-          <h3>回答状況</h3>
-          {table}
-        </div>
+        {schedule_block}
 
         <div class='card'>
           <h3>コメント</h3>
