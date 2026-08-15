@@ -234,6 +234,33 @@ def iso_now() -> str:
     return now_jst().isoformat(timespec="seconds")
 
 
+def safe_channel_name(name: str) -> str:
+    """
+    Discordのテキストチャンネル名として安全な形へ整形する。
+    日本語は残し、空白や一部記号だけ置換する。
+    """
+    name = (name or "").strip().lower()
+
+    # 空白類をハイフンへ
+    name = re.sub(r"\s+", "-", name)
+
+    # Discordチャンネル名で扱いづらい記号をハイフンへ
+    name = re.sub(r'[\\/#?:*"<>|`~!@$%^&+=,.;]+', "-", name)
+
+    # 連続ハイフンを1個に
+    name = re.sub(r"-{2,}", "-", name)
+
+    # 先頭末尾の不要文字を削除
+    name = name.strip("-_. ")
+
+    # 空になった場合のフォールバック
+    if not name:
+        name = "session"
+
+    # Discordのチャンネル名上限を考慮
+    return name[:90]
+
+
 def cleanup_old_data():
     """3か月（90日）を超えた募集と関連データ・未参照画像を削除する。"""
     cutoff = (now_jst() - timedelta(days=90)).isoformat(timespec="seconds")
