@@ -1210,15 +1210,35 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
 
 
 async def post_recruitment(rid: int):
+    """
+    初回募集専用。
+    TRPGならTRPG募集掲示板、マダミスならマダミス募集掲示板へ投稿する。
+    """
     r = get_recruitment(rid)
+    if not r:
+        raise RuntimeError(f"募集が見つかりません rid={rid}")
+
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         raise RuntimeError("Guildが見つかりません")
 
-    channel_id = TRPG_CHANNEL_ID if r["game_type"] == "TRPG" else MADMIS_CHANNEL_ID
+    channel_id = (
+        TRPG_CHANNEL_ID
+        if r["game_type"] == "TRPG"
+        else MADMIS_CHANNEL_ID
+    )
+
     channel = guild.get_channel(channel_id)
     if not channel:
-        raise RuntimeError("募集板チャンネルが見つかりません")
+        try:
+            channel = await guild.fetch_channel(channel_id)
+        except Exception:
+            channel = None
+
+    if not channel:
+        raise RuntimeError(
+            f"募集掲示板チャンネルが見つかりません channel_id={channel_id}"
+        )
 
     player_text = (
         str(r["min_players"])
@@ -1231,7 +1251,8 @@ async def post_recruitment(rid: int):
         f'募集人数：**{player_text}人**\n'
         f'プレイ時間：**{r["play_time"]}**\n\n'
         f'{r["description"]}\n\n'
-        '参加希望の方は「参加」リアクションを押して日程調整への回答をお願いします！'
+        '参加希望の方は「参加」リアクションを押して'
+        '日程調整への回答をお願いします！'
     )
 
     chunks = split_text(header)
@@ -1246,14 +1267,17 @@ async def post_recruitment(rid: int):
         chunks[0],
         files=files if files else None,
     )
+
     for chunk in chunks[1:]:
         await channel.send(chunk)
 
     join_emoji = emoji_by_id(JOIN_EMOJI_ID)
     watch_emoji = emoji_by_id(WATCH_EMOJI_ID)
+
     if not join_emoji or not watch_emoji:
         raise RuntimeError(
-            "参加/観戦用カスタム絵文字が見つかりません。絵文字IDを確認してください。"
+            "参加/観戦用カスタム絵文字が見つかりません。"
+            "絵文字IDを確認してください。"
         )
 
     await first.add_reaction(join_emoji)
@@ -1262,10 +1286,16 @@ async def post_recruitment(rid: int):
     with db() as c:
         c.execute(
             """UPDATE recruitments
-               SET recruitment_message_id=?, recruitment_channel_id=?
+               SET recruitment_message_id=?,
+                   recruitment_channel_id=?
                WHERE id=?""",
             (str(first.id), str(channel.id), rid),
         )
+
+    print(
+        f"[RECRUITMENT] initial post sent rid={rid} channel={channel.id}",
+        flush=True,
+    )
 
 
 async def set_waiting_access(rid: int, uid: str, allow: bool):
@@ -2552,7 +2582,6 @@ async def reschedule_submit(
         deadline_date + "T21:00:00"
     ).replace(tzinfo=JST)
 
-    # 元の参加者/観戦者を先に取得
     with db() as c:
         old_members = c.execute(
             """SELECT discord_id, member_type, active, joined_at
@@ -2633,7 +2662,6 @@ async def reschedule_submit(
                 (new_id, r["image_path"]),
             )
 
-        # 参加者・観戦者を新しい日程調整にも引き継ぐ
         for m in old_members:
             c.execute(
                 """INSERT INTO members(
@@ -2655,47 +2683,70 @@ async def reschedule_submit(
                 ),
             )
 
-        # 元の日程調整は再調整済みにする
         c.execute(
             "UPDATE recruitments SET status='RESCHEDULED' WHERE id=?",
             (rid,),
         )
 
-    # 元の日程調整チャンネルが残っていれば、そこへ送信
-    channel = None
     guild = bot.get_guild(GUILD_ID)
+    channel = None
 
+    # 元シナリオの日程調整チャンネルをそのまま使う
     if guild and r["waiting_channel_id"]:
-        channel = guild.get_channel(int(r["waiting_channel_id"]))
+        channel_id = int(r["waiting_channel_id"])
+        channel = guild.get_channel(channel_id)
+
         if not channel:
             try:
-                channel = await guild.fetch_channel(
-                    int(r["waiting_channel_id"])
-                )
+                channel = await guild.fetch_channel(channel_id)
             except Exception:
                 channel = None
 
-    # 何らかの理由で元チャンネルが無い場合だけ新規作成
+    # 元の日程調整チャンネルが消えていた場合のみ再作成
     if channel is None:
         await create_waiting_channel(new_id)
         nr = get_recruitment(new_id)
-        if guild and nr and nr["waiting_channel_id"]:
-            channel = guild.get_channel(int(nr["waiting_channel_id"]))
 
-    if channel:
-        try:
-            await send_long(
-                channel,
-                (
-                    "## 🔄 再日程調整を開始しました\n\n"
-                    f"開始時間：**{start_time}〜**\n"
-                    f"回答期限：**{deadline_date} 21:00**\n\n"
-                    "以下のリンクから新しい日程を回答してください。\n"
-                    f"{BASE_URL}/r/{new_id}"
-                ),
-            )
-        except Exception as e:
-            log_error(f"reschedule_message rid={new_id}", e)
+        if guild and nr and nr["waiting_channel_id"]:
+            channel_id = int(nr["waiting_channel_id"])
+            channel = guild.get_channel(channel_id)
+
+            if not channel:
+                try:
+                    channel = await guild.fetch_channel(channel_id)
+                except Exception:
+                    channel = None
+
+    if not channel:
+        raise HTTPException(
+            500,
+            "日程調整チャンネルを取得できませんでした",
+        )
+
+    try:
+        await send_long(
+            channel,
+            (
+                "## 🔄 再日程調整\n\n"
+                f"『{r['scenario_name']}』の再日程調整を開始しました。\n\n"
+                f"開始時間：**{start_time}〜**\n"
+                f"回答期限：**{deadline_date} 21:00**\n\n"
+                "以下のリンクから新しい日程を回答してください。\n"
+                f"{BASE_URL}/r/{new_id}"
+            ),
+        )
+    except Exception as e:
+        log_error(f"reschedule_message rid={new_id}", e)
+        raise HTTPException(
+            500,
+            "日程調整チャンネルへの投稿に失敗しました",
+        )
+
+    print(
+        f"[RESCHEDULE] waiting-channel-only old_rid={rid} "
+        f"new_rid={new_id} channel={channel.id}",
+        flush=True,
+    )
 
     return RedirectResponse(f"/r/{new_id}", status_code=303)
 
