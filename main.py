@@ -1178,7 +1178,46 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <meta name='theme-color' content='#080c14'>
 <title>{esc(title)} - つぶたく</title>
-<style>{CSS}</style>
+<style>{CSS}
+.table-menu{
+  position:absolute;
+  top:22px;
+  right:20px;
+  z-index:30;
+}
+.table-menu summary{
+  list-style:none;
+  cursor:pointer;
+  color:#7184a3;
+  font-size:28px;
+  line-height:1;
+  padding:8px 10px;
+}
+.table-menu summary::-webkit-details-marker{display:none}
+.table-menu form{
+  position:absolute;
+  top:38px;
+  right:0;
+  width:170px;
+  padding:8px;
+  border:1px solid #2b3950;
+  border-radius:14px;
+  background:#121b29;
+  box-shadow:0 14px 32px rgba(0,0,0,.38);
+}
+.delete-table-btn{
+  width:100%;
+  border:0;
+  border-radius:10px;
+  padding:12px 14px;
+  background:#3a1820;
+  color:#ff6b7a;
+  font-weight:800;
+  cursor:pointer;
+}
+.delete-table-btn:hover{background:#4a1c26}
+
+</style>
 </head>
 <body>
 <div class='wrap'>
@@ -1933,10 +1972,27 @@ async def join_list(request: Request):
         else:
             badge = ""
 
+        is_gm = str(uid) == str(r["gm_discord_id"])
+
+        if is_gm:
+            menu = f"""
+              <details class='table-menu' onclick='event.preventDefault(); event.stopPropagation();'>
+                <summary aria-label='募集メニュー'>⋮</summary>
+                <form method='post' action='/r/{r["id"]}/delete'
+                      onclick='event.stopPropagation();'
+                      onsubmit="event.stopPropagation(); return confirm('この募集を削除しますか？\\n募集投稿・日程調整チャンネル・回答データも削除されます。');">
+                  {csrf_field(request)}
+                  <button type='submit' class='delete-table-btn'>募集を削除</button>
+                </form>
+              </details>
+            """
+        else:
+            menu = "<div class='kebab'>⋮</div>"
+
         cards.append(
             f"""
             <a class='session-card' href='/r/{r["id"]}'>
-              <div class='kebab'>⋮</div>
+              {menu}
               {badge}
               <div class='session-card-title'>{esc(r["scenario_name"])}</div>
               <div class='session-card-meta'>
@@ -2214,6 +2270,100 @@ async def new_submit(
     return RedirectResponse(f"/r/{rid}", status_code=303)
 
 
+
+@app.post("/r/{rid}/delete")
+async def delete_recruitment(rid: int, request: Request):
+    uid = require_login(request)
+    await require_csrf(request)
+
+    r = get_recruitment(rid)
+    if not r:
+        raise HTTPException(404)
+
+    if str(uid) != str(r["gm_discord_id"]):
+        raise HTTPException(403, "募集を削除できるのはGM本人だけです")
+
+    # この募集 + そこから作られた再日程調整を収集
+    ids = [rid]
+    with db() as c:
+        i = 0
+        while i < len(ids):
+            children = c.execute(
+                "SELECT id FROM recruitments WHERE parent_id=?",
+                (ids[i],),
+            ).fetchall()
+            for child in children:
+                cid = int(child["id"])
+                if cid not in ids:
+                    ids.append(cid)
+            i += 1
+
+        targets = c.execute(
+            f"""SELECT id, recruitment_channel_id, recruitment_message_id,
+                       waiting_channel_id
+                FROM recruitments
+                WHERE id IN ({','.join('?' for _ in ids)})""",
+            ids,
+        ).fetchall()
+
+    guild = bot.get_guild(GUILD_ID)
+
+    # Discord募集メッセージを削除
+    if guild:
+        for x in targets:
+            if x["recruitment_channel_id"] and x["recruitment_message_id"]:
+                try:
+                    ch = guild.get_channel(int(x["recruitment_channel_id"]))
+                    if not ch:
+                        ch = await guild.fetch_channel(int(x["recruitment_channel_id"]))
+                    msg = await ch.fetch_message(int(x["recruitment_message_id"]))
+                    await msg.delete()
+                except Exception as e:
+                    log_error(f"delete_message rid={x['id']}", e)
+
+        # 同じ日程調整チャンネルを複数回消さない
+        waiting_ids = {
+            int(x["waiting_channel_id"])
+            for x in targets
+            if x["waiting_channel_id"]
+        }
+        for channel_id in waiting_ids:
+            try:
+                ch = guild.get_channel(channel_id)
+                if not ch:
+                    ch = await guild.fetch_channel(channel_id)
+                await ch.delete(reason=f"つぶ卓 募集削除 rid={rid}")
+            except Exception as e:
+                log_error(f"delete_waiting_channel rid={rid}", e)
+
+    # 関連DBデータを削除
+    with db() as c:
+        placeholders = ",".join("?" for _ in ids)
+
+        for table in (
+            "answers",
+            "comments",
+            "gm_dates",
+            "members",
+            "recruitment_images",
+            "sessions",
+        ):
+            try:
+                c.execute(
+                    f"DELETE FROM {table} WHERE recruitment_id IN ({placeholders})",
+                    ids,
+                )
+            except Exception as e:
+                log_error(f"delete_table {table} rid={rid}", e)
+
+        # 子→親の順で削除
+        for target_id in reversed(ids):
+            c.execute("DELETE FROM recruitments WHERE id=?", (target_id,))
+
+    print(f"[DELETE] recruitment rid={rid} ids={ids}", flush=True)
+    return RedirectResponse("/join", status_code=303)
+
+
 @app.get("/r/{rid}", response_class=HTMLResponse)
 async def recruitment_page(rid: int, request: Request):
     r = get_recruitment(rid)
@@ -2408,14 +2558,14 @@ async def recruitment_page(rid: int, request: Request):
         """
     else:
         if gm:
-            note = "GMは回答対象ではありません。PLの回答状況を確認できます。"
+            note_html = ""
         elif spectator:
-            note = "観戦希望では日程回答はありません。PLの回答状況を確認できます。"
+            note_html = "<div class='viewer-note'>観戦希望では日程回答はありません。PLの回答状況を確認できます。</div>"
         else:
-            note = "回答するにはDiscord募集メッセージの「参加」リアクションを押してください。"
+            note_html = "<div class='viewer-note'>回答するにはDiscord募集メッセージの「参加」リアクションを押してください。</div>"
 
         schedule_block = f"""
-        <div class='viewer-note'>{note}</div>
+        {note_html}
 
         <div class='answer-title'>日程回答</div>
         <div class='answer-legend'>
