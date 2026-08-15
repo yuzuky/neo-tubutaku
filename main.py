@@ -1152,6 +1152,66 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
     flex-basis:56px;
   }
 }
+
+/* ===== 卓一覧 削除メニュー ===== */
+.session-card-wrap{
+  position:relative;
+}
+.session-card-wrap .session-card{
+  display:block;
+  padding-right:86px;
+}
+.kebab-outside{
+  position:absolute;
+  right:24px;
+  top:24px;
+  pointer-events:none;
+}
+.table-menu{
+  position:absolute;
+  top:18px;
+  right:18px;
+  z-index:40;
+}
+.table-menu summary{
+  list-style:none;
+  cursor:pointer;
+  color:#7184a3;
+  font-size:28px;
+  line-height:1;
+  padding:8px 10px;
+  border-radius:10px;
+}
+.table-menu summary:hover{
+  background:rgba(255,255,255,.05);
+}
+.table-menu summary::-webkit-details-marker{
+  display:none;
+}
+.table-menu form{
+  position:absolute;
+  top:42px;
+  right:0;
+  width:172px;
+  padding:8px;
+  border:1px solid #2b3950;
+  border-radius:14px;
+  background:#121b29;
+  box-shadow:0 14px 32px rgba(0,0,0,.42);
+}
+.delete-table-btn{
+  width:100%;
+  border:0;
+  border-radius:10px;
+  padding:12px 14px;
+  background:#3a1820;
+  color:#ff6b7a;
+  font-weight:800;
+  cursor:pointer;
+}
+.delete-table-btn:hover{
+  background:#4a1c26;
+}
 """
 
 
@@ -1178,46 +1238,7 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 <meta name='viewport' content='width=device-width,initial-scale=1'>
 <meta name='theme-color' content='#080c14'>
 <title>{esc(title)} - つぶたく</title>
-<style>{CSS}
-.table-menu{
-  position:absolute;
-  top:22px;
-  right:20px;
-  z-index:30;
-}
-.table-menu summary{
-  list-style:none;
-  cursor:pointer;
-  color:#7184a3;
-  font-size:28px;
-  line-height:1;
-  padding:8px 10px;
-}
-.table-menu summary::-webkit-details-marker{display:none}
-.table-menu form{
-  position:absolute;
-  top:38px;
-  right:0;
-  width:170px;
-  padding:8px;
-  border:1px solid #2b3950;
-  border-radius:14px;
-  background:#121b29;
-  box-shadow:0 14px 32px rgba(0,0,0,.38);
-}
-.delete-table-btn{
-  width:100%;
-  border:0;
-  border-radius:10px;
-  padding:12px 14px;
-  background:#3a1820;
-  color:#ff6b7a;
-  font-weight:800;
-  cursor:pointer;
-}
-.delete-table-btn:hover{background:#4a1c26}
-
-</style>
+<style>{CSS}</style>
 </head>
 <body>
 <div class='wrap'>
@@ -1976,30 +1997,31 @@ async def join_list(request: Request):
 
         if is_gm:
             menu = f"""
-              <details class='table-menu' onclick='event.preventDefault(); event.stopPropagation();'>
+              <details class='table-menu'>
                 <summary aria-label='募集メニュー'>⋮</summary>
                 <form method='post' action='/r/{r["id"]}/delete'
-                      onclick='event.stopPropagation();'
-                      onsubmit="event.stopPropagation(); return confirm('この募集を削除しますか？\\n募集投稿・日程調整チャンネル・回答データも削除されます。');">
+                      onsubmit="return confirm('この募集を削除しますか？\\n募集投稿・日程調整チャンネル・回答データも削除されます。');">
                   {csrf_field(request)}
                   <button type='submit' class='delete-table-btn'>募集を削除</button>
                 </form>
               </details>
             """
         else:
-            menu = "<div class='kebab'>⋮</div>"
+            menu = "<div class='kebab kebab-outside'>⋮</div>"
 
         cards.append(
             f"""
-            <a class='session-card' href='/r/{r["id"]}'>
+            <div class='session-card-wrap'>
+              <a class='session-card' href='/r/{r["id"]}'>
+                {badge}
+                <div class='session-card-title'>{esc(r["scenario_name"])}</div>
+                <div class='session-card-meta'>
+                  GM: {esc(r["gm_name"] or r["gm_discord_id"])}
+                  &nbsp;/&nbsp; {int(r["answered_count"])}人回答
+                </div>
+              </a>
               {menu}
-              {badge}
-              <div class='session-card-title'>{esc(r["scenario_name"])}</div>
-              <div class='session-card-meta'>
-                GM: {esc(r["gm_name"] or r["gm_discord_id"])}
-                &nbsp;/&nbsp; {int(r["answered_count"])}人回答
-              </div>
-            </a>
+            </div>
             """
         )
 
@@ -2283,8 +2305,9 @@ async def delete_recruitment(rid: int, request: Request):
     if str(uid) != str(r["gm_discord_id"]):
         raise HTTPException(403, "募集を削除できるのはGM本人だけです")
 
-    # この募集 + そこから作られた再日程調整を収集
+    # この募集と、そこから派生した再日程調整をすべて収集
     ids = [rid]
+
     with db() as c:
         i = 0
         while i < len(ids):
@@ -2292,75 +2315,193 @@ async def delete_recruitment(rid: int, request: Request):
                 "SELECT id FROM recruitments WHERE parent_id=?",
                 (ids[i],),
             ).fetchall()
+
             for child in children:
                 cid = int(child["id"])
                 if cid not in ids:
                     ids.append(cid)
+
             i += 1
 
+        placeholders = ",".join("?" for _ in ids)
+
         targets = c.execute(
-            f"""SELECT id, recruitment_channel_id, recruitment_message_id,
+            f"""SELECT id,
+                       recruitment_channel_id,
+                       recruitment_message_id,
                        waiting_channel_id
                 FROM recruitments
-                WHERE id IN ({','.join('?' for _ in ids)})""",
-            ids,
+                WHERE id IN ({placeholders})""",
+            tuple(ids),
         ).fetchall()
 
+        image_rows = c.execute(
+            f"""SELECT image_path
+                FROM recruitment_images
+                WHERE recruitment_id IN ({placeholders})""",
+            tuple(ids),
+        ).fetchall()
+
+        session_rows = c.execute(
+            f"""SELECT id
+                FROM sessions
+                WHERE recruitment_id IN ({placeholders})""",
+            tuple(ids),
+        ).fetchall()
+
+    # --------------------------------------------------------
+    # Discord側を削除
+    # --------------------------------------------------------
     guild = bot.get_guild(GUILD_ID)
 
-    # Discord募集メッセージを削除
     if guild:
+        # 募集板の投稿
         for x in targets:
-            if x["recruitment_channel_id"] and x["recruitment_message_id"]:
-                try:
-                    ch = guild.get_channel(int(x["recruitment_channel_id"]))
-                    if not ch:
-                        ch = await guild.fetch_channel(int(x["recruitment_channel_id"]))
-                    msg = await ch.fetch_message(int(x["recruitment_message_id"]))
-                    await msg.delete()
-                except Exception as e:
-                    log_error(f"delete_message rid={x['id']}", e)
+            if not (
+                x["recruitment_channel_id"]
+                and x["recruitment_message_id"]
+            ):
+                continue
 
-        # 同じ日程調整チャンネルを複数回消さない
+            try:
+                channel_id = int(x["recruitment_channel_id"])
+                message_id = int(x["recruitment_message_id"])
+
+                ch = guild.get_channel(channel_id)
+                if not ch:
+                    ch = await guild.fetch_channel(channel_id)
+
+                msg = await ch.fetch_message(message_id)
+                await msg.delete()
+
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log_error(
+                    f"delete recruitment message rid={x['id']}",
+                    e,
+                )
+
+        # 日程調整チャンネル
         waiting_ids = {
             int(x["waiting_channel_id"])
             for x in targets
             if x["waiting_channel_id"]
         }
+
         for channel_id in waiting_ids:
             try:
                 ch = guild.get_channel(channel_id)
+
                 if not ch:
                     ch = await guild.fetch_channel(channel_id)
-                await ch.delete(reason=f"つぶ卓 募集削除 rid={rid}")
-            except Exception as e:
-                log_error(f"delete_waiting_channel rid={rid}", e)
 
-    # 関連DBデータを削除
+                await ch.delete(
+                    reason=f"つぶ卓 募集削除 rid={rid}"
+                )
+
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log_error(
+                    f"delete waiting channel rid={rid}",
+                    e,
+                )
+
+    # --------------------------------------------------------
+    # DB側を削除
+    # --------------------------------------------------------
     with db() as c:
         placeholders = ",".join("?" for _ in ids)
 
+        session_ids = [
+            int(x["id"])
+            for x in session_rows
+        ]
+
+        if session_ids:
+            s_marks = ",".join("?" for _ in session_ids)
+
+            c.execute(
+                f"""DELETE FROM session_members
+                    WHERE session_id IN ({s_marks})""",
+                tuple(session_ids),
+            )
+
+            c.execute(
+                f"""DELETE FROM sessions
+                    WHERE id IN ({s_marks})""",
+                tuple(session_ids),
+            )
+
+        # 子テーブル
         for table in (
             "answers",
             "comments",
             "gm_dates",
             "members",
             "recruitment_images",
-            "sessions",
         ):
-            try:
-                c.execute(
-                    f"DELETE FROM {table} WHERE recruitment_id IN ({placeholders})",
-                    ids,
-                )
-            except Exception as e:
-                log_error(f"delete_table {table} rid={rid}", e)
+            c.execute(
+                f"""DELETE FROM {table}
+                    WHERE recruitment_id IN ({placeholders})""",
+                tuple(ids),
+            )
 
-        # 子→親の順で削除
+        # 子募集→親募集の順で削除
         for target_id in reversed(ids):
-            c.execute("DELETE FROM recruitments WHERE id=?", (target_id,))
+            c.execute(
+                "DELETE FROM recruitments WHERE id=?",
+                (target_id,),
+            )
 
-    print(f"[DELETE] recruitment rid={rid} ids={ids}", flush=True)
+    # --------------------------------------------------------
+    # DBから参照されなくなった画像ファイルを削除
+    # --------------------------------------------------------
+    candidate_paths = {
+        str(x["image_path"])
+        for x in image_rows
+        if x["image_path"]
+    }
+
+    with db() as c:
+        for path_str in candidate_paths:
+            still_multi = c.execute(
+                """SELECT 1
+                   FROM recruitment_images
+                   WHERE image_path=?
+                   LIMIT 1""",
+                (path_str,),
+            ).fetchone()
+
+            still_legacy = c.execute(
+                """SELECT 1
+                   FROM recruitments
+                   WHERE image_path=?
+                   LIMIT 1""",
+                (path_str,),
+            ).fetchone()
+
+            if still_multi or still_legacy:
+                continue
+
+            try:
+                p = Path(path_str)
+
+                if p.exists() and UPLOAD_DIR in p.parents:
+                    p.unlink()
+
+            except Exception as e:
+                log_error(
+                    f"delete image rid={rid}",
+                    e,
+                )
+
+    print(
+        f"[DELETE] recruitment rid={rid} ids={ids}",
+        flush=True,
+    )
+
     return RedirectResponse("/join", status_code=303)
 
 
