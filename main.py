@@ -1399,9 +1399,10 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
     if int(r["schedule_pending"] or 0):
         await ch.send(
             f'🎲 **「{r["scenario_name"]}」募集開始**\n\n'
-            '日程調整は後日行われます。\n'
+            '日程調整は後日行う\n\n'
             '参加リアクションを押した方はこちらのチャンネルへ追加されます。\n'
-            'GMからの日程調整開始の案内をお待ちください。'
+            'GMからの日程調整開始の案内をお待ちください。\n\n'
+            f'GM用：日程調整を開始する\n{BASE_URL}/r/{rid}/schedule/start'
         )
     else:
         deadline = datetime.fromisoformat(
@@ -1460,7 +1461,7 @@ async def post_recruitment(rid: int):
     if int(r["schedule_pending"] or 0):
         closing = (
             '参加希望の方は「参加」リアクションを押してください！\n'
-            '日程調整は後日行います。'
+            '日程調整は後日行う'
         )
     else:
         closing = (
@@ -2993,16 +2994,120 @@ async def decide_form(rid: int, request: Request):
         checkboxes = "".join(f"<label><input style='width:auto' type='checkbox' name='member_{x['date']}' value='{uid2}' checked> {esc(user_display(uid2))}</label>" for uid2 in x["yes"])
         maybe = ", ".join(esc(user_display(u)) for u in x["maybe"]) or "なし"
         over = len(x["yes"]) > r["max_players"]
-        cards += f"""<div class='candidate {'good' if not over else ''}'><label><input style='width:auto' type='radio' name='event_date' value='{x['date']}' required> <b>{x['date']}</b>　○{len(x['yes'])}人 {'⚠ 最大人数超過' if over else ''}</label><div class='members'>{checkboxes}</div><p class='small muted'>△：{maybe}</p>{f'<button type="button" class="btn alt" onclick="randomPick(\'{x["date"]}\',{r["max_players"]})">ランダムで{r["max_players"]}人選ぶ</button>' if over else ''}</div>"""
+        cards += f"""<div class='candidate {'good' if not over else ''}'><label><input style='width:auto' type='radio' name='event_date' value='{x['date']}' required> <b>{x['date']}</b>　○{len(x['yes'])}人 {'⚠ 最大人数超過' if over else ''}</label><div class='members'>{checkboxes}</div><p class='small muted'>△：{maybe}</p>{f'<button type="button" class="btn alt" onclick="randomPick(\'{x["date"]}\',{r["max_players"]})">この日からランダムで{r["max_players"]}人選ぶ</button>' if over else ''}</div>"""
+    candidate_dates_json = json.dumps(
+        [x["date"] for x in candidates],
+        ensure_ascii=False,
+    )
+
     return page("開催日決定", f"""
     <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
-    <form class='card' method='post' action='/r/{rid}/decide'>{csrf_field(request)}<h2>開催日を決定</h2><label>何陣目？<input type='number' min='1' name='round_no' value='1' required></label>{cards}<button>この内容で卓を成立させる</button></form>
-    <script>function randomPick(d,max){{let xs=[...document.querySelectorAll(`[name="member_${{d}}"]`)];xs.forEach(x=>x.checked=false);xs.sort(()=>Math.random()-.5).slice(0,max).forEach(x=>x.checked=true)}}</script>
+
+    <form class='card' method='post' action='/r/{rid}/decide'>
+      {csrf_field(request)}
+      <h2>開催日を決定</h2>
+
+      <label>
+        何陣目？
+        <input type='number' min='1' name='round_no' value='1' required>
+      </label>
+
+      <input type='hidden'
+             id='selection_method'
+             name='selection_method'
+             value='manual'>
+
+      <button type='button'
+              class='btn alt'
+              style='margin:0 0 18px;width:100%'
+              onclick='randomSessionPick()'>
+        🎲 開催日と参加者をランダムで選ぶ
+      </button>
+
+      {cards}
+
+      <button>この内容で卓を成立させる</button>
+    </form>
+
+    <script>
+    const candidateDates={candidate_dates_json};
+
+    function shuffle(xs){{
+      return [...xs].sort(()=>Math.random()-.5);
+    }}
+
+    function clearAllMembers(){{
+      document.querySelectorAll(
+        'input[type="checkbox"][name^="member_"]'
+      ).forEach(x=>x.checked=false);
+    }}
+
+    function randomPick(d,max){{
+      document.getElementById('selection_method').value='random';
+
+      let xs=[
+        ...document.querySelectorAll(
+          `[name="member_${{d}}"]`
+        )
+      ];
+
+      xs.forEach(x=>x.checked=false);
+
+      shuffle(xs)
+        .slice(0,Math.min(max,xs.length))
+        .forEach(x=>x.checked=true);
+    }}
+
+    function randomSessionPick(){{
+      if(!candidateDates.length) return;
+
+      const d =
+        candidateDates[
+          Math.floor(Math.random()*candidateDates.length)
+        ];
+
+      const radio=document.querySelector(
+        `input[name="event_date"][value="${{d}}"]`
+      );
+
+      if(!radio) return;
+
+      radio.checked=true;
+      clearAllMembers();
+
+      const members=[
+        ...document.querySelectorAll(
+          `[name="member_${{d}}"]`
+        )
+      ];
+
+      const max={int(r["max_players"])};
+      const chosen=shuffle(members)
+        .slice(0,Math.min(max,members.length));
+
+      chosen.forEach(x=>x.checked=true);
+
+      document.getElementById(
+        'selection_method'
+      ).value='random';
+
+      radio.scrollIntoView({{
+        behavior:'smooth',
+        block:'center'
+      }});
+    }}
+    </script>
     """, request)
 
 
 @app.post("/r/{rid}/decide")
-async def decide_submit(request: Request, rid: int, event_date: str = Form(...), round_no: int = Form(...)):
+async def decide_submit(
+    request: Request,
+    rid: int,
+    event_date: str = Form(...),
+    round_no: int = Form(...),
+    selection_method: str = Form("manual"),
+):
     uid = require_login(request)
     await require_csrf(request)
     r = get_recruitment(rid)
@@ -3050,9 +3155,55 @@ async def decide_submit(request: Request, rid: int, event_date: str = Form(...),
         if r["guide_message"]:
             msg += f'\n\n## 【事前準備】\n{r["guide_message"]}'
         await send_long(ch, msg)
+
+        # 日程調整チャンネルにも簡易通知（常にsilent）
+        waiting_ch = None
+
+        if r["waiting_channel_id"]:
+            waiting_ch = guild.get_channel(
+                int(r["waiting_channel_id"])
+            )
+
+            if not waiting_ch:
+                try:
+                    waiting_ch = await guild.fetch_channel(
+                        int(r["waiting_channel_id"])
+                    )
+                except Exception:
+                    waiting_ch = None
+
+        if waiting_ch:
+            member_mentions = "、".join(
+                f"<@{x}>"
+                for x in selected
+            )
+
+            waiting_msg = (
+                f"✅ **{round_no}陣の開催が決定しました**\n"
+                f"開催日：**{event_date} {r['start_time']}〜**\n"
+                f"参加者：{member_mentions}"
+            )
+
+            if selection_method == "random":
+                waiting_msg += (
+                    "\n※開催日・参加者はランダムで選出しました。"
+                )
+
+            await waiting_ch.send(
+                waiting_msg,
+                silent=True,
+            )
+
         with db() as c:
-            c.execute("UPDATE sessions SET channel_id=? WHERE id=?", (str(ch.id), sid))
-            c.execute("UPDATE recruitments SET status='CONFIRMED' WHERE id=?", (rid,))
+            c.execute(
+                "UPDATE sessions SET channel_id=? WHERE id=?",
+                (str(ch.id), sid),
+            )
+            c.execute(
+                "UPDATE recruitments SET status='CONFIRMED' WHERE id=?",
+                (rid,),
+            )
+
         schedule_session_reminder(sid)
     except Exception as e:
         log_error(f"decide_submit rid={rid}", e)
@@ -3072,11 +3223,24 @@ async def schedule_start_form(rid: int, request: Request):
 
     r = get_recruitment(rid)
 
-    if (
-        not r
-        or str(uid) != str(r["gm_discord_id"])
-    ):
-        raise HTTPException(403)
+    if not r:
+        raise HTTPException(404)
+
+    if str(uid) != str(r["gm_discord_id"]):
+        return page(
+            "日程調整",
+            f"""
+            <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
+            <div class='card'>
+              <h2 style='font-size:1.2rem'>日程調整をお待ちください</h2>
+              <p class='muted'>
+                日程調整はまだ開始されていません。<br>
+                GMからの案内をお待ちください。
+              </p>
+            </div>
+            """,
+            request,
+        )
 
     if not int(r["schedule_pending"] or 0):
         return RedirectResponse(
