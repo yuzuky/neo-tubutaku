@@ -1226,6 +1226,35 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
 .delete-table-btn:hover{
   background:#4a1c26;
 }
+
+/* ===== 開催日決定 UI 微調整 ===== */
+.round-number-row{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-bottom:18px;
+  font-size:1rem;
+  font-weight:700;
+}
+
+.round-number-row input{
+  width:110px;
+  min-width:110px;
+  margin:0;
+}
+
+.round-number-row span{
+  white-space:nowrap;
+}
+
+.random-session-btn{
+  width:100%;
+  margin:10px 0 18px;
+  padding-top:15px;
+  padding-bottom:15px;
+  font-size:.88rem;
+  font-weight:800;
+}
 """
 
 
@@ -2195,7 +2224,7 @@ async def new_form(request: Request):
                    name='schedule_later'
                    value='1'
                    onchange='toggleScheduleLater()'>
-            日程募集は後日行う
+            日程調整を後日行う
           </label>
 
           <div id='scheduleFields' class='form-section'>
@@ -3007,9 +3036,13 @@ async def decide_form(rid: int, request: Request):
       {csrf_field(request)}
       <h2>開催日を決定</h2>
 
-      <label>
-        何陣目？
-        <input type='number' min='1' name='round_no' value='1' required>
+      <label class='round-number-row'>
+        <input type='number'
+               min='1'
+               name='round_no'
+               value='1'
+               required>
+        <span>陣目</span>
       </label>
 
       <input type='hidden'
@@ -3018,8 +3051,7 @@ async def decide_form(rid: int, request: Request):
              value='manual'>
 
       <button type='button'
-              class='btn alt'
-              style='margin:0 0 18px;width:100%'
+              class='btn alt random-session-btn'
               onclick='randomSessionPick()'>
         🎲 開催日と参加者をランダムで選ぶ
       </button>
