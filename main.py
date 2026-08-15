@@ -1678,7 +1678,11 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
                 ch = guild.get_channel(int(r["waiting_channel_id"]))
                 if ch:
                     label = "参加" if kind == "participant" else "観戦希望"
-                    await ch.send(f'<@{uid}> が「{label}」リアクションを押しました。')
+                    emoji = "🎉" if kind == "participant" else "👀"
+                    await ch.send(
+                        f'<@{uid}> が{label}を押しました{emoji}',
+                        silent=True,
+                    )
                     print(
                         f"[REACTION:{action}] notification sent channel={ch.id}",
                         flush=True,
