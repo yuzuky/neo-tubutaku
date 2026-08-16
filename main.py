@@ -191,6 +191,14 @@ def init_db():
                 FOREIGN KEY(recruitment_id) REFERENCES recruitments(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS answer_submissions (
+                recruitment_id INTEGER NOT NULL,
+                discord_id TEXT NOT NULL,
+                submitted_at TEXT NOT NULL,
+                PRIMARY KEY(recruitment_id, discord_id),
+                FOREIGN KEY(recruitment_id) REFERENCES recruitments(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS sessions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 recruitment_id INTEGER NOT NULL,
@@ -245,6 +253,16 @@ def ensure_recruitment_columns():
                 "ALTER TABLE recruitments "
                 "ADD COLUMN schedule_pending INTEGER NOT NULL DEFAULT 0"
             )
+        if "simple_schedule" not in cols:
+            c.execute("ALTER TABLE recruitments ADD COLUMN simple_schedule INTEGER NOT NULL DEFAULT 0")
+        if "target_players" not in cols:
+            c.execute("ALTER TABLE recruitments ADD COLUMN target_players INTEGER")
+        if "gm_name_override" not in cols:
+            c.execute("ALTER TABLE recruitments ADD COLUMN gm_name_override TEXT")
+        if "target_channel_id" not in cols:
+            c.execute("ALTER TABLE recruitments ADD COLUMN target_channel_id TEXT")
+        if "target_message_id" not in cols:
+            c.execute("ALTER TABLE recruitments ADD COLUMN target_message_id TEXT")
 
 ensure_recruitment_columns()
 
@@ -689,6 +707,12 @@ button,input,textarea,select{font:inherit}
   background:linear-gradient(135deg,#6d4aff 0%,#9d4edd 100%);
   border-color:rgba(255,255,255,.13);
 }
+.menu-card.schedule{
+  background:linear-gradient(135deg,#0f9f8b 0%,#18b981 100%);
+  border-color:rgba(255,255,255,.13);
+}
+.menu-card.schedule .menu-sub{color:rgba(255,255,255,.76)}
+.menu-card.schedule .chev{color:white}
 .menu-icon{
   width:56px;height:56px;
   flex:0 0 56px;
@@ -1333,6 +1357,45 @@ def in_quiet_hours(dt: datetime | None = None) -> bool:
     return dt.hour >= 21 or dt.hour < 9
 
 
+async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChannel]:
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return []
+    member = await fetch_member(guild, uid)
+    me = guild.me
+    if not member or not me:
+        return []
+    out=[]
+    for ch in guild.text_channels:
+        try:
+            up=ch.permissions_for(member); bp=ch.permissions_for(me)
+            if up.view_channel and bp.view_channel and bp.send_messages:
+                out.append(ch)
+        except Exception:
+            pass
+    return out
+
+
+def is_simple_schedule(r) -> bool:
+    try:
+        return bool(int(r["simple_schedule"] or 0))
+    except Exception:
+        return False
+
+
+def submitted_user_ids(rid: int) -> set[str]:
+    with db() as c:
+        rows=c.execute("SELECT discord_id FROM answer_submissions WHERE recruitment_id=?",(rid,)).fetchall()
+    return {str(x["discord_id"]) for x in rows}
+
+
+def simple_schedule_all_answered(rid: int) -> bool:
+    with db() as c:
+        rows=c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1",(rid,)).fetchall()
+    targets={str(x["discord_id"]) for x in rows}
+    return bool(targets) and targets.issubset(submitted_user_ids(rid))
+
+
 async def notify_availability_if_needed(rid: int):
     """
     最小募集人数を初めて満たす開催候補日ができた瞬間だけ、
@@ -1348,6 +1411,8 @@ async def notify_availability_if_needed(rid: int):
     except Exception:
         already = 0
     if already:
+        return
+    if is_simple_schedule(r) and not r["target_players"]:
         return
 
     candidates = [
@@ -1678,9 +1743,8 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
                 ch = guild.get_channel(int(r["waiting_channel_id"]))
                 if ch:
                     label = "参加" if kind == "participant" else "観戦希望"
-                    emoji = "🎉" if kind == "participant" else "👀"
                     await ch.send(
-                        f'<@{uid}> が{label}を押しました{emoji}',
+                        f'<@{uid}> が{label}を押しました🎉',
                         silent=True,
                     )
                     print(
@@ -1966,41 +2030,17 @@ async def logout(request: Request):
 
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
-    uid = request.session.get("user_id")
-
-    new_href = "/new" if uid else "/login?next=/new"
-    join_href = "/join" if uid else "/login?next=/join"
-
-    return page(
-        "ホーム",
-        f"""
-        <section class='hero'>
-          <div class='hero-kicker'>TRPG・マダミス日程調整</div>
-          <h1>○と△だけで、<br>もっと手軽に。</h1>
-        </section>
-
-        <div class='menu-stack'>
-          <a class='menu-card primary' href='{new_href}'>
-            <div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div>
-            <div>
-              <div class='menu-title'>卓を立てる</div>
-              <div class='menu-sub'>GM・募集と日程調整を作成</div>
-            </div>
-            <div class='chev'>›</div>
-          </a>
-
-          <a class='menu-card' href='{join_href}'>
-            <div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div>
-            <div>
-              <div class='menu-title'>卓に参加する</div>
-              <div class='menu-sub'>PL・募集一覧と回答状況を見る</div>
-            </div>
-            <div class='chev'>›</div>
-          </a>
-        </div>
-        """,
-        request,
-    )
+    uid=request.session.get("user_id")
+    schedule_href="/schedule/new" if uid else "/login?next=/schedule/new"
+    new_href="/new" if uid else "/login?next=/new"
+    join_href="/join" if uid else "/login?next=/join"
+    return page("ホーム",f"""
+      <section class='hero'><div class='hero-kicker'>Discord × 日程調整</div><h1>○と△だけで、<br>もっと手軽に。</h1></section>
+      <div class='menu-stack'>
+        <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみの方</div></div><div class='chev'>›</div></a>
+        <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>GMの方：募集投稿・チャンネル作成・日程投票</div></div><div class='chev'>›</div></a>
+        <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
+      </div>""",request)
 
 
 @app.get("/join", response_class=HTMLResponse)
@@ -2040,9 +2080,10 @@ async def join_list(request: Request):
                FROM recruitments r
                LEFT JOIN users u ON u.discord_id=r.gm_discord_id
                WHERE r.created_at >= ?
+                 AND EXISTS (SELECT 1 FROM members mine WHERE mine.recruitment_id=r.id AND mine.discord_id=? AND mine.member_type='participant' AND mine.active=1)
                ORDER BY r.id DESC
                LIMIT 100""",
-            (cutoff,),
+            (cutoff, str(uid)),
         ).fetchall()
 
     cards = []
@@ -2107,6 +2148,89 @@ async def join_list(request: Request):
         """,
         request,
     )
+
+
+@app.get("/schedule/new", response_class=HTMLResponse)
+async def simple_schedule_form(request: Request):
+    uid=request.session.get("user_id")
+    if not uid: return RedirectResponse("/login?next=/schedule/new")
+    channels=await visible_sendable_channels_for_user(str(uid))
+    options="".join(f"<option value='{x.id}'>#{esc(x.name)}</option>" for x in channels) or "<option value=''>送信可能なチャンネルがありません</option>"
+    default_deadline=(now_jst().date()+timedelta(days=7)).isoformat()
+    today=now_jst().date()
+    y=today.year; m=today.month+2
+    if m>12: y+=(m-1)//12; m=(m-1)%12+1
+    end=date(y,m,1)-timedelta(days=1)
+    wd=["月","火","水","木","金","土","日"]; cells=[]; d=today
+    while d<=end:
+        cells.append(f"<button type='button' class='date-cell' data-date='{d.isoformat()}' onclick='toggleGM(this)'><span>{d.month}/{d.day}<small>({wd[d.weekday()]})</small></span><b class='state'>-</b></button>")
+        d+=timedelta(days=1)
+    return page("日程調整を作成",f"""
+    <a class='back-link' href='/'>‹ 戻る</a>
+    <form class='create-card' method='post' action='/schedule/new'>{csrf_field(request)}
+      <div class='create-head'><div class='create-eyebrow'>SIMPLE SCHEDULE</div><h2>日程調整を作成</h2><p class='muted'>TRPG・マダミス・イベントなど、用途を問わず使えます。</p></div>
+      <div class='form-section'>
+        <label class='field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>イベント名</span><input name='event_name' placeholder='例：夏のボドゲ会' required></div></div></label>
+        <label class='field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>GM名 / 主催者名</span><input name='gm_name' value='{esc(user_display(str(uid)))}' required></div></div></label>
+        <div class='field-row'><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>開始時間（任意）</span><input type='time' name='start_time'></div></div></label><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>回答期限</span><input type='date' name='deadline_date' value='{default_deadline}' required></div></div></label></div>
+        <label class='checkbox-row'><input type='checkbox' id='pc' name='player_count_enabled' value='1' onchange='tp()'>参加人数を設定する</label>
+        <div id='pf' style='display:none'><div class='field-row'><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>参加人数</span><input id='fp' type='number' min='1' name='fixed_players' value='4'></div></div></label></div><label class='checkbox-row'><input type='checkbox' id='vp2' name='variable_players' value='1' onchange='tv()'>人数を可変にする</label><div id='vr2' class='field-row' style='display:none'><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>最小人数</span><input type='number' min='1' name='min_players' value='2'></div></div></label><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>最大人数</span><input type='number' min='1' name='max_players' value='4'></div></div></label></div></div>
+      </div>
+      <div class='form-section'><div class='form-section-title'>開催候補日</div><div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div><input type='hidden' id='gm_dates' name='gm_dates'><div class='date-scroll'><div class='grid'>{''.join(cells)}</div></div><div class='legend'><span><b style='color:#22c55e'>○</b> 開催できる</span><span><b>-</b> 開催できない</span></div></div>
+      <div class='form-section'><div class='form-section-title'>Discordへ送信</div><label class='field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>送信先チャンネル</span><select name='channel_id' required>{options}</select></div></div></label><p class='muted small'>あなたが閲覧でき、つぶ卓Botが投稿できるチャンネルのみ表示します。選択したチャンネルを閲覧できるメンバー（Bot・主催者を除く）が回答対象になります。</p></div>
+      <button class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
+    </form>
+    <script>let selected=[];function toggleGM(el){{const d=el.dataset.date,s=el.querySelector('.state');if(selected.includes(d)){{selected=selected.filter(x=>x!==d);el.classList.remove('yes');s.textContent='-'}}else{{selected.push(d);el.classList.add('yes');s.textContent='○'}}document.getElementById('gm_dates').value=selected.join(',')}}function tp(){{document.getElementById('pf').style.display=document.getElementById('pc').checked?'block':'none'}}function tv(){{const x=document.getElementById('vp2').checked;document.getElementById('vr2').style.display=x?'grid':'none';document.getElementById('fp').disabled=x}}</script>
+    """,request)
+
+
+@app.post("/schedule/new")
+async def simple_schedule_submit(request: Request,event_name: str=Form(...),gm_name: str=Form(...),start_time: str=Form(""),deadline_date: str=Form(...),gm_dates: str=Form(...),channel_id: str=Form(...),player_count_enabled: Optional[str]=Form(None),variable_players: Optional[str]=Form(None),fixed_players: int=Form(4),min_players: int=Form(2),max_players: int=Form(4)):
+    uid=require_login(request); await require_csrf(request)
+    dates=sorted({x for x in gm_dates.split(',') if re.fullmatch(r"\d{4}-\d{2}-\d{2}",x)})
+    if not dates: raise HTTPException(400,"開催可能日を1日以上選んでください")
+    allowed={str(x.id):x for x in await visible_sendable_channels_for_user(str(uid))}; ch=allowed.get(str(channel_id))
+    if not ch: raise HTTPException(403,"このDiscordチャンネルは選択できません")
+    if player_count_enabled:
+        if variable_players: mn,mx,var,target=min_players,max_players,1,min_players
+        else: mn=mx=fixed_players; var=0; target=fixed_players
+        if mn<1 or mx<mn: raise HTTPException(400,"参加人数が不正です")
+    else: mn,mx,var,target=1,99,1,None
+    deadline=datetime.fromisoformat(deadline_date+"T21:00:00").replace(tzinfo=JST); sv=start_time.strip() or "未定"
+    with db() as c:
+        cur=c.execute("""INSERT INTO recruitments(game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,schedule_pending,created_at,simple_schedule,target_players,gm_name_override,target_channel_id,waiting_channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",("EVENT",event_name.strip(),str(uid),mn,mx,var,"","","",None,sv,deadline.isoformat(),"RECRUITING",0,iso_now(),1,target,gm_name.strip(),str(ch.id),str(ch.id)))
+        rid=cur.lastrowid; c.executemany("INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)",[(rid,x) for x in dates])
+    guild=bot.get_guild(GUILD_ID); targets=[]
+    if guild:
+        for member in guild.members:
+            if member.bot or str(member.id)==str(uid):
+                continue
+            try:
+                if not ch.permissions_for(member).view_channel:
+                    continue
+                # Administrator権限だけで全チャンネルが見えている運営者を
+                # 回答対象へ誤登録しない。明示的にこのチャンネルへ閲覧許可が
+                # 付いている場合だけ対象に含める。
+                if member.guild_permissions.administrator:
+                    explicit = ch.overwrites_for(member).view_channel is True
+                    if not explicit:
+                        explicit = any(
+                            ch.overwrites_for(role).view_channel is True
+                            for role in member.roles
+                        )
+                    if not explicit:
+                        continue
+                targets.append(str(member.id))
+            except Exception:
+                pass
+    with db() as c:
+        c.executemany("INSERT OR IGNORE INTO members(recruitment_id,discord_id,member_type,active,joined_at) VALUES(?,?,?,?,?)",[(rid,x,"participant",1,iso_now()) for x in targets])
+    tl=f"開始時間：**{sv}**\n" if start_time.strip() else ""; pl=""
+    if target: pl=(f"参加人数：**{mn}〜{mx}人**\n" if var else f"参加人数：**{mn}人**\n")
+    sent=await ch.send(f"📅 **{event_name.strip()}｜日程調整**\n\n主催：**{gm_name.strip()}**\n{tl}{pl}回答期限：**{deadline.strftime('%Y/%m/%d')}**\n\n下のURLから ○ / △ / - で回答してください。\n{BASE_URL}/r/{rid}")
+    with db() as c: c.execute("UPDATE recruitments SET target_message_id=? WHERE id=?",(str(sent.id),rid))
+    url=f"{BASE_URL}/r/{rid}"
+    return page("日程調整を作成しました",f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>Discordの <b>#{esc(ch.name)}</b> へ送信しました。</p><div class='answer-url-box'><code id='answerUrl'>{esc(url)}</code><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLをコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');b.textContent='コピーしました';setTimeout(()=>b.textContent='URLをコピー',1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",request)
 
 
 @app.get("/new", response_class=HTMLResponse)
@@ -2710,16 +2834,14 @@ async def recruitment_page(rid: int, request: Request):
         }
 
     comment = cm["comment"] if cm else ""
-    gm_name = (
-        (gm_user["display_name"] or gm_user["username"])
-        if gm_user else user_display(r["gm_discord_id"])
-    )
+    gm_name = r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else ((gm_user["display_name"] or gm_user["username"]) if gm_user else user_display(r["gm_discord_id"]))
 
     pl_uids = [x["discord_id"] for x in active]
     weekday_jp = ["月","火","水","木","金","土","日"]
 
     rows = candidate_rows(rid)
     available = any(len(x["yes"]) >= int(r["min_players"]) for x in rows)
+    all_answered = simple_schedule_all_answered(rid) if is_simple_schedule(r) else False
 
     deadline_dt = datetime.fromisoformat(r["deadline"])
     deadline_label = (
@@ -2865,7 +2987,7 @@ async def recruitment_page(rid: int, request: Request):
         elif spectator:
             note_html = "<div class='viewer-note'>観戦希望では日程回答はありません。PLの回答状況を確認できます。</div>"
         else:
-            note_html = "<div class='viewer-note'>回答するにはDiscord募集メッセージの「参加」リアクションを押してください。</div>"
+            note_html = "<div class='viewer-note'>この日程調整の回答対象ではありません。</div>" if is_simple_schedule(r) else "<div class='viewer-note'>回答するにはDiscord募集メッセージの「参加」リアクションを押してください。</div>"
 
         schedule_block = f"""
         {note_html}
@@ -2899,12 +3021,11 @@ async def recruitment_page(rid: int, request: Request):
                 "</div>"
             )
         else:
-            gm_buttons = (
-                f"<div class='gm-actions'>"
-                f"<a class='btn green' href='/r/{rid}/decide'>開催日を決定</a>"
-                f"<a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a>"
-                f"</div>"
-            )
+            if is_simple_schedule(r):
+                dbtn=f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>" if all_answered else "<span class='btn alt' style='opacity:.55;pointer-events:none'>全員の回答待ち</span>"
+                gm_buttons=f"<div class='gm-actions'>{dbtn}<form method='post' action='/r/{rid}/nudge' style='margin:0'>{csrf_field(request)}<button class='btn alt' type='submit'>未回答者に催促</button></form><a class='btn alt' href='/r/{rid}/reschedule'>日程をやり直す</a></div>"
+            else:
+                gm_buttons=(f"<div class='gm-actions'><a class='btn green' href='/r/{rid}/decide'>開催日を決定</a><a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a></div>")
 
     detail_cls = "detail-head available" if available else "detail-head"
     available_label = (
@@ -2968,11 +3089,8 @@ async def all_unavailable(rid: int, request: Request):
         raise HTTPException(403, "参加者のみ回答できます")
 
     with db() as c:
-        c.execute(
-            "DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",
-            (rid, uid),
-        )
-
+        c.execute("DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",(rid,uid))
+        c.execute("INSERT INTO answer_submissions(recruitment_id,discord_id,submitted_at) VALUES(?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET submitted_at=excluded.submitted_at",(rid,uid,iso_now()))
     return RedirectResponse(f"/r/{rid}", status_code=303)
 
 
@@ -2993,6 +3111,7 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
             if d in allowed_dates and a in {"yes","maybe"}:
                 c.execute("INSERT INTO answers(recruitment_id,discord_id,event_date,answer,updated_at) VALUES(?,?,?,?,?)", (rid, uid, d, a, iso_now()))
         c.execute("INSERT INTO comments(recruitment_id,discord_id,comment,updated_at) VALUES(?,?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET comment=excluded.comment,updated_at=excluded.updated_at", (rid, uid, comment.strip(), iso_now()))
+        c.execute("INSERT INTO answer_submissions(recruitment_id,discord_id,submitted_at) VALUES(?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET submitted_at=excluded.submitted_at",(rid,uid,iso_now()))
 
     # 回答保存後、初めて必要人数を満たした瞬間だけ通知
     try:
@@ -3003,6 +3122,20 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
     return RedirectResponse(f"/r/{rid}", status_code=303)
 
 
+@app.post("/r/{rid}/nudge")
+async def nudge_unanswered(rid:int,request:Request):
+    uid=require_login(request); await require_csrf(request); r=get_recruitment(rid)
+    if not r or str(uid)!=str(r["gm_discord_id"]) or not is_simple_schedule(r): raise HTTPException(403)
+    done=submitted_user_ids(rid)
+    with db() as c: rows=c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1",(rid,)).fetchall()
+    pending=[str(x["discord_id"]) for x in rows if str(x["discord_id"]) not in done]
+    if not pending: return RedirectResponse(f"/r/{rid}",status_code=303)
+    guild=bot.get_guild(GUILD_ID); ch=guild.get_channel(int(r["waiting_channel_id"])) if guild and r["waiting_channel_id"] else None
+    if not ch: raise HTTPException(404,"送信先チャンネルが見つかりません")
+    await ch.send(f"🔔 **{r['scenario_name']}｜日程回答のお願い**\n"+" ".join(f"<@{x}>" for x in pending)+f"\n\nまだ回答が完了していません。こちらから回答をお願いします。\n{BASE_URL}/r/{rid}",silent=in_quiet_hours())
+    return RedirectResponse(f"/r/{rid}",status_code=303)
+
+
 @app.get("/r/{rid}/decide", response_class=HTMLResponse)
 async def decide_form(rid: int, request: Request):
     uid = request.session.get("user_id")
@@ -3011,7 +3144,9 @@ async def decide_form(rid: int, request: Request):
     r = get_recruitment(rid)
     if not r or str(uid) != r["gm_discord_id"]:
         raise HTTPException(403)
-    candidates = [x for x in candidate_rows(rid) if len(x["yes"]) >= r["min_players"]]
+    if is_simple_schedule(r) and not simple_schedule_all_answered(rid):
+        return page("日程決定",f"<div class='card'><p>まだ全員の回答が揃っていません。</p><a class='btn' href='/r/{rid}'>戻る</a></div>",request)
+    candidates = [x for x in candidate_rows(rid) if len(x["yes"]) >= int(r["min_players"])]
     if not candidates:
         return page(
             "開催日決定",
@@ -3061,8 +3196,8 @@ async def decide_form(rid: int, request: Request):
       </button>
 
       {cards}
-
-      <button>この内容で卓を成立させる</button>
+      {("<label class='checkbox-row'><input type='checkbox' name='create_session_channel' value='1'> 参加メンバーだけのDiscordチャンネルを作成する</label>" if is_simple_schedule(r) else "")}
+      <button>{"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}</button>
     </form>
 
     <script>
@@ -3143,6 +3278,7 @@ async def decide_submit(
     event_date: str = Form(...),
     round_no: int = Form(...),
     selection_method: str = Form("manual"),
+    create_session_channel: Optional[str] = Form(None),
 ):
     uid = require_login(request)
     await require_csrf(request)
@@ -3150,14 +3286,15 @@ async def decide_submit(
     if not r or uid != r["gm_discord_id"]:
         raise HTTPException(403)
     candidates = {x["date"]: x for x in candidate_rows(rid)}
-    if event_date not in candidates or len(candidates[event_date]["yes"]) < r["min_players"]:
+    if event_date not in candidates or len(candidates[event_date]["yes"]) < int(r["min_players"]):
         raise HTTPException(400, "開催条件を満たさない日です")
     form = await request.form()
     selected = form.getlist(f"member_{event_date}")
     allowed = set(candidates[event_date]["yes"])
     selected = list(dict.fromkeys([str(x) for x in selected if str(x) in allowed]))
-    if not (r["min_players"] <= len(selected) <= r["max_players"]):
-        raise HTTPException(400, f"参加者を{r['min_players']}〜{r['max_players']}人選択してください")
+    min_sel,max_sel=int(r["min_players"]),int(r["max_players"])
+    if is_simple_schedule(r) and not r["target_players"]: min_sel,max_sel=1,len(allowed)
+    if not (min_sel <= len(selected) <= max_sel): raise HTTPException(400,f"参加者を{min_sel}〜{max_sel}人選択してください")
     with db() as c:
         existing = c.execute("SELECT 1 FROM sessions WHERE recruitment_id=? AND round_no=?", (rid, round_no)).fetchone()
         if existing:
@@ -3166,31 +3303,24 @@ async def decide_submit(
         sid = cur.lastrowid
         c.executemany("INSERT INTO session_members(session_id,discord_id) VALUES(?,?)", [(sid, u) for u in selected])
     try:
-        guild = bot.get_guild(GUILD_ID)
-        category = guild.get_channel(SESSION_CATEGORY_ID) if guild else None
-        gm = await fetch_member(guild, uid) if guild else None
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, manage_channels=True),
-            gm: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-        }
-        for puid in selected:
-            member = await fetch_member(guild, puid)
-            if member:
-                overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        # 観戦希望者は成立卓にも追加
-        with db() as c:
-            spectators = c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='spectator' AND active=1", (rid,)).fetchall()
-        for sp in spectators:
-            member = await fetch_member(guild, sp[0])
-            if member:
-                overwrites[member] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        ch = await guild.create_text_channel(safe_channel_name(f'{r["scenario_name"]}-{round_no}陣'), category=category, overwrites=overwrites, topic=f"つぶ卓 成立卓 ID:{sid}")
-        mentions = "\n".join(f"・<@{x}>" for x in selected)
-        msg = f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日：**{event_date}**\n開催時間：**{r["start_time"]}〜**\n\nGM：<@{uid}>\n参加者：\n{mentions}'
-        if r["guide_message"]:
-            msg += f'\n\n## 【事前準備】\n{r["guide_message"]}'
-        await send_long(ch, msg)
+        guild=bot.get_guild(GUILD_ID)
+        if not guild: raise RuntimeError("Guildが見つかりません")
+        ch=None; should_create=(not is_simple_schedule(r)) or bool(create_session_channel)
+        if should_create:
+            category=guild.get_channel(SESSION_CATEGORY_ID); gm=await fetch_member(guild,uid)
+            overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,manage_channels=True),gm:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)}
+            for puid in selected:
+                member=await fetch_member(guild,puid)
+                if member: overwrites[member]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
+            if not is_simple_schedule(r):
+                with db() as c: spectators=c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='spectator' AND active=1",(rid,)).fetchall()
+                for sp in spectators:
+                    member=await fetch_member(guild,sp[0])
+                    if member: overwrites[member]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
+            suffix="-開催" if is_simple_schedule(r) else f"-{round_no}陣"
+            ch=await guild.create_text_channel(safe_channel_name(f'{r["scenario_name"]}{suffix}'),category=category,overwrites=overwrites,topic=f"つぶ卓 成立 ID:{sid}")
+            mentions="\n".join(f"・<@{x}>" for x in selected); gm_label=r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else f"<@{uid}>"; time_text="未定" if r["start_time"]=="未定" else f'{r["start_time"]}〜'; heading=f'## 『{r["scenario_name"]}』\n**開催が決定しました🎉**' if is_simple_schedule(r) else f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**'
+            await send_long(ch,f'{heading}\n\n開催日：**{event_date}**\n開催時間：**{time_text}**\n\n主催：{gm_label}\n参加者：\n{mentions}')
 
         # 日程調整チャンネルにも簡易通知（常にsilent）
         waiting_ch = None
@@ -3214,11 +3344,11 @@ async def decide_submit(
                 for x in selected
             )
 
-            waiting_msg = (
-                f"✅ **{round_no}陣の開催が決定しました**\n"
-                f"開催日：**{event_date} {r['start_time']}〜**\n"
-                f"参加者：{member_mentions}"
-            )
+            if is_simple_schedule(r):
+                tt="" if r["start_time"]=="未定" else f" {r['start_time']}〜"
+                waiting_msg=f"✅ **{r['scenario_name']} の開催日が決定しました**\n開催日：**{event_date}{tt}**\n参加者：{member_mentions}"
+            else:
+                waiting_msg=(f"✅ **{round_no}陣の開催が決定しました**\n" f"開催日：**{event_date} {r['start_time']}〜**\n" f"参加者：{member_mentions}")
 
             if selection_method == "random":
                 waiting_msg += (
@@ -3233,17 +3363,21 @@ async def decide_submit(
         with db() as c:
             c.execute(
                 "UPDATE sessions SET channel_id=? WHERE id=?",
-                (str(ch.id), sid),
+                (str(ch.id) if ch else None, sid),
             )
             c.execute(
                 "UPDATE recruitments SET status='CONFIRMED' WHERE id=?",
                 (rid,),
             )
 
-        schedule_session_reminder(sid)
+        if ch:
+            schedule_session_reminder(sid)
     except Exception as e:
         log_error(f"decide_submit rid={rid}", e)
         return page("Discordエラー", "<div class='card'><p class='warn'>Discord側でエラーが発生し、卓の作成に失敗しました。権限やチャンネル設定を確認するか、再度お試しください。詳細はサーバーログをご確認ください。</p></div>", request)
+    if is_simple_schedule(r):
+        tt="" if r["start_time"]=="未定" else f" {esc(r['start_time'])}〜"
+        return page("日程決定",f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} の開催日が決定しました！</h2><p>{event_date}{tt}</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>",request)
     return page("卓成立", f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} {round_no}陣が成立しました！</h2><p>{event_date} {esc(r['start_time'])}〜</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>", request)
 
 
