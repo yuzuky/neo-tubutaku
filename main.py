@@ -1357,7 +1357,27 @@ def in_quiet_hours(dt: datetime | None = None) -> bool:
     return dt.hour >= 21 or dt.hour < 9
 
 
+SIMPLE_SCHEDULE_ALLOWED_CATEGORIES = {
+    "募集掲示板",
+    "イベント",
+    "卓一覧",
+    "未定卓",
+    "つぶ活",
+}
+
+
 async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChannel]:
+    """
+    簡単日程調整で選択できるDiscordチャンネルを返す。
+
+    条件:
+    - 指定カテゴリ（募集掲示板 / イベント / 卓一覧 / 未定卓 / つぶ活）配下
+    - ログイン中ユーザー本人が View Channel を持つ
+      （ロール/メンバー上書きで参加しているプライベートチャンネルも含む）
+    - つぶ卓Botが View Channel / Send Messages を持つ
+
+    ユーザー本人が見られないプライベートチャンネルは一覧へ出さない。
+    """
     guild = bot.get_guild(GUILD_ID)
     if not guild:
         return []
@@ -1365,14 +1385,26 @@ async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChann
     me = guild.me
     if not member or not me:
         return []
-    out=[]
+
+    out: list[discord.TextChannel] = []
     for ch in guild.text_channels:
         try:
-            up=ch.permissions_for(member); bp=ch.permissions_for(me)
-            if up.view_channel and bp.view_channel and bp.send_messages:
-                out.append(ch)
+            category_name = (ch.category.name or "").strip() if ch.category else ""
+            if category_name not in SIMPLE_SCHEDULE_ALLOWED_CATEGORIES:
+                continue
+
+            user_perms = ch.permissions_for(member)
+            bot_perms = ch.permissions_for(me)
+            if not user_perms.view_channel:
+                continue
+            if not (bot_perms.view_channel and bot_perms.send_messages):
+                continue
+
+            out.append(ch)
         except Exception:
             pass
+
+    out.sort(key=lambda x: ((x.category.position if x.category else 9999), x.position, x.name))
     return out
 
 
@@ -1743,8 +1775,9 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
                 ch = guild.get_channel(int(r["waiting_channel_id"]))
                 if ch:
                     label = "参加" if kind == "participant" else "観戦希望"
+                    emoji = "🎉" if kind == "participant" else "👀"
                     await ch.send(
-                        f'<@{uid}> が{label}を押しました🎉',
+                        f'<@{uid}> が{label}を押しました{emoji}',
                         silent=True,
                     )
                     print(
@@ -2037,8 +2070,8 @@ async def home(request: Request):
     return page("ホーム",f"""
       <section class='hero'><div class='hero-kicker'>Discord × 日程調整</div><h1>○と△だけで、<br>もっと手軽に。</h1></section>
       <div class='menu-stack'>
-        <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみの方</div></div><div class='chev'>›</div></a>
-        <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>GMの方：募集投稿・チャンネル作成・日程投票</div></div><div class='chev'>›</div></a>
+        <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
+        <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>募集投稿・チャンネル作成・日程投票</div></div><div class='chev'>›</div></a>
         <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
       </div>""",request)
 
@@ -2152,65 +2185,230 @@ async def join_list(request: Request):
 
 @app.get("/schedule/new", response_class=HTMLResponse)
 async def simple_schedule_form(request: Request):
-    uid=request.session.get("user_id")
-    if not uid: return RedirectResponse("/login?next=/schedule/new")
-    channels=await visible_sendable_channels_for_user(str(uid))
-    options="".join(f"<option value='{x.id}'>#{esc(x.name)}</option>" for x in channels) or "<option value=''>送信可能なチャンネルがありません</option>"
-    default_deadline=(now_jst().date()+timedelta(days=7)).isoformat()
-    today=now_jst().date()
-    y=today.year; m=today.month+2
-    if m>12: y+=(m-1)//12; m=(m-1)%12+1
-    end=date(y,m,1)-timedelta(days=1)
-    wd=["月","火","水","木","金","土","日"]; cells=[]; d=today
-    while d<=end:
-        cells.append(f"<button type='button' class='date-cell' data-date='{d.isoformat()}' onclick='toggleGM(this)'><span>{d.month}/{d.day}<small>({wd[d.weekday()]})</small></span><b class='state'>-</b></button>")
-        d+=timedelta(days=1)
-    return page("日程調整を作成",f"""
-    <a class='back-link' href='/'>‹ 戻る</a>
-    <form class='create-card' method='post' action='/schedule/new'>{csrf_field(request)}
-      <div class='create-head'><div class='create-eyebrow'>SIMPLE SCHEDULE</div><h2>日程調整を作成</h2><p class='muted'>TRPG・マダミス・イベントなど、用途を問わず使えます。</p></div>
-      <div class='form-section'>
-        <label class='field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>イベント名</span><input name='event_name' placeholder='例：夏のボドゲ会' required></div></div></label>
-        <label class='field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>GM名 / 主催者名</span><input name='gm_name' value='{esc(user_display(str(uid)))}' required></div></div></label>
-        <div class='field-row'><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>開始時間（任意）</span><input type='time' name='start_time'></div></div></label><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>回答期限</span><input type='date' name='deadline_date' value='{default_deadline}' required></div></div></label></div>
-        <label class='checkbox-row'><input type='checkbox' id='pc' name='player_count_enabled' value='1' onchange='tp()'>参加人数を設定する</label>
-        <div id='pf' style='display:none'><div class='field-row'><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>参加人数</span><input id='fp' type='number' min='1' name='fixed_players' value='4'></div></div></label></div><label class='checkbox-row'><input type='checkbox' id='vp2' name='variable_players' value='1' onchange='tv()'>人数を可変にする</label><div id='vr2' class='field-row' style='display:none'><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>最小人数</span><input type='number' min='1' name='min_players' value='2'></div></div></label><label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>最大人数</span><input type='number' min='1' name='max_players' value='4'></div></div></label></div></div>
-      </div>
-      <div class='form-section'><div class='form-section-title'>開催候補日</div><div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div><input type='hidden' id='gm_dates' name='gm_dates'><div class='date-scroll'><div class='grid'>{''.join(cells)}</div></div><div class='legend'><span><b style='color:#22c55e'>○</b> 開催できる</span><span><b>-</b> 開催できない</span></div></div>
-      <div class='form-section'><div class='form-section-title'>Discordへ送信</div><label class='field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>送信先チャンネル</span><select name='channel_id' required>{options}</select></div></div></label><p class='muted small'>あなたが閲覧でき、つぶ卓Botが投稿できるチャンネルのみ表示します。選択したチャンネルを閲覧できるメンバー（Bot・主催者を除く）が回答対象になります。</p></div>
-      <button class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
-    </form>
-    <script>let selected=[];function toggleGM(el){{const d=el.dataset.date,s=el.querySelector('.state');if(selected.includes(d)){{selected=selected.filter(x=>x!==d);el.classList.remove('yes');s.textContent='-'}}else{{selected.push(d);el.classList.add('yes');s.textContent='○'}}document.getElementById('gm_dates').value=selected.join(',')}}function tp(){{document.getElementById('pf').style.display=document.getElementById('pc').checked?'block':'none'}}function tv(){{const x=document.getElementById('vp2').checked;document.getElementById('vr2').style.display=x?'grid':'none';document.getElementById('fp').disabled=x}}</script>
-    """,request)
+    uid = request.session.get("user_id")
+    if not uid:
+        return RedirectResponse("/login?next=/schedule/new")
+
+    channels = await visible_sendable_channels_for_user(str(uid))
+    options = "".join(
+        f"<option value='{x.id}'>[{esc(x.category.name if x.category else 'その他')}] #{esc(x.name)}</option>"
+        for x in channels
+    ) or "<option value=''>送信可能なチャンネルがありません</option>"
+
+    default_deadline = (now_jst().date() + timedelta(days=7)).isoformat()
+    days = month_dates()
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    cards = []
+    for ds in days:
+        d = date.fromisoformat(ds)
+        label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+        cards.append(
+            f'<div class="day" data-date="{ds}" onclick="toggleGM(this)">'
+            f'<span>{label}</span><span class="state">-</span></div>'
+        )
+    day_html = "".join(cards)
+
+    return page(
+        "日程調整",
+        f"""
+        <a class='back-link' href='/'>‹ 戻る</a>
+        <div class='section-title' style='text-align:center'>日程調整</div>
+
+        <form class='form-shell' method='post' action='/schedule/new'>
+          {csrf_field(request)}
+
+          <div class='form-section compact'>
+            <label class='field'>
+              <div class='field-box no-icon'>
+                <div class='field-stack'>
+                  <span class='field-label'>イベント名</span>
+                  <input name='event_name' placeholder='例：夏のボドゲ会' required>
+                </div>
+              </div>
+            </label>
+
+            <div class='field-row'>
+              <label>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>開始時間（任意）</span>
+                    <input type='time' name='start_time' value='21:00'>
+                  </div>
+                </div>
+              </label>
+              <label>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>回答期限</span>
+                    <input type='date' name='deadline_date' value='{default_deadline}' required>
+                  </div>
+                </div>
+              </label>
+            </div>
+
+            <label class='checkbox-row'>
+              <input type='checkbox' id='pc' name='player_count_enabled' value='1' onchange='tp()'>
+              募集人数を設定する
+            </label>
+
+            <div id='pf' style='display:none'>
+              <label class='field'>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>募集人数</span>
+                    <input id='fp' type='number' min='1' name='fixed_players' value='4'>
+                  </div>
+                </div>
+              </label>
+
+              <label class='checkbox-row'>
+                <input type='checkbox' id='vp2' name='variable_players' value='1' onchange='tv()'>
+                人数を可変にする
+              </label>
+
+              <div id='vr2' class='field-row' style='display:none'>
+                <label>
+                  <div class='field-box no-icon'>
+                    <div class='field-stack'>
+                      <span class='field-label'>最小人数</span>
+                      <input type='number' min='1' name='min_players' value='2'>
+                    </div>
+                  </div>
+                </label>
+                <label>
+                  <div class='field-box no-icon'>
+                    <div class='field-stack'>
+                      <span class='field-label'>最大人数</span>
+                      <input type='number' min='1' name='max_players' value='4'>
+                    </div>
+                  </div>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class='form-section'>
+            <div class='form-section-title'>日程調整</div>
+            <div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div>
+            <input type='hidden' id='gm_dates' name='gm_dates'>
+            <div class='date-scroll'><div class='grid'>{day_html}</div></div>
+            <div class='legend'>
+              <span><b style='color:#22c55e'>○</b> 開催できる</span>
+              <span><b>-</b> 開催できない</span>
+            </div>
+          </div>
+
+          <div class='form-section'>
+            <div class='form-section-title'>Discordへ送信</div>
+            <label class='field'>
+              <div class='field-box no-icon'>
+                <div class='field-stack'>
+                  <span class='field-label'>送信先チャンネル</span>
+                  <select name='channel_id' required>{options}</select>
+                </div>
+              </div>
+            </label>
+            <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活のうち、あなたが閲覧でき、つぶ卓Botが投稿できるチャンネルのみ表示します。</p>
+          </div>
+
+          <button class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
+        </form>
+
+        <script>
+        let selected=[];
+        function toggleGM(el){{
+          const d=el.dataset.date;
+          const s=el.querySelector('.state');
+          if(selected.includes(d)){{
+            selected=selected.filter(x=>x!==d);
+            el.classList.remove('yes');
+            s.textContent='-';
+          }}else{{
+            selected.push(d);
+            el.classList.add('yes');
+            s.textContent='○';
+          }}
+          document.getElementById('gm_dates').value=selected.join(',');
+        }}
+        function tp(){{
+          document.getElementById('pf').style.display=document.getElementById('pc').checked?'block':'none';
+        }}
+        function tv(){{
+          const x=document.getElementById('vp2').checked;
+          document.getElementById('vr2').style.display=x?'grid':'none';
+          document.getElementById('fp').disabled=x;
+        }}
+        </script>
+        """,
+        request,
+    )
 
 
 @app.post("/schedule/new")
-async def simple_schedule_submit(request: Request,event_name: str=Form(...),gm_name: str=Form(...),start_time: str=Form(""),deadline_date: str=Form(...),gm_dates: str=Form(...),channel_id: str=Form(...),player_count_enabled: Optional[str]=Form(None),variable_players: Optional[str]=Form(None),fixed_players: int=Form(4),min_players: int=Form(2),max_players: int=Form(4)):
-    uid=require_login(request); await require_csrf(request)
-    dates=sorted({x for x in gm_dates.split(',') if re.fullmatch(r"\d{4}-\d{2}-\d{2}",x)})
-    if not dates: raise HTTPException(400,"開催可能日を1日以上選んでください")
-    allowed={str(x.id):x for x in await visible_sendable_channels_for_user(str(uid))}; ch=allowed.get(str(channel_id))
-    if not ch: raise HTTPException(403,"このDiscordチャンネルは選択できません")
+async def simple_schedule_submit(
+    request: Request,
+    event_name: str = Form(...),
+    start_time: str = Form("21:00"),
+    deadline_date: str = Form(...),
+    gm_dates: str = Form(...),
+    channel_id: str = Form(...),
+    player_count_enabled: Optional[str] = Form(None),
+    variable_players: Optional[str] = Form(None),
+    fixed_players: int = Form(4),
+    min_players: int = Form(2),
+    max_players: int = Form(4),
+):
+    uid = require_login(request)
+    await require_csrf(request)
+
+    dates = sorted({x for x in gm_dates.split(',') if re.fullmatch(r"\d{4}-\d{2}-\d{2}", x)})
+    if not dates:
+        raise HTTPException(400, "開催可能日を1日以上選んでください")
+
+    allowed = {str(x.id): x for x in await visible_sendable_channels_for_user(str(uid))}
+    ch = allowed.get(str(channel_id))
+    if not ch:
+        raise HTTPException(403, "このDiscordチャンネルは選択できません")
+
     if player_count_enabled:
-        if variable_players: mn,mx,var,target=min_players,max_players,1,min_players
-        else: mn=mx=fixed_players; var=0; target=fixed_players
-        if mn<1 or mx<mn: raise HTTPException(400,"参加人数が不正です")
-    else: mn,mx,var,target=1,99,1,None
-    deadline=datetime.fromisoformat(deadline_date+"T21:00:00").replace(tzinfo=JST); sv=start_time.strip() or "未定"
+        if variable_players:
+            mn, mx, var, target = min_players, max_players, 1, min_players
+        else:
+            mn = mx = fixed_players
+            var = 0
+            target = fixed_players
+        if mn < 1 or mx < mn:
+            raise HTTPException(400, "募集人数が不正です")
+    else:
+        mn, mx, var, target = 1, 99, 1, None
+
+    deadline = datetime.fromisoformat(deadline_date + "T21:00:00").replace(tzinfo=JST)
+    sv = start_time.strip() or "未定"
+    creator_name = user_display(str(uid))
+
     with db() as c:
-        cur=c.execute("""INSERT INTO recruitments(game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,schedule_pending,created_at,simple_schedule,target_players,gm_name_override,target_channel_id,waiting_channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",("EVENT",event_name.strip(),str(uid),mn,mx,var,"","","",None,sv,deadline.isoformat(),"RECRUITING",0,iso_now(),1,target,gm_name.strip(),str(ch.id),str(ch.id)))
-        rid=cur.lastrowid; c.executemany("INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)",[(rid,x) for x in dates])
-    guild=bot.get_guild(GUILD_ID); targets=[]
+        cur = c.execute(
+            """INSERT INTO recruitments(game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,schedule_pending,created_at,simple_schedule,target_players,gm_name_override,target_channel_id,waiting_channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("EVENT", event_name.strip(), str(uid), mn, mx, var, "", "", "", None, sv, deadline.isoformat(), "RECRUITING", 0, iso_now(), 1, target, "", str(ch.id), str(ch.id)),
+        )
+        rid = cur.lastrowid
+        c.executemany(
+            "INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)",
+            [(rid, x) for x in dates],
+        )
+
+    guild = bot.get_guild(GUILD_ID)
+    targets = []
     if guild:
         for member in guild.members:
-            if member.bot or str(member.id)==str(uid):
+            if member.bot or str(member.id) == str(uid):
                 continue
             try:
                 if not ch.permissions_for(member).view_channel:
                     continue
-                # Administrator権限だけで全チャンネルが見えている運営者を
-                # 回答対象へ誤登録しない。明示的にこのチャンネルへ閲覧許可が
-                # 付いている場合だけ対象に含める。
+
+                # Administrator権限だけで全チャンネルが見えている運営者は、
+                # 明示的にこのチャンネルへ参加している場合だけ回答対象にする。
                 if member.guild_permissions.administrator:
                     explicit = ch.overwrites_for(member).view_channel is True
                     if not explicit:
@@ -2223,14 +2421,39 @@ async def simple_schedule_submit(request: Request,event_name: str=Form(...),gm_n
                 targets.append(str(member.id))
             except Exception:
                 pass
+
     with db() as c:
-        c.executemany("INSERT OR IGNORE INTO members(recruitment_id,discord_id,member_type,active,joined_at) VALUES(?,?,?,?,?)",[(rid,x,"participant",1,iso_now()) for x in targets])
-    tl=f"開始時間：**{sv}**\n" if start_time.strip() else ""; pl=""
-    if target: pl=(f"参加人数：**{mn}〜{mx}人**\n" if var else f"参加人数：**{mn}人**\n")
-    sent=await ch.send(f"📅 **{event_name.strip()}｜日程調整**\n\n主催：**{gm_name.strip()}**\n{tl}{pl}回答期限：**{deadline.strftime('%Y/%m/%d')}**\n\n下のURLから ○ / △ / - で回答してください。\n{BASE_URL}/r/{rid}")
-    with db() as c: c.execute("UPDATE recruitments SET target_message_id=? WHERE id=?",(str(sent.id),rid))
-    url=f"{BASE_URL}/r/{rid}"
-    return page("日程調整を作成しました",f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>Discordの <b>#{esc(ch.name)}</b> へ送信しました。</p><div class='answer-url-box'><code id='answerUrl'>{esc(url)}</code><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLをコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');b.textContent='コピーしました';setTimeout(()=>b.textContent='URLをコピー',1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",request)
+        c.executemany(
+            "INSERT OR IGNORE INTO members(recruitment_id,discord_id,member_type,active,joined_at) VALUES(?,?,?,?,?)",
+            [(rid, x, "participant", 1, iso_now()) for x in targets],
+        )
+
+    time_line = f"開始時間：**{sv}**\n" if start_time.strip() else ""
+    players_line = ""
+    if target:
+        players_line = f"募集人数：**{mn}〜{mx}人**\n" if var else f"募集人数：**{mn}人**\n"
+
+    sent = await ch.send(
+        f"📅 **{event_name.strip()}｜日程調整**\n\n"
+        f"作成者：**{creator_name}**\n"
+        f"{time_line}{players_line}"
+        f"回答期限：**{deadline.strftime('%Y/%m/%d')}**\n\n"
+        f"下のURLから ○ / △ / - で回答してください。\n"
+        f"{BASE_URL}/r/{rid}"
+    )
+
+    with db() as c:
+        c.execute(
+            "UPDATE recruitments SET target_message_id=? WHERE id=?",
+            (str(sent.id), rid),
+        )
+
+    url = f"{BASE_URL}/r/{rid}"
+    return page(
+        "日程調整を作成しました",
+        f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>Discordの <b>#{esc(ch.name)}</b> へ送信しました。</p><div class='answer-url-box'><code id='answerUrl'>{esc(url)}</code><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLをコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');b.textContent='コピーしました';setTimeout(()=>b.textContent='URLをコピー',1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",
+        request,
+    )
 
 
 @app.get("/new", response_class=HTMLResponse)
