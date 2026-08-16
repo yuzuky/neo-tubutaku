@@ -480,8 +480,24 @@ def is_active_member(rid: int, uid: str, kind: Optional[str] = None) -> bool:
 
 
 def user_display(uid: str) -> str:
+    # Discordサーバー上の現在の表示名を最優先。
+    # OAuth未利用などでusersテーブルに未登録のメンバーでも、
+    # Botのmember cacheにいればサーバー表示名で表示する。
+    try:
+        guild = bot.get_guild(GUILD_ID)
+        if guild:
+            member = guild.get_member(int(uid))
+            if member:
+                return member.display_name
+    except Exception:
+        pass
+
     u = get_user(uid)
-    return u["display_name"] if u else f"<@{uid}>"
+    if u:
+        return u["display_name"] or u["username"] or str(uid)
+
+    # 最終フォールバックもメンション形式にせずID文字列だけにする。
+    return str(uid)
 
 
 def candidate_rows(rid: int):
@@ -2463,7 +2479,7 @@ async def simple_schedule_submit(
     url = f"{BASE_URL}/r/{rid}"
     return page(
         "日程調整を作成しました",
-        f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>チャンネル【<b>{esc(ch.name)}</b>】へ送信しました！</p><div class='copy-card'><div class='copy-url' id='answerUrl'>{esc(url)}</div><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');const old=b.textContent;b.textContent='コピーしました';setTimeout(()=>b.textContent=old,1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",
+        f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>チャンネル【<b>{esc(ch.name)}</b>】へ送信しました！</p><div class='copy-card'><div class='copy-url' id='answerUrl'>{esc(url)}</div><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' style='display:flex;justify-content:center;text-align:center' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');const old=b.textContent;b.textContent='コピーしました';setTimeout(()=>b.textContent=old,1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",
         request,
     )
 
@@ -3266,12 +3282,22 @@ async def recruitment_page(rid: int, request: Request):
                     member_obj = guild_for_names.get_member(int(pending_id)) if guild_for_names else None
                     pending_names.append(member_obj.display_name if member_obj else user_display(pending_id))
                 pending_text = "、".join(pending_names) if pending_names else "なし"
-                confirm_text = json.dumps(f"催促対象：{pending_text}\n\n上記の方へ催促を送信しますがよろしいですか？", ensure_ascii=False)
+                confirm_text = json.dumps(
+                    f"リマインド対象：{pending_text}\n\n上記の方へリマインド通知を送信しますがよろしいですか？",
+                    ensure_ascii=False,
+                )
                 nudge_disabled = " disabled style='opacity:.55;cursor:not-allowed'" if not pending_ids else ""
                 nudge_confirm = "" if not pending_ids else f" onclick='return confirm({confirm_text})'"
-                gm_buttons=(f"<div class='gm-actions'>{dbtn}"
-                            f"<form method='post' action='/r/{rid}/nudge' style='margin:0'>{csrf_field(request)}<div class='muted small' style='margin-bottom:6px'>催促対象：{esc(pending_text)}</div><button class='btn alt' type='submit'{nudge_disabled}{nudge_confirm}>未回答者に催促</button></form>"
-                            f"<a class='btn alt' style='width:100%;box-sizing:border-box;text-align:center;justify-content:center' href='/r/{rid}/reschedule'>再日程調整</a></div>")
+                gm_buttons=(
+                    f"<div class='gm-actions'>"
+                    f"<div style='display:flex;gap:10px;align-items:stretch;width:100%'>"
+                    f"<div style='flex:1;display:flex'>{dbtn}</div>"
+                    f"<form method='post' action='/r/{rid}/nudge' style='margin:0;flex:1;display:flex'>{csrf_field(request)}"
+                    f"<button class='btn alt' style='width:100%;justify-content:center' type='submit'{nudge_disabled}{nudge_confirm}>リマインド</button>"
+                    f"</form></div>"
+                    f"<a class='btn alt' style='width:100%;box-sizing:border-box;text-align:center;justify-content:center' href='/r/{rid}/reschedule'>再日程調整</a>"
+                    f"</div>"
+                )
             else:
                 gm_buttons=(f"<div class='gm-actions'><a class='btn green' href='/r/{rid}/decide'>開催日を決定</a><a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a></div>")
 
