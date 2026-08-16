@@ -1820,11 +1820,10 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
                         (r["id"], uid),
                     )
 
-            # もう片方のリアクションが残っている場合はアクセス維持
-            still = is_active_member(r["id"], uid)
-            await set_waiting_access(r["id"], uid, still)
+            # リアクション解除時はDiscordチャンネル権限を変更しない。
+            # サイト側の参加/観戦状態だけ解除する。
             print(
-                f"[REACTION:{action}] deactivated user={uid}; channel_access={still}",
+                f"[REACTION:{action}] deactivated user={uid}; Discord channel permissions unchanged",
                 flush=True,
             )
 
