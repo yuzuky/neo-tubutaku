@@ -2113,10 +2113,19 @@ async def join_list(request: Request):
                FROM recruitments r
                LEFT JOIN users u ON u.discord_id=r.gm_discord_id
                WHERE r.created_at >= ?
-                 AND EXISTS (SELECT 1 FROM members mine WHERE mine.recruitment_id=r.id AND mine.discord_id=? AND mine.member_type='participant' AND mine.active=1)
+                 AND (
+                   r.gm_discord_id=?
+                   OR EXISTS (
+                     SELECT 1 FROM members mine
+                     WHERE mine.recruitment_id=r.id
+                       AND mine.discord_id=?
+                       AND mine.member_type='participant'
+                       AND mine.active=1
+                   )
+                 )
                ORDER BY r.id DESC
                LIMIT 100""",
-            (cutoff, str(uid)),
+            (cutoff, str(uid), str(uid)),
         ).fetchall()
 
     cards = []
@@ -2191,7 +2200,7 @@ async def simple_schedule_form(request: Request):
 
     channels = await visible_sendable_channels_for_user(str(uid))
     options = "".join(
-        f"<option value='{x.id}'>[{esc(x.category.name if x.category else 'その他')}] #{esc(x.name)}</option>"
+        f"<option value='{x.id}'>【{esc(x.category.name if x.category else 'その他')}】{esc(x.name)}</option>"
         for x in channels
     ) or "<option value=''>送信可能なチャンネルがありません</option>"
 
@@ -2232,7 +2241,10 @@ async def simple_schedule_form(request: Request):
                 <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>開始時間（任意）</span>
-                    <input type='time' name='start_time' value='21:00'>
+                    <div style='display:flex;align-items:center;gap:8px'>
+                      <input id='simpleStartTime' type='time' name='start_time' value='21:00' style='flex:1'>
+                      <button type='button' class='btn alt' style='width:auto;min-width:64px;padding:10px 14px;flex:none' onclick="document.getElementById('simpleStartTime').value=''">削除</button>
+                    </div>
                   </div>
                 </div>
               </label>
@@ -2251,8 +2263,8 @@ async def simple_schedule_form(request: Request):
               募集人数を設定する
             </label>
 
-            <div id='pf' style='display:none'>
-              <label class='field' style='max-width:360px'>
+            <div id='pf' style='display:none;margin-top:12px'>
+              <label class='field' style='max-width:220px'>
                 <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>募集人数</span>
@@ -2308,7 +2320,7 @@ async def simple_schedule_form(request: Request):
                 </div>
               </div>
             </label>
-            <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活の内あなたが閲覧できるチャンネルのみ表示しています</p>
+            <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活からあなたが閲覧できるチャンネルのみ表示</p>
           </div>
 
           <button class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
@@ -2434,11 +2446,11 @@ async def simple_schedule_submit(
         players_line = f"募集人数：**{mn}〜{mx}人**\n" if var else f"募集人数：**{mn}人**\n"
 
     sent = await ch.send(
-        f"📅 **{event_name.strip()}｜日程調整**\n\n"
+        f"**{event_name.strip()}の日程調整**\n"
         f"作成者：**{creator_name}**\n"
         f"{time_line}{players_line}"
         f"回答期限：**{deadline.strftime('%Y/%m/%d')}**\n\n"
-        f"下のURLから ○ / △ / - で回答してください。\n"
+        f"以下のURLよりご回答ください！\n"
         f"{BASE_URL}/r/{rid}"
     )
 
@@ -2451,7 +2463,7 @@ async def simple_schedule_submit(
     url = f"{BASE_URL}/r/{rid}"
     return page(
         "日程調整を作成しました",
-        f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>Discordの <b>#{esc(ch.name)}</b> へ送信しました。</p><div class='answer-url-box'><code id='answerUrl'>{esc(url)}</code><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLをコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');b.textContent='コピーしました';setTimeout(()=>b.textContent='URLをコピー',1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",
+        f"""<div class='card'><h2>📅 日程調整を作成しました</h2><p>チャンネル【<b>{esc(ch.name)}</b>】へ送信しました！</p><div class='copy-card'><div class='copy-url' id='answerUrl'>{esc(url)}</div><button type='button' class='copy-btn' onclick='copyAnswerUrl()'>URLコピー</button></div><p class='muted small'>回答対象：{len(targets)}人</p><a class='btn green' href='/r/{rid}'>日程調整ページを開く</a></div><script>async function copyAnswerUrl(){{const u=document.getElementById('answerUrl').textContent.trim();try{{await navigator.clipboard.writeText(u);const b=document.querySelector('.copy-btn');const old=b.textContent;b.textContent='コピーしました';setTimeout(()=>b.textContent=old,1300)}}catch(e){{window.prompt('このURLをコピーしてください',u)}}}}</script>""",
         request,
     )
 
@@ -3246,7 +3258,20 @@ async def recruitment_page(rid: int, request: Request):
         else:
             if is_simple_schedule(r):
                 dbtn=f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>" if all_answered else "<span class='btn alt' style='opacity:.55;pointer-events:none'>全員の回答待ち</span>"
-                gm_buttons=f"<div class='gm-actions'>{dbtn}<form method='post' action='/r/{rid}/nudge' style='margin:0'>{csrf_field(request)}<button class='btn alt' type='submit'>未回答者に催促</button></form><a class='btn alt' href='/r/{rid}/reschedule'>日程をやり直す</a></div>"
+                done_ids = submitted_user_ids(rid)
+                pending_ids = [str(x["discord_id"]) for x in active if str(x["discord_id"]) not in done_ids]
+                guild_for_names = bot.get_guild(GUILD_ID)
+                pending_names = []
+                for pending_id in pending_ids:
+                    member_obj = guild_for_names.get_member(int(pending_id)) if guild_for_names else None
+                    pending_names.append(member_obj.display_name if member_obj else user_display(pending_id))
+                pending_text = "、".join(pending_names) if pending_names else "なし"
+                confirm_text = json.dumps(f"催促対象：{pending_text}\n\n上記の方へ催促を送信しますがよろしいですか？", ensure_ascii=False)
+                nudge_disabled = " disabled style='opacity:.55;cursor:not-allowed'" if not pending_ids else ""
+                nudge_confirm = "" if not pending_ids else f" onclick='return confirm({confirm_text})'"
+                gm_buttons=(f"<div class='gm-actions'>{dbtn}"
+                            f"<form method='post' action='/r/{rid}/nudge' style='margin:0'>{csrf_field(request)}<div class='muted small' style='margin-bottom:6px'>催促対象：{esc(pending_text)}</div><button class='btn alt' type='submit'{nudge_disabled}{nudge_confirm}>未回答者に催促</button></form>"
+                            f"<a class='btn alt' style='width:100%;box-sizing:border-box;text-align:center;justify-content:center' href='/r/{rid}/reschedule'>再日程調整</a></div>")
             else:
                 gm_buttons=(f"<div class='gm-actions'><a class='btn green' href='/r/{rid}/decide'>開催日を決定</a><a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a></div>")
 
@@ -3355,7 +3380,12 @@ async def nudge_unanswered(rid:int,request:Request):
     if not pending: return RedirectResponse(f"/r/{rid}",status_code=303)
     guild=bot.get_guild(GUILD_ID); ch=guild.get_channel(int(r["waiting_channel_id"])) if guild and r["waiting_channel_id"] else None
     if not ch: raise HTTPException(404,"送信先チャンネルが見つかりません")
-    await ch.send(f"🔔 **{r['scenario_name']}｜日程回答のお願い**\n"+" ".join(f"<@{x}>" for x in pending)+f"\n\nまだ回答が完了していません。こちらから回答をお願いします。\n{BASE_URL}/r/{rid}",silent=in_quiet_hours())
+    await ch.send(
+        "**日程調整のリマインド**\n"
+        + " ".join(f"<@{x}>" for x in pending)
+        + f"\nまだ回答が完了していません😢\nお時間ある際に以下のリンクよりご回答をお願いします！\n\n{BASE_URL}/r/{rid}",
+        silent=in_quiet_hours(),
+    )
     return RedirectResponse(f"/r/{rid}",status_code=303)
 
 
