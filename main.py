@@ -3332,7 +3332,13 @@ async def recruitment_page(rid: int, request: Request):
                     f"</div>"
                 )
             else:
-                gm_buttons=(f"<div class='gm-actions'><a class='btn green' href='/r/{rid}/decide'>開催日を決定</a><a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a></div>")
+                gm_buttons=(
+                    f"<div class='gm-actions'>"
+                    f"<div style='display:flex;gap:10px;align-items:stretch;width:100%'>"
+                    f"<a class='btn green' style='flex:1;justify-content:center;text-align:center' href='/r/{rid}/decide'>開催日を決定</a>"
+                    f"<a class='btn alt' style='flex:1;justify-content:center;text-align:center' href='/r/{rid}/reschedule'>再日程調整</a>"
+                    f"</div></div>"
+                )
 
     detail_cls = "detail-head available" if available else "detail-head"
     available_label = (
@@ -3496,7 +3502,7 @@ async def decide_form(rid: int, request: Request):
         checkboxes = "".join(f"<label><input style='width:auto' type='checkbox' name='member_{x['date']}' value='{uid2}' checked> {esc(user_display(uid2))}</label>" for uid2 in x["yes"])
         maybe = ", ".join(esc(user_display(u)) for u in x["maybe"]) or "なし"
         over = len(x["yes"]) > r["max_players"]
-        cards += f"""<div class='candidate {'good' if not over else ''}'><label><input style='width:auto' type='radio' name='event_date' value='{x['date']}' required> <b>{x['date']}</b>　○{len(x['yes'])}人 {'⚠ 最大人数超過' if over else ''}</label><div class='members'>{checkboxes}</div><p class='small muted'>△：{maybe}</p>{f'<button type="button" class="btn alt" onclick="randomPick(\'{x["date"]}\',{r["max_players"]})">この日からランダムで{r["max_players"]}人選ぶ</button>' if over else ''}</div>"""
+        cards += f"""<div class='candidate {'good' if not over else ''}'><label><input style='width:auto' type='radio' name='event_date' value='{x['date']}' required> <b>{x['date']}</b><div style='margin-top:6px'>○{len(x['yes'])}人 {'⚠ 最大人数超過' if over else ''}</div></label><div class='members'>{checkboxes}</div><p class='small muted'>△：{maybe}</p>{f'<button type="button" class="btn alt" onclick="randomPick(\'{x["date"]}\',{r["max_players"]})">この日からランダムで{r["max_players"]}人選ぶ</button>' if over else ''}</div>"""
     candidate_dates_json = json.dumps(
         [x["date"] for x in candidates],
         ensure_ascii=False,
@@ -3531,7 +3537,11 @@ async def decide_form(rid: int, request: Request):
 
       {cards}
       {("<label class='checkbox-row'><input type='checkbox' name='create_session_channel' value='1'> 参加メンバーだけのDiscordチャンネルを作成する</label>" if is_simple_schedule(r) else "")}
-      <button>{"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}</button>
+      <div style='margin-top:26px;display:flex;justify-content:center'>
+        <button style='width:auto;min-width:280px;text-align:center'>
+          {"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}
+        </button>
+      </div>
     </form>
 
     <script>
