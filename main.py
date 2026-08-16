@@ -3321,14 +3321,35 @@ async def recruitment_page(rid: int, request: Request):
                 )
                 nudge_disabled = " disabled style='opacity:.55;cursor:not-allowed'" if not pending_ids else ""
                 nudge_confirm = "" if not pending_ids else f" onclick='return confirm({confirm_text})'"
+                # 上段の「日程を決定」と「リマインド」は完全に同じサイズで横並び。
+                if all_answered:
+                    dbtn = (
+                        f"<a class='btn green' "
+                        f"style='width:100%;height:100%;box-sizing:border-box;"
+                        f"display:flex;align-items:center;justify-content:center;text-align:center' "
+                        f"href='/r/{rid}/decide'>日程を決定</a>"
+                    )
+                else:
+                    dbtn = (
+                        "<span class='btn alt' "
+                        "style='width:100%;height:100%;box-sizing:border-box;"
+                        "display:flex;align-items:center;justify-content:center;text-align:center;"
+                        "opacity:.55;pointer-events:none'>全員の回答待ち</span>"
+                    )
+
                 gm_buttons=(
                     f"<div class='gm-actions'>"
-                    f"<div style='display:flex;gap:10px;align-items:stretch;width:100%'>"
-                    f"<div style='flex:1;display:flex'>{dbtn}</div>"
-                    f"<form method='post' action='/r/{rid}/nudge' style='margin:0;flex:1;display:flex'>{csrf_field(request)}"
-                    f"<button class='btn alt' style='width:100%;justify-content:center' type='submit'{nudge_disabled}{nudge_confirm}>リマインド</button>"
+                    f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;width:100%;align-items:stretch'>"
+                    f"<div style='min-width:0;display:flex'>{dbtn}</div>"
+                    f"<form method='post' action='/r/{rid}/nudge' "
+                    f"style='margin:0;min-width:0;display:flex'>{csrf_field(request)}"
+                    f"<button class='btn alt' "
+                    f"style='width:100%;height:100%;box-sizing:border-box;"
+                    f"display:flex;align-items:center;justify-content:center;text-align:center' "
+                    f"type='submit'{nudge_disabled}{nudge_confirm}>リマインド</button>"
                     f"</form></div>"
-                    f"<a class='btn alt' style='width:100%;box-sizing:border-box;text-align:center;justify-content:center' href='/r/{rid}/reschedule'>再日程調整</a>"
+                    f"<a class='btn alt' style='width:100%;box-sizing:border-box;text-align:center;justify-content:center' "
+                    f"href='/r/{rid}/reschedule'>再日程調整</a>"
                     f"</div>"
                 )
             else:
