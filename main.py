@@ -2168,7 +2168,7 @@ async def join_list(request: Request):
 
         if is_gm:
             delete_confirm = (
-                "この日程調整を削除しますか？\\nDiscordへ送信した日程調整メッセージと回答データを削除します。\\nDiscordチャンネル自体は削除・移動しません。"
+                "この日程調整を削除しますか？"
                 if is_simple_schedule(r)
                 else "この募集を削除しますか？\\n募集投稿と回答データを削除します。\\nDiscordチャンネル自体は削除・移動しません。"
             )
@@ -3163,7 +3163,7 @@ async def recruitment_page(rid: int, request: Request):
             f"<div class='answer-day-head'>{day_label}</div>"
             f"<div class='answer-day-state'>{symbol}</div>"
             f"<div class='answer-members'>"
-            f"{''.join(member_lines) if member_lines else '<div class=\"muted small\">まだ回答なし</div>'}"
+            f"{''.join(member_lines) if member_lines else '<div class=\"muted small\">未回答</div>'}"
             f"</div>"
             f"</div>"
         )
