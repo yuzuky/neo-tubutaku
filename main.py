@@ -1381,6 +1381,8 @@ SIMPLE_SCHEDULE_ALLOWED_CATEGORIES = {
     "つぶ活",
 }
 
+YUZUKY_SPECIAL_USER_ID = "804350794371039272"
+
 
 async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChannel]:
     """
@@ -2087,7 +2089,7 @@ async def home(request: Request):
       <section class='hero'><div class='hero-kicker'>Discord × 日程調整</div><h1>○と△だけで、<br>もっと手軽に。</h1></section>
       <div class='menu-stack'>
         <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
-        <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>募集投稿・チャンネル作成・日程投票</div></div><div class='chev'>›</div></a>
+        <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>投稿・チャンネル作成・日程調整</div></div><div class='chev'>›</div></a>
         <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
       </div>""",request)
 
@@ -2166,13 +2168,19 @@ async def join_list(request: Request):
         is_gm = str(uid) == str(r["gm_discord_id"])
 
         if is_gm:
+            delete_confirm = (
+                "この日程調整を削除しますか？\\nDiscordへ送信した日程調整メッセージと回答データを削除します。\\nDiscordチャンネル自体は削除・移動しません。"
+                if is_simple_schedule(r)
+                else "この募集を削除しますか？\\n募集投稿と回答データを削除します。\\nDiscordチャンネル自体は削除・移動しません。"
+            )
+            delete_label = "日程調整を削除" if is_simple_schedule(r) else "募集を削除"
             menu = f"""
               <details class='table-menu'>
                 <summary aria-label='募集メニュー'>⋮</summary>
                 <form method='post' action='/r/{r["id"]}/delete'
-                      onsubmit="return confirm('この募集を削除しますか？\\n募集投稿・日程調整チャンネル・回答データも削除されます。');">
+                      onsubmit="return confirm('{delete_confirm}');">
                   {csrf_field(request)}
-                  <button type='submit' class='delete-table-btn'>募集を削除</button>
+                  <button type='submit' class='delete-table-btn'>{delete_label}</button>
                 </form>
               </details>
             """
@@ -2259,7 +2267,7 @@ async def simple_schedule_form(request: Request):
                     <span class='field-label'>開始時間（任意）</span>
                     <div style='display:flex;align-items:center;gap:8px'>
                       <input id='simpleStartTime' type='time' name='start_time' value='21:00' style='flex:1'>
-                      <button type='button' class='btn alt' style='width:auto;min-width:64px;padding:10px 14px;flex:none' onclick="document.getElementById('simpleStartTime').value=''">削除</button>
+                      <button type='button' class='btn alt' style='width:auto;min-width:48px;padding:6px 9px;font-size:12px;line-height:1.1;flex:none' onclick="document.getElementById('simpleStartTime').value=''">削除</button>
                     </div>
                   </div>
                 </div>
@@ -2280,7 +2288,7 @@ async def simple_schedule_form(request: Request):
             </label>
 
             <div id='pf' style='display:none;margin-top:12px'>
-              <label class='field' style='max-width:220px'>
+              <label class='field'>
                 <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>募集人数</span>
@@ -2841,7 +2849,10 @@ async def delete_recruitment(rid: int, request: Request):
             f"""SELECT id,
                        recruitment_channel_id,
                        recruitment_message_id,
-                       waiting_channel_id
+                       waiting_channel_id,
+                       simple_schedule,
+                       target_channel_id,
+                       target_message_id
                 FROM recruitments
                 WHERE id IN ({placeholders})""",
             tuple(ids),
@@ -2867,8 +2878,28 @@ async def delete_recruitment(rid: int, request: Request):
     guild = bot.get_guild(GUILD_ID)
 
     if guild:
+        # 簡単日程調整は、Botが送ったメッセージだけ削除する。
+        # 既存Discordチャンネルの削除・移動・カテゴリ変更は絶対に行わない。
+        for x in targets:
+            if not int(x["simple_schedule"] or 0):
+                continue
+            if not (x["target_channel_id"] and x["target_message_id"]):
+                continue
+            try:
+                ch = guild.get_channel(int(x["target_channel_id"]))
+                if not ch:
+                    ch = await guild.fetch_channel(int(x["target_channel_id"]))
+                msg = await ch.fetch_message(int(x["target_message_id"]))
+                await msg.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                log_error(f"delete simple schedule message rid={x['id']}", e)
+
         # 募集板の投稿
         for x in targets:
+            if int(x["simple_schedule"] or 0):
+                continue
             if not (
                 x["recruitment_channel_id"]
                 and x["recruitment_message_id"]
@@ -2894,31 +2925,8 @@ async def delete_recruitment(rid: int, request: Request):
                     e,
                 )
 
-        # 日程調整チャンネル
-        waiting_ids = {
-            int(x["waiting_channel_id"])
-            for x in targets
-            if x["waiting_channel_id"]
-        }
-
-        for channel_id in waiting_ids:
-            try:
-                ch = guild.get_channel(channel_id)
-
-                if not ch:
-                    ch = await guild.fetch_channel(channel_id)
-
-                await ch.delete(
-                    reason=f"つぶ卓 募集削除 rid={rid}"
-                )
-
-            except discord.NotFound:
-                pass
-            except Exception as e:
-                log_error(
-                    f"delete waiting channel rid={rid}",
-                    e,
-                )
+        # Discordチャンネルは絶対に削除しない。
+        # このBotが行うチャンネル操作は作成のみ。
 
     # --------------------------------------------------------
     # DB側を削除
@@ -3030,6 +3038,13 @@ async def recruitment_page(rid: int, request: Request):
 
     gm = uid == r["gm_discord_id"]
     participant = is_active_member(rid, uid, "participant")
+
+    # 簡単日程調整は、Discordログイン済みでGM本人ではないユーザーなら
+    # 作成時の回答対象に含まれていなくても回答できる。
+    # 未登録ユーザーは回答保存時にparticipantへ自動追加する。
+    simple_open_answer = is_simple_schedule(r) and not gm
+    can_answer = participant or simple_open_answer
+
     spectator = is_active_member(rid, uid, "spectator")
     dates = get_gm_dates(rid)
     schedule_pending = bool(
@@ -3055,15 +3070,19 @@ async def recruitment_page(rid: int, request: Request):
             (r["gm_discord_id"],),
         ).fetchone()
 
-        # GMは回答状況のPL一覧には出さない
+        # 回答状況には「実際に回答を保存した参加者」だけ表示する。
+        # 作成時に回答対象として登録されていても、未回答者は一覧へ出さない。
         active = c.execute(
-            """SELECT discord_id
-               FROM members
-               WHERE recruitment_id=?
-                 AND member_type='participant'
-                 AND active=1
-                 AND discord_id<>?
-               ORDER BY joined_at""",
+            """SELECT m.discord_id
+               FROM members m
+               JOIN answer_submissions s
+                 ON s.recruitment_id=m.recruitment_id
+                AND s.discord_id=m.discord_id
+               WHERE m.recruitment_id=?
+                 AND m.member_type='participant'
+                 AND m.active=1
+                 AND m.discord_id<>?
+               ORDER BY s.submitted_at, m.joined_at""",
             (rid, r["gm_discord_id"]),
         ).fetchall()
 
@@ -3113,7 +3132,7 @@ async def recruitment_page(rid: int, request: Request):
         d = date.fromisoformat(ds)
         day_label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
 
-        current = my_answers.get(ds, "") if participant else ""
+        current = my_answers.get(ds, "") if can_answer else ""
         cls = "yes" if current == "yes" else "maybe" if current == "maybe" else ""
         symbol = "○" if current == "yes" else "△" if current == "maybe" else "-"
 
@@ -3137,8 +3156,8 @@ async def recruitment_page(rid: int, request: Request):
                 f"</div>"
             )
 
-        onclick = " onclick='togglePL(this)'" if participant else ""
-        clickable = " clickable" if participant else ""
+        onclick = " onclick='togglePL(this)'" if can_answer else ""
+        clickable = " clickable" if can_answer else ""
 
         cards.append(
             f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
@@ -3170,7 +3189,7 @@ async def recruitment_page(rid: int, request: Request):
 
         schedule_block = pending_note
 
-    elif participant:
+    elif can_answer:
         schedule_block = f"""
         <form class='all-no-form' method='post' action='/r/{rid}/all-unavailable'
               onsubmit="return confirm('すべての日程を参加不可にしますか？')">
@@ -3275,7 +3294,22 @@ async def recruitment_page(rid: int, request: Request):
             if is_simple_schedule(r):
                 dbtn=f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>" if all_answered else "<span class='btn alt' style='opacity:.55;pointer-events:none'>全員の回答待ち</span>"
                 done_ids = submitted_user_ids(rid)
-                pending_ids = [str(x["discord_id"]) for x in active if str(x["discord_id"]) not in done_ids]
+                with db() as c:
+                    reminder_targets = c.execute(
+                        """SELECT discord_id
+                           FROM members
+                           WHERE recruitment_id=?
+                             AND member_type='participant'
+                             AND active=1
+                             AND discord_id<>?
+                           ORDER BY joined_at""",
+                        (rid, r["gm_discord_id"]),
+                    ).fetchall()
+                pending_ids = [
+                    str(x["discord_id"])
+                    for x in reminder_targets
+                    if str(x["discord_id"]) not in done_ids
+                ]
                 guild_for_names = bot.get_guild(GUILD_ID)
                 pending_names = []
                 for pending_id in pending_ids:
@@ -3359,10 +3393,21 @@ async def all_unavailable(rid: int, request: Request):
     uid = require_login(request)
     await require_csrf(request)
 
-    if not is_active_member(rid, uid, "participant"):
+    r = get_recruitment(rid)
+    simple_open_answer = bool(
+        r
+        and is_simple_schedule(r)
+        and str(uid) != str(r["gm_discord_id"])
+    )
+    if not is_active_member(rid, uid, "participant") and not simple_open_answer:
         raise HTTPException(403, "参加者のみ回答できます")
 
     with db() as c:
+        if simple_open_answer and not is_active_member(rid, uid, "participant"):
+            c.execute(
+                "INSERT OR REPLACE INTO members(recruitment_id,discord_id,member_type,active,joined_at) VALUES(?,?,?,?,?)",
+                (rid, str(uid), "participant", 1, iso_now()),
+            )
         c.execute("DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",(rid,uid))
         c.execute("INSERT INTO answer_submissions(recruitment_id,discord_id,submitted_at) VALUES(?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET submitted_at=excluded.submitted_at",(rid,uid,iso_now()))
     return RedirectResponse(f"/r/{rid}", status_code=303)
@@ -3372,7 +3417,13 @@ async def all_unavailable(rid: int, request: Request):
 async def save_answer(rid: int, request: Request, answers: str = Form("{}"), comment: str = Form("")):
     uid = require_login(request)
     await require_csrf(request)
-    if not is_active_member(rid, uid, "participant"):
+    r = get_recruitment(rid)
+    simple_open_answer = bool(
+        r
+        and is_simple_schedule(r)
+        and str(uid) != str(r["gm_discord_id"])
+    )
+    if not is_active_member(rid, uid, "participant") and not simple_open_answer:
         raise HTTPException(403, "参加者のみ回答できます")
     allowed_dates = set(get_gm_dates(rid))
     try:
@@ -3380,6 +3431,11 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
     except json.JSONDecodeError:
         obj = {}
     with db() as c:
+        if simple_open_answer and not is_active_member(rid, uid, "participant"):
+            c.execute(
+                "INSERT OR REPLACE INTO members(recruitment_id,discord_id,member_type,active,joined_at) VALUES(?,?,?,?,?)",
+                (rid, str(uid), "participant", 1, iso_now()),
+            )
         c.execute("DELETE FROM answers WHERE recruitment_id=? AND discord_id=?", (rid, uid))
         for d, a in obj.items():
             if d in allowed_dates and a in {"yes","maybe"}:
