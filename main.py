@@ -2252,7 +2252,7 @@ async def simple_schedule_form(request: Request):
             </label>
 
             <div id='pf' style='display:none'>
-              <label class='field'>
+              <label class='field' style='max-width:360px'>
                 <div class='field-box no-icon'>
                   <div class='field-stack'>
                     <span class='field-label'>募集人数</span>
@@ -2308,7 +2308,7 @@ async def simple_schedule_form(request: Request):
                 </div>
               </div>
             </label>
-            <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活のうち、あなたが閲覧でき、つぶ卓Botが投稿できるチャンネルのみ表示します。</p>
+            <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活の内あなたが閲覧できるチャンネルのみ表示しています</p>
           </div>
 
           <button class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
