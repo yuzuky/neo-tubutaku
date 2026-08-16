@@ -807,7 +807,27 @@ button,input,textarea,select{font:inherit}
   font-size:1rem;
 }
 .field-box textarea{resize:vertical;min-height:110px}
-.field-box select{appearance:none}
+.field-box select{
+  appearance:none;
+  color-scheme:dark;
+  background-color:#121923;
+  color:var(--text);
+}
+
+/* PC版 Chrome / Edge / Windows のネイティブ選択メニュー対策。
+   option側にも背景色と文字色を明示して白背景＋白文字を防ぐ。 */
+select{
+  color-scheme:dark;
+}
+select option,
+select optgroup{
+  background-color:#111827;
+  color:#f7f9fc;
+}
+select option:checked{
+  background-color:#2563eb;
+  color:#ffffff;
+}
 .field-box input::placeholder,
 .field-box textarea::placeholder{color:#778397}
 .field-label{
