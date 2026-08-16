@@ -2358,8 +2358,8 @@ async def simple_schedule_form(request: Request):
             <label class='field'>
               <div class='field-box no-icon'>
                 <div class='field-stack'>
-                  <span class='field-label'>送信先チャンネル</span>
-                  <select name='channel_id' required>{options}</select>
+                  <span class='field-label' style='margin-bottom:8px'>送信先チャンネル</span>
+                  <select name='channel_id' style='padding-top:14px;padding-bottom:10px' required>{options}</select>
                 </div>
               </div>
             </label>
