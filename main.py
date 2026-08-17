@@ -1563,10 +1563,11 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
     if int(r["schedule_pending"] or 0):
         await ch.send(
             f'🎲 **「{r["scenario_name"]}」募集開始**\n\n'
-            '日程調整は後日行う\n\n'
+            '日程調整は後日行います！\n\n'
             '参加リアクションを押した方はこちらのチャンネルへ追加されます。\n'
             'GMからの日程調整開始の案内をお待ちください。\n\n'
-            f'GM用：日程調整を開始する\n{BASE_URL}/r/{rid}/schedule/start'
+            f'GMの方へ：日程調整は以下のリンクよりお願いします！\n{BASE_URL}/r/{rid}/schedule/start',
+            silent=in_quiet_hours(),
         )
     else:
         deadline = datetime.fromisoformat(
@@ -1577,7 +1578,8 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
             f'🎲 **「{r["scenario_name"]}」日程調整**\n\n'
             f'回答期限：**{deadline.strftime("%Y/%m/%d 21:00")}**\n'
             '参加リアクションを押した方は、こちらから回答してください。\n'
-            f'{BASE_URL}/r/{rid}'
+            f'{BASE_URL}/r/{rid}',
+            silent=in_quiet_hours(),
         )
 
     return ch
@@ -1625,7 +1627,7 @@ async def post_recruitment(rid: int):
     if int(r["schedule_pending"] or 0):
         closing = (
             '参加希望の方は「参加」リアクションを押してください！\n'
-            '日程調整は後日行う'
+            '日程調整は後日行います！'
         )
     else:
         closing = (
@@ -1653,10 +1655,14 @@ async def post_recruitment(rid: int):
     first = await channel.send(
         chunks[0],
         files=files if files else None,
+        silent=in_quiet_hours(),
     )
 
     for chunk in chunks[1:]:
-        await channel.send(chunk)
+        await channel.send(
+            chunk,
+            silent=in_quiet_hours(),
+        )
 
     join_emoji = emoji_by_id(JOIN_EMOJI_ID)
     watch_emoji = emoji_by_id(WATCH_EMOJI_ID)
