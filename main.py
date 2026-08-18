@@ -2196,7 +2196,7 @@ async def join_list(request: Request):
             delete_confirm = (
                 "この日程調整を削除しますか？"
                 if is_simple_schedule(r)
-                else "この募集を削除しますか？\\n募集投稿と回答データを削除します。\\nDiscordチャンネル自体は削除・移動しません。"
+                else "この募集を削除しますか？\\n※削除は作成者のみ行えます"
             )
             delete_label = "日程調整を削除" if is_simple_schedule(r) else "募集を削除"
             menu = f"""
@@ -3529,8 +3529,21 @@ async def decide_form(rid: int, request: Request):
     if not uid:
         return RedirectResponse(f"/login?next=/r/{rid}/decide")
     r = get_recruitment(rid)
-    if not r or str(uid) != r["gm_discord_id"]:
-        raise HTTPException(403)
+    if not r:
+        raise HTTPException(404)
+    if str(uid) != str(r["gm_discord_id"]):
+        return page(
+            "日程決定",
+            f"""
+            <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
+            <div class='card' style='text-align:center'>
+              <h2>GMの方のみ表示できます</h2>
+              <p class='muted'>日程の決定はGMのみ行えます。</p>
+              <a class='btn alt' style='display:flex;justify-content:center;text-align:center;margin-top:18px' href='/r/{rid}'>日程調整ページへ戻る</a>
+            </div>
+            """,
+            request,
+        )
     if is_simple_schedule(r) and not simple_schedule_all_answered(rid):
         return page("日程決定",f"<div class='card'><p>まだ全員の回答が揃っていません。</p><a class='btn' href='/r/{rid}'>戻る</a></div>",request)
     candidates = [x for x in candidate_rows(rid) if len(x["yes"]) >= int(r["min_players"])]
