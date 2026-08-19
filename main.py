@@ -3317,7 +3317,7 @@ async def recruitment_page(rid: int, request: Request):
             )
         else:
             if is_simple_schedule(r):
-                dbtn=f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>" if all_answered else "<span class='btn alt' style='opacity:.55;pointer-events:none'>全員の回答待ち</span>"
+                dbtn=f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>" if available else "<span class='btn alt' style='opacity:.55;pointer-events:none'>必要人数待ち</span>"
                 done_ids = submitted_user_ids(rid)
                 with db() as c:
                     reminder_targets = c.execute(
@@ -3348,7 +3348,7 @@ async def recruitment_page(rid: int, request: Request):
                 nudge_disabled = " disabled style='opacity:.55;cursor:not-allowed'" if not pending_ids else ""
                 nudge_confirm = "" if not pending_ids else f" onclick='return confirm({confirm_text})'"
                 # 上段の「日程を決定」と「リマインド」は完全に同じサイズで横並び。
-                if all_answered:
+                if available:
                     dbtn = (
                         f"<a class='btn green' "
                         f"style='width:100%;height:100%;box-sizing:border-box;"
@@ -3360,7 +3360,7 @@ async def recruitment_page(rid: int, request: Request):
                         "<span class='btn alt' "
                         "style='width:100%;height:100%;box-sizing:border-box;"
                         "display:flex;align-items:center;justify-content:center;text-align:center;"
-                        "opacity:.55;pointer-events:none'>全員の回答待ち</span>"
+                        "opacity:.55;pointer-events:none'>必要人数待ち</span>"
                     )
 
                 gm_buttons=(
@@ -3544,8 +3544,7 @@ async def decide_form(rid: int, request: Request):
             """,
             request,
         )
-    if is_simple_schedule(r) and not simple_schedule_all_answered(rid):
-        return page("日程決定",f"<div class='card'><p>まだ全員の回答が揃っていません。</p><a class='btn' href='/r/{rid}'>戻る</a></div>",request)
+    # 全員の回答を待たず、必要人数を満たす候補日があれば日程決定できる。
     candidates = [x for x in candidate_rows(rid) if len(x["yes"]) >= int(r["min_players"])]
     if not candidates:
         return page(
@@ -3721,9 +3720,14 @@ async def decide_submit(
                 for sp in spectators:
                     member=await fetch_member(guild,sp[0])
                     if member: overwrites[member]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
-            suffix="-開催" if is_simple_schedule(r) else f"-{round_no}陣"
-            ch=await guild.create_text_channel(safe_channel_name(f'{r["scenario_name"]}{suffix}'),category=category,overwrites=overwrites,topic=f"つぶ卓 成立 ID:{sid}")
-            mentions="\n".join(f"・<@{x}>" for x in selected); gm_label=r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else f"<@{uid}>"; time_text="未定" if r["start_time"]=="未定" else f'{r["start_time"]}〜'; heading=f'## 『{r["scenario_name"]}』\n**開催が決定しました🎉**' if is_simple_schedule(r) else f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**'
+            suffix=f"-{round_no}陣"
+            ch=await guild.create_text_channel(
+                safe_channel_name(f'{r["scenario_name"]}{suffix}'),
+                category=category,
+                overwrites=overwrites,
+                topic=f"つぶ卓 成立 ID:{sid}"
+            )
+            mentions="\n".join(f"・<@{x}>" for x in selected); gm_label=r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else f"<@{uid}>"; time_text="未定" if r["start_time"]=="未定" else f'{r["start_time"]}〜'; heading=f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**'
             await send_long(ch,f'{heading}\n\n開催日：**{event_date}**\n開催時間：**{time_text}**\n\n主催：{gm_label}\n参加者：\n{mentions}')
 
         # 日程調整チャンネルにも簡易通知（常にsilent）
