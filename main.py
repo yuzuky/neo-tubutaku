@@ -485,6 +485,111 @@ def latest_reschedule_id(rid: int) -> int:
     return current
 
 
+def original_recruitment_with_message(rid: int):
+    """再日程調整の祖先をたどり、元のDiscord募集投稿を持つ募集を返す。"""
+    current = get_recruitment(int(rid))
+    visited = set()
+
+    while current:
+        current_id = int(current["id"])
+        if current_id in visited:
+            break
+        visited.add(current_id)
+
+        if current["recruitment_message_id"] and current["recruitment_channel_id"]:
+            return current
+
+        parent_id = current["parent_id"]
+        if not parent_id:
+            break
+        current = get_recruitment(int(parent_id))
+
+    return None
+
+
+async def fetch_current_reaction_members(rid: int):
+    """
+    元の募集投稿に現在付いている参加・観戦リアクションをDiscordから再取得する。
+    成功時:
+      {"participant": {uid...}, "spectator": {uid...}}
+    取得不能時:
+      None
+    """
+    source = original_recruitment_with_message(rid)
+    if not source:
+        return None
+
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return None
+
+    try:
+        channel = guild.get_channel(int(source["recruitment_channel_id"]))
+        if not channel:
+            channel = await guild.fetch_channel(int(source["recruitment_channel_id"]))
+
+        message = await channel.fetch_message(int(source["recruitment_message_id"]))
+
+        result = {
+            "participant": set(),
+            "spectator": set(),
+        }
+
+        for reaction in message.reactions:
+            emoji_id = getattr(reaction.emoji, "id", None)
+
+            if emoji_id == JOIN_EMOJI_ID:
+                kind = "participant"
+            elif emoji_id == WATCH_EMOJI_ID:
+                kind = "spectator"
+            else:
+                continue
+
+            async for reactor in reaction.users(limit=None):
+                reactor_id = str(reactor.id)
+
+                # Bot自身の自動リアクションは参加者に含めない
+                if bot.user and reactor.id == bot.user.id:
+                    continue
+
+                result[kind].add(reactor_id)
+
+                # 表示名キャッシュも可能な範囲で更新
+                member = guild.get_member(reactor.id)
+                if member:
+                    with db() as c:
+                        c.execute(
+                            """INSERT INTO users(
+                                   discord_id,username,display_name,avatar_url,updated_at
+                               )
+                               VALUES(?,?,?,?,?)
+                               ON CONFLICT(discord_id) DO UPDATE SET
+                                 username=excluded.username,
+                                 display_name=excluded.display_name,
+                                 avatar_url=excluded.avatar_url,
+                                 updated_at=excluded.updated_at""",
+                            (
+                                reactor_id,
+                                member.name,
+                                member.display_name,
+                                str(member.display_avatar.url),
+                                iso_now(),
+                            ),
+                        )
+
+        print(
+            f"[RESCHEDULE] Discord reactions refreshed "
+            f"rid={rid} participants={len(result['participant'])} "
+            f"spectators={len(result['spectator'])}",
+            flush=True,
+        )
+        return result
+
+    except Exception as e:
+        log_error(f"fetch_current_reaction_members rid={rid}", e)
+        return None
+
+
 def get_user(uid: str):
     with db() as c:
         return c.execute("SELECT * FROM users WHERE discord_id=?", (uid,)).fetchone()
@@ -4334,6 +4439,11 @@ async def reschedule_submit(
         deadline_date + "T21:00:00"
     ).replace(tzinfo=JST)
 
+    # 再日程調整時は、DBだけでなくDiscord上の「現在のリアクション」を
+    # 元の募集投稿から読み直して新しい募集IDのmembersを作る。
+    # Discord取得に失敗した場合だけ、既存DBをフォールバックとして使う。
+    discord_reaction_members = await fetch_current_reaction_members(rid)
+
     with db() as c:
         old_members = c.execute(
             """SELECT discord_id, member_type, active, joined_at
@@ -4414,26 +4524,51 @@ async def reschedule_submit(
                 (new_id, r["image_path"]),
             )
 
-        for m in old_members:
-            c.execute(
-                """INSERT INTO members(
-                    recruitment_id,
-                    discord_id,
-                    member_type,
-                    active,
-                    joined_at
+        if discord_reaction_members is not None:
+            # Discordの元募集投稿に「現在」付いているリアクションを正として登録。
+            for member_type in ("participant", "spectator"):
+                for discord_id in sorted(discord_reaction_members[member_type]):
+                    c.execute(
+                        """INSERT INTO members(
+                            recruitment_id,
+                            discord_id,
+                            member_type,
+                            active,
+                            joined_at
+                        )
+                        VALUES(?,?,?,?,?)
+                        ON CONFLICT(recruitment_id,discord_id,member_type)
+                        DO UPDATE SET active=1,joined_at=excluded.joined_at""",
+                        (
+                            new_id,
+                            discord_id,
+                            member_type,
+                            1,
+                            iso_now(),
+                        ),
+                    )
+        else:
+            # Discord投稿が取得できない場合だけ従来のDB情報をコピー。
+            for m in old_members:
+                c.execute(
+                    """INSERT INTO members(
+                        recruitment_id,
+                        discord_id,
+                        member_type,
+                        active,
+                        joined_at
+                    )
+                    VALUES(?,?,?,?,?)
+                    ON CONFLICT(recruitment_id,discord_id,member_type)
+                    DO UPDATE SET active=1""",
+                    (
+                        new_id,
+                        m["discord_id"],
+                        m["member_type"],
+                        1,
+                        m["joined_at"] or iso_now(),
+                    ),
                 )
-                VALUES(?,?,?,?,?)
-                ON CONFLICT(recruitment_id,discord_id,member_type)
-                DO UPDATE SET active=1""",
-                (
-                    new_id,
-                    m["discord_id"],
-                    m["member_type"],
-                    1,
-                    m["joined_at"] or iso_now(),
-                ),
-            )
 
         c.execute(
             "UPDATE recruitments SET status='RESCHEDULED' WHERE id=?",
@@ -4494,9 +4629,14 @@ async def reschedule_submit(
             "日程調整チャンネルへの投稿に失敗しました",
         )
 
+    source_label = (
+        "discord-reactions"
+        if discord_reaction_members is not None
+        else "db-fallback"
+    )
     print(
-        f"[RESCHEDULE] waiting-channel-only old_rid={rid} "
-        f"new_rid={new_id} channel={channel.id}",
+        f"[RESCHEDULE] old_rid={rid} new_rid={new_id} "
+        f"channel={channel.id} members_source={source_label}",
         flush=True,
     )
 
