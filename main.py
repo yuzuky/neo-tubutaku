@@ -2272,7 +2272,7 @@ async def simple_schedule_form(request: Request):
         <a class='back-link' href='/'>‹ 戻る</a>
         <div class='section-title' style='text-align:center'>日程調整</div>
 
-        <form class='form-shell' method='post' action='/schedule/new'>
+        <form id='simpleScheduleCreateForm' class='form-shell' method='post' action='/schedule/new'>
           {csrf_field(request)}
 
           <div class='form-section compact'>
@@ -2372,7 +2372,7 @@ async def simple_schedule_form(request: Request):
             <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活からあなたが閲覧できるチャンネルのみ表示</p>
           </div>
 
-          <button class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
+          <button id='simpleScheduleSubmitBtn' class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
         </form>
 
         <script>
@@ -2398,6 +2398,27 @@ async def simple_schedule_form(request: Request):
           const x=document.getElementById('vp2').checked;
           document.getElementById('vr2').style.display=x?'grid':'none';
           document.getElementById('fp').disabled=x;
+        }}
+
+        // 二重送信防止
+        const simpleForm=document.getElementById('simpleScheduleCreateForm');
+        const simpleSubmitBtn=document.getElementById('simpleScheduleSubmitBtn');
+
+        if(simpleForm && simpleSubmitBtn){{
+          simpleForm.addEventListener('submit',function(e){{
+            // すでに1度送信処理に入っていれば、2回目以降は止める
+            if(simpleForm.dataset.submitting==='1'){{
+              e.preventDefault();
+              return false;
+            }}
+
+            simpleForm.dataset.submitting='1';
+            simpleSubmitBtn.disabled=true;
+            simpleSubmitBtn.textContent='送信中…';
+            simpleSubmitBtn.style.opacity='.65';
+            simpleSubmitBtn.style.cursor='wait';
+            simpleSubmitBtn.style.pointerEvents='none';
+          }});
         }}
         </script>
         """,
@@ -2543,7 +2564,7 @@ async def new_form(request: Request):
         <a class='back-link' href='/'>‹ 戻る</a>
         <div class='section-title'>卓を立てる</div>
 
-        <form class='form-shell' action='/new' method='post' enctype='multipart/form-data'>
+        <form id='recruitmentCreateForm' class='form-shell' action='/new' method='post' enctype='multipart/form-data'>
           {csrf_field(request)}
 
           <div class='form-section compact'>
@@ -2672,7 +2693,7 @@ async def new_form(request: Request):
             </div>
           </div>
 
-          <button class='submit-btn' type='submit'>卓を作成する</button>
+          <button id='recruitmentSubmitBtn' class='submit-btn' type='submit'>卓を作成する</button>
         </form>
 
         <script>
@@ -3940,6 +3961,27 @@ async def schedule_start_form(rid: int, request: Request):
 
           document.getElementById('gm_dates').value=
             selected.join(',');
+        }}
+
+        // 二重送信防止
+        const recruitmentForm=document.getElementById('recruitmentCreateForm');
+        const recruitmentSubmitBtn=document.getElementById('recruitmentSubmitBtn');
+
+        if(recruitmentForm && recruitmentSubmitBtn){{
+          recruitmentForm.addEventListener('submit',function(e){{
+            // すでに1度送信処理に入っていれば、2回目以降は止める
+            if(recruitmentForm.dataset.submitting==='1'){{
+              e.preventDefault();
+              return false;
+            }}
+
+            recruitmentForm.dataset.submitting='1';
+            recruitmentSubmitBtn.disabled=true;
+            recruitmentSubmitBtn.textContent='送信中…';
+            recruitmentSubmitBtn.style.opacity='.65';
+            recruitmentSubmitBtn.style.cursor='wait';
+            recruitmentSubmitBtn.style.pointerEvents='none';
+          }});
         }}
         </script>
         """,
