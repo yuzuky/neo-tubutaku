@@ -4524,8 +4524,31 @@ async def reschedule_submit(
                 (new_id, r["image_path"]),
             )
 
+        # 再日程調整では、まずDBに既にいる参加者・観戦者を必ず引き継ぐ。
+        # そのうえでDiscordの現在のリアクションから取得できた人を追加する。
+        # これにより、Discord取得が0件/不完全でも既存参加者を失わない。
+        for m in old_members:
+            c.execute(
+                """INSERT INTO members(
+                    recruitment_id,
+                    discord_id,
+                    member_type,
+                    active,
+                    joined_at
+                )
+                VALUES(?,?,?,?,?)
+                ON CONFLICT(recruitment_id,discord_id,member_type)
+                DO UPDATE SET active=1""",
+                (
+                    new_id,
+                    m["discord_id"],
+                    m["member_type"],
+                    1,
+                    m["joined_at"] or iso_now(),
+                ),
+            )
+
         if discord_reaction_members is not None:
-            # Discordの元募集投稿に「現在」付いているリアクションを正として登録。
             for member_type in ("participant", "spectator"):
                 for discord_id in sorted(discord_reaction_members[member_type]):
                     c.execute(
@@ -4547,28 +4570,6 @@ async def reschedule_submit(
                             iso_now(),
                         ),
                     )
-        else:
-            # Discord投稿が取得できない場合だけ従来のDB情報をコピー。
-            for m in old_members:
-                c.execute(
-                    """INSERT INTO members(
-                        recruitment_id,
-                        discord_id,
-                        member_type,
-                        active,
-                        joined_at
-                    )
-                    VALUES(?,?,?,?,?)
-                    ON CONFLICT(recruitment_id,discord_id,member_type)
-                    DO UPDATE SET active=1""",
-                    (
-                        new_id,
-                        m["discord_id"],
-                        m["member_type"],
-                        1,
-                        m["joined_at"] or iso_now(),
-                    ),
-                )
 
         c.execute(
             "UPDATE recruitments SET status='RESCHEDULED' WHERE id=?",
@@ -4630,9 +4631,9 @@ async def reschedule_submit(
         )
 
     source_label = (
-        "discord-reactions"
+        "db+discord-reactions"
         if discord_reaction_members is not None
-        else "db-fallback"
+        else "db-only"
     )
     print(
         f"[RESCHEDULE] old_rid={rid} new_rid={new_id} "
