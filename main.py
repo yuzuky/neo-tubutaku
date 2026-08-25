@@ -456,6 +456,35 @@ def get_recruitment(rid: int):
         return c.execute("SELECT * FROM recruitments WHERE id=?", (rid,)).fetchone()
 
 
+def latest_reschedule_id(rid: int) -> int:
+    """元募集から再日程調整の子をたどり、現在の最新募集IDを返す。"""
+    current = int(rid)
+    visited = {current}
+
+    with db() as c:
+        while True:
+            child = c.execute(
+                """SELECT id
+                   FROM recruitments
+                   WHERE parent_id=?
+                   ORDER BY id DESC
+                   LIMIT 1""",
+                (current,),
+            ).fetchone()
+
+            if not child:
+                break
+
+            cid = int(child["id"])
+            if cid in visited:
+                break
+
+            visited.add(cid)
+            current = cid
+
+    return current
+
+
 def get_user(uid: str):
     with db() as c:
         return c.execute("SELECT * FROM users WHERE discord_id=?", (uid,)).fetchone()
@@ -1814,20 +1843,34 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
             )
 
         if added:
+            # 元の募集投稿に付いたリアクションは、元募集だけでなく
+            # 現在の最新再日程調整にも同期する。
+            # これにより、再日程調整後に初めて参加リアクションを押した人も
+            # 既存の再日程調整リンクからそのまま回答できる。
+            target_rids = [int(r["id"])]
+            latest_rid = latest_reschedule_id(int(r["id"]))
+            if latest_rid not in target_rids:
+                target_rids.append(latest_rid)
+
             with db() as c:
-                c.execute(
-                    """INSERT INTO members(recruitment_id,discord_id,member_type,active,joined_at)
-                       VALUES(?,?,?,?,?)
-                       ON CONFLICT(recruitment_id,discord_id,member_type)
-                       DO UPDATE SET active=1,joined_at=excluded.joined_at""",
-                    (r["id"], uid, kind, 1, iso_now()),
-                )
+                for target_rid in target_rids:
+                    c.execute(
+                        """INSERT INTO members(recruitment_id,discord_id,member_type,active,joined_at)
+                           VALUES(?,?,?,?,?)
+                           ON CONFLICT(recruitment_id,discord_id,member_type)
+                           DO UPDATE SET active=1,joined_at=excluded.joined_at""",
+                        (target_rid, uid, kind, 1, iso_now()),
+                    )
 
             print(
-                f"[REACTION:{action}] DB member activated rid={r['id']} user={uid}",
+                f"[REACTION:{action}] DB member activated "
+                f"rids={target_rids} user={uid}",
                 flush=True,
             )
 
+            # Discordチャンネル権限は元募集側のwaiting_channelに対してのみ付与。
+            # 再日程調整は基本的に同じwaiting_channelを引き継ぐため、
+            # 重複して権限操作しない。
             await set_waiting_access(r["id"], uid, True)
             print(
                 f"[REACTION:{action}] waiting channel permission granted user={uid}",
@@ -1854,21 +1897,32 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
                     )
 
         else:
+            target_rids = [int(r["id"])]
+            latest_rid = latest_reschedule_id(int(r["id"]))
+            if latest_rid not in target_rids:
+                target_rids.append(latest_rid)
+
             with db() as c:
-                c.execute(
-                    "UPDATE members SET active=0 WHERE recruitment_id=? AND discord_id=? AND member_type=?",
-                    (r["id"], uid, kind),
-                )
-                if kind == "participant":
+                for target_rid in target_rids:
                     c.execute(
-                        "DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",
-                        (r["id"], uid),
+                        "UPDATE members SET active=0 WHERE recruitment_id=? AND discord_id=? AND member_type=?",
+                        (target_rid, uid, kind),
                     )
+                    if kind == "participant":
+                        c.execute(
+                            "DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",
+                            (target_rid, uid),
+                        )
+                        c.execute(
+                            "DELETE FROM answer_submissions WHERE recruitment_id=? AND discord_id=?",
+                            (target_rid, uid),
+                        )
 
             # リアクション解除時はDiscordチャンネル権限を変更しない。
             # サイト側の参加/観戦状態だけ解除する。
             print(
-                f"[REACTION:{action}] deactivated user={uid}; Discord channel permissions unchanged",
+                f"[REACTION:{action}] deactivated "
+                f"rids={target_rids} user={uid}; Discord channel permissions unchanged",
                 flush=True,
             )
 
