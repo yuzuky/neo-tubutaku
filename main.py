@@ -106,6 +106,7 @@ UNDECIDED_CATEGORY_ID = env_int("UNDECIDED_CATEGORY_ID", 1327812864261623890)
 SESSION_CATEGORY_ID = env_int("SESSION_CATEGORY_ID", 1245192932147855401)
 JOIN_EMOJI_ID = env_int("JOIN_EMOJI_ID", 1486316302308999218)
 WATCH_EMOJI_ID = env_int("WATCH_EMOJI_ID", 1486316056711794748)
+DEVELOPER_USER_ID = "804350794371039272"  # yuzuky / 開発者テスト用
 
 PORT = env_int("PORT", 8000)
 DATA_DIR = Path(DATABASE_PATH).parent
@@ -1805,16 +1806,21 @@ async def post_recruitment(rid: int):
     ][:10]
     files = [discord.File(p) for p in image_paths]
 
+    # 開発者テスト用：
+    # シナリオ名が完全一致で「テスト」の場合は、時間帯に関係なく
+    # 募集掲示板への投稿をすべてミュートメッセージにする。
+    recruitment_silent = in_quiet_hours() or r["scenario_name"].strip() == "テスト"
+
     first = await channel.send(
         chunks[0],
         files=files if files else None,
-        silent=in_quiet_hours(),
+        silent=recruitment_silent,
     )
 
     for chunk in chunks[1:]:
         await channel.send(
             chunk,
-            silent=in_quiet_hours(),
+            silent=recruitment_silent,
         )
 
     join_emoji = emoji_by_id(JOIN_EMOJI_ID)
@@ -2369,13 +2375,15 @@ async def join_list(request: Request):
             badge = ""
 
         is_gm = str(uid) == str(r["gm_discord_id"])
+        can_delete = is_gm or str(uid) == DEVELOPER_USER_ID
 
-        if is_gm:
-            delete_confirm = (
-                "この日程調整を削除しますか？"
-                if is_simple_schedule(r)
-                else "この募集を削除しますか？\\n※削除は作成者のみ行えます"
-            )
+        if can_delete:
+            if is_simple_schedule(r):
+                delete_confirm = "この日程調整を削除しますか？"
+            elif is_gm:
+                delete_confirm = "この募集を削除しますか？\\n※削除は作成者のみ行えます"
+            else:
+                delete_confirm = "この募集を削除しますか？\\n※開発者テスト権限で削除します"
             delete_label = "日程調整を削除" if is_simple_schedule(r) else "募集を削除"
             menu = f"""
               <details class='table-menu'>
@@ -3093,7 +3101,7 @@ async def delete_recruitment(rid: int, request: Request):
     if not r:
         raise HTTPException(404)
 
-    if str(uid) != str(r["gm_discord_id"]):
+    if str(uid) != str(r["gm_discord_id"]) and str(uid) != DEVELOPER_USER_ID:
         raise HTTPException(403, "募集を削除できるのはGM本人だけです")
 
     # この募集と、そこから派生した再日程調整をすべて収集
