@@ -199,6 +199,11 @@ def ensure_recruitment_columns():
             c.execute("ALTER TABLE recruitments ADD COLUMN target_channel_id TEXT")
         if "target_message_id" not in cols:
             c.execute("ALTER TABLE recruitments ADD COLUMN target_message_id TEXT")
+        if "calendar_visible" not in cols:
+            c.execute(
+                "ALTER TABLE recruitments "
+                "ADD COLUMN calendar_visible INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def backfill_calendar_history():
@@ -255,9 +260,15 @@ def archive_confirmed_session(
     gm_discord_id: str,
     participant_ids: list[str],
     created_at: str,
+    calendar_visible: bool | None = None,
 ) -> int:
     """成立卓をカレンダー/履歴用DBへ永久保存する。"""
     with db() as c:
+        visible = (
+            bool(calendar_visible)
+            if calendar_visible is not None
+            else game_type != "EVENT"
+        )
         c.execute(
             """INSERT INTO calendar_sessions(
                    source_session_id,source_recruitment_id,game_type,scenario_name,
@@ -267,10 +278,11 @@ def archive_confirmed_session(
                  game_type=excluded.game_type,
                  scenario_name=excluded.scenario_name,
                  event_date=excluded.event_date,
-                 gm_discord_id=excluded.gm_discord_id""",
+                 gm_discord_id=excluded.gm_discord_id,
+                 calendar_visible=excluded.calendar_visible""",
             (
                 source_session_id, source_recruitment_id, game_type, scenario_name,
-                event_date, gm_discord_id, 0 if game_type == "EVENT" else 1, created_at,
+                event_date, gm_discord_id, 1 if visible else 0, created_at,
             ),
         )
         cal = c.execute(
@@ -316,6 +328,29 @@ def calendar_entries(start_date: str, end_date: str):
             ).fetchall()
             out.append((row, members))
         return out
+
+
+def calendar_conflict_dates(discord_id: str, event_dates: list[str]) -> set[str]:
+    """ユーザーがGMまたはPLとして既に成立卓を持つ日付を返す。"""
+    clean_dates = [str(x) for x in dict.fromkeys(event_dates) if x]
+    if not clean_dates:
+        return set()
+
+    placeholders = ",".join("?" for _ in clean_dates)
+    params = [str(discord_id), str(discord_id), *clean_dates]
+
+    with db() as c:
+        rows = c.execute(
+            f"""SELECT DISTINCT cs.event_date
+                FROM calendar_sessions cs
+                LEFT JOIN calendar_session_members csm
+                  ON csm.calendar_session_id=cs.id
+                WHERE (cs.gm_discord_id=? OR csm.discord_id=?)
+                  AND cs.event_date IN ({placeholders})""",
+            params,
+        ).fetchall()
+
+    return {str(x["event_date"]) for x in rows}
 
 
 def initialize_database():
