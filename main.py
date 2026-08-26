@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, update_calendar_session_members, db
+from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, scenario_detail, scenario_progress_data, set_scenario_progress_status, update_calendar_session_members, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -2040,6 +2040,210 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   font-size:.62rem;
 }}
 
+
+/* v52 confirmation typography */
+.calendar-danger-confirm{{
+  text-align:center;
+}}
+.calendar-danger-confirm p{{
+  text-align:center;
+  font-weight:900;
+  font-size:.82rem;
+}}
+.calendar-danger-confirm .danger-confirm-line{{
+  justify-content:center;
+  font-weight:400;
+  font-size:.72rem;
+  color:#9eabbc;
+}}
+.calendar-danger-confirm .danger-confirm-line span{{
+  font-weight:400;
+}}
+
+/* v52 progress / scenario detail */
+.calendar-floating-tools{{
+  position:absolute;
+  right:0;
+  top:-58px;
+  z-index:5;
+  display:flex;
+  gap:8px;
+}}
+.stats-circle-floating{{
+  position:static;
+}}
+.progress-list-icon{{
+  display:flex;
+  flex-direction:column;
+  gap:3px;
+}}
+.progress-list-icon i{{
+  display:block;
+  width:18px;
+  height:3px;
+  border-radius:4px;
+  background:#e2e8f0;
+}}
+.progress-list-icon i:nth-child(2){{width:14px}}
+.progress-list-icon i:nth-child(3){{width:10px}}
+
+.progress-card{{
+  width:min(700px,100%);
+  max-height:84vh;
+}}
+.progress-legend{{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:center;
+  gap:12px;
+  margin-bottom:12px;
+  color:#9ba8ba;
+  font-size:.72rem;
+}}
+.progress-dot{{
+  font-size:1rem;
+  font-weight:1000;
+}}
+.progress-dot.passed{{color:#32d875}}
+.progress-dot.watched{{color:#4ea2ff}}
+.progress-tabs{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-bottom:12px;
+}}
+.progress-tab{{
+  padding:10px;
+  border:1px solid #334155;
+  border-radius:12px;
+  background:#101824;
+  color:#9eabbc;
+  font-weight:900;
+  cursor:pointer;
+}}
+.progress-tab.active{{
+  background:#1a2636;
+  color:#fff;
+  border-color:#64748b;
+}}
+.progress-panel{{display:none}}
+.progress-panel.active{{display:block}}
+.progress-table-scroll{{
+  overflow:auto;
+  max-height:52vh;
+  border:1px solid #263244;
+  border-radius:13px;
+}}
+.progress-table{{
+  border-collapse:separate;
+  border-spacing:0;
+  min-width:max-content;
+  width:100%;
+  background:#0b121b;
+}}
+.progress-table th,
+.progress-table td{{
+  min-width:66px;
+  height:48px;
+  padding:5px;
+  text-align:center;
+  border-right:1px solid #202b39;
+  border-bottom:1px solid #202b39;
+}}
+.progress-table thead th{{
+  position:sticky;
+  top:0;
+  z-index:3;
+  background:#111b28;
+}}
+.progress-corner,
+.progress-user-name{{
+  position:sticky;
+  left:0;
+  z-index:4;
+  min-width:110px !important;
+  max-width:110px;
+  background:#111b28 !important;
+}}
+.progress-user-name{{
+  text-align:left !important;
+  font-size:.72rem;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}}
+.progress-scenario-head{{
+  max-width:90px;
+  font-size:.65rem;
+  line-height:1.25;
+  cursor:pointer;
+  white-space:normal;
+}}
+.progress-cell{{
+  width:38px;
+  height:38px;
+  border:0;
+  border-radius:50%;
+  background:transparent;
+  color:#748195;
+  font-size:1rem;
+  font-weight:1000;
+  cursor:pointer;
+}}
+.progress-cell.passed{{
+  color:#32d875;
+  background:rgba(50,216,117,.10);
+}}
+.progress-cell.watched{{
+  color:#4ea2ff;
+  background:rgba(78,162,255,.10);
+}}
+.progress-hint{{
+  margin:10px 0 0;
+  text-align:center;
+  color:#778599;
+  font-size:.66rem;
+}}
+.scenario-detail-count{{
+  text-align:center;
+  color:#a7b3c3;
+  margin-bottom:14px;
+}}
+.scenario-detail-section{{
+  margin-top:12px;
+  padding:12px;
+  border:1px solid #263244;
+  border-radius:13px;
+  background:#0b121b;
+}}
+.scenario-detail-heading{{
+  margin-bottom:8px;
+  font-size:.75rem;
+  font-weight:950;
+}}
+.scenario-detail-heading.passed{{color:#32d875}}
+.scenario-detail-heading.watched{{color:#4ea2ff}}
+.scenario-detail-names{{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+}}
+.scenario-name-chip{{
+  display:inline-block;
+  padding:5px 8px;
+  border-radius:8px;
+  font-size:.76rem;
+  font-weight:850;
+}}
+.scenario-name-chip.passed{{
+  color:#62e595;
+  background:rgba(50,216,117,.11);
+}}
+.scenario-name-chip.watched{{
+  color:#79baff;
+  background:rgba(78,162,255,.11);
+}}
+
 </style>
 </head>
 <body>
@@ -2890,6 +3094,8 @@ async def calendar_page(request: Request, month: str = ""):
     )
     total_stats = calendar_stats()
 
+    progress_users, progress_scenarios, progress_statuses = scenario_progress_data()
+
     def rank_html(rows):
         if not rows:
             return "<div class='muted small'>まだデータがありません</div>"
@@ -3001,6 +3207,84 @@ async def calendar_page(request: Request, month: str = ""):
                 f"{''.join(blocks)}</div>"
             )
 
+    def progress_matrix(game_type):
+        scenarios_for_type = [
+            x for x in progress_scenarios
+            if str(x["game_type"]) == game_type
+        ]
+        if not scenarios_for_type:
+            return "<div class='progress-empty'>シナリオデータはまだありません。</div>"
+
+        headers = "".join(
+            f"<th class='progress-scenario-head' "
+            f"data-game-type='{esc(game_type)}' "
+            f"data-scenario='{esc(str(s['scenario_name']))}' "
+            f"onclick='openScenarioDetail(this)'>"
+            f"{esc(str(s['scenario_name']))}</th>"
+            for s in scenarios_for_type
+        )
+
+        body_rows = []
+        for user in progress_users:
+            uid = str(user["discord_id"])
+            cells = []
+            for scenario in scenarios_for_type:
+                name = str(scenario["scenario_name"])
+                status = progress_statuses.get((game_type, name, uid), "")
+                cls = (
+                    " passed" if status == "PASSED"
+                    else " watched" if status == "WATCHED"
+                    else ""
+                )
+                symbol = "○" if status else "－"
+                cells.append(
+                    f"<td><button type='button' "
+                    f"class='progress-cell{cls}' "
+                    f"data-game-type='{esc(game_type)}' "
+                    f"data-scenario='{esc(name)}' "
+                    f"data-user-id='{esc(uid)}' "
+                    f"data-status='{esc(status)}' "
+                    f"onclick='cycleProgress(this)'>{symbol}</button></td>"
+                )
+
+            body_rows.append(
+                f"<tr><th class='progress-user-name'>"
+                f"{esc(str(user['display_name']))}</th>{''.join(cells)}</tr>"
+            )
+
+        return (
+            "<div class='progress-table-scroll'>"
+            "<table class='progress-table'>"
+            f"<thead><tr><th class='progress-corner'>名前</th>{headers}</tr></thead>"
+            f"<tbody>{''.join(body_rows)}</tbody>"
+            "</table></div>"
+        )
+
+    progress_trpg_html = progress_matrix("TRPG")
+    progress_madamis_html = progress_matrix("MADMIS")
+    progress_csrf = esc(get_csrf_token(request))
+
+    scenario_detail_map = {}
+    for scenario in progress_scenarios:
+        gt = str(scenario["game_type"])
+        name = str(scenario["scenario_name"])
+        count, detail_rows = scenario_detail(gt, name)
+        scenario_detail_map[f"{gt}\x1f{name}"] = {
+            "count": count,
+            "passed": [
+                str(x["display_name"])
+                for x in detail_rows if str(x["status"]) == "PASSED"
+            ],
+            "watched": [
+                str(x["display_name"])
+                for x in detail_rows if str(x["status"]) == "WATCHED"
+            ],
+        }
+
+    scenario_detail_json = json.dumps(
+        scenario_detail_map, ensure_ascii=False
+    ).replace("</", "<\\/")
+
     return page(
         "カレンダー",
         f"""
@@ -3011,10 +3295,16 @@ async def calendar_page(request: Request, month: str = ""):
           <h2>{current.year}年 {current.month}月</h2>
           <a class='calendar-nav' href='/calendar?month={next_month.strftime('%Y-%m')}'>›</a>
 
-          <button class='stats-circle stats-circle-floating' type='button'
-                  onclick='openStats(event)' aria-label='データ'>
-            <span class='stats-bars'><i></i><i></i><i></i></span>
-          </button>
+          <div class='calendar-floating-tools'>
+            <button class='stats-circle progress-circle' type='button'
+                    onclick='openProgress(event)' aria-label='通過済みリスト'>
+              <span class='progress-list-icon'><i></i><i></i><i></i></span>
+            </button>
+            <button class='stats-circle' type='button'
+                    onclick='openStats(event)' aria-label='データ'>
+              <span class='stats-bars'><i></i><i></i><i></i></span>
+            </button>
+          </div>
         </div>
 
         <div class='calendar-grid'>
@@ -3049,7 +3339,7 @@ async def calendar_page(request: Request, month: str = ""):
               <label class='field manual-field-spaced'>
                 <div class='field-box no-icon manual-scenario-box'>
                   <div class='field-stack'>
-                    <input type='text' name='scenario_name'
+                    <input type='text' id='manualScenarioInput' name='scenario_name'
                            placeholder='シナリオ名を入力'
                            autocomplete='off' required>
                   </div>
@@ -3090,6 +3380,66 @@ async def calendar_page(request: Request, month: str = ""):
           </div>
         </div>
 
+        <div class='calendar-modal' id='progressModal'
+             onclick='closeProgress(event)'>
+          <div class='calendar-modal-card progress-card'
+               onclick='event.stopPropagation()'>
+            <h3 class='calendar-modal-title'>通過済みリスト</h3>
+
+            <div class='progress-legend'>
+              <span><b class='progress-dot passed'>○</b> 通過済み</span>
+              <span><b class='progress-dot watched'>○</b> 視聴済み</span>
+              <span><b>－</b> 未通過</span>
+            </div>
+
+            <div class='progress-tabs'>
+              <button class='progress-tab active' type='button'
+                      onclick="switchProgressTab('TRPG',this)">TRPG</button>
+              <button class='progress-tab' type='button'
+                      onclick="switchProgressTab('MADMIS',this)">マダミス</button>
+            </div>
+
+            <div class='progress-panel active' id='progressPanelTRPG'>
+              {progress_trpg_html}
+            </div>
+            <div class='progress-panel' id='progressPanelMADMIS'>
+              {progress_madamis_html}
+            </div>
+
+            <p class='progress-hint'>
+              セルをタップ：－ → 緑○ → 青○ → －
+            </p>
+
+            <button class='calendar-modal-close' type='button'
+                    onclick='closeProgress()'>閉じる</button>
+          </div>
+        </div>
+
+        <div class='calendar-modal' id='scenarioDetailModal'
+             onclick='closeScenarioDetail(event)'>
+          <div class='calendar-modal-card scenario-detail-card'
+               onclick='event.stopPropagation()'>
+            <h3 class='calendar-modal-title' id='scenarioDetailTitle'></h3>
+
+            <div class='scenario-detail-count'>
+              開催回数：<b id='scenarioDetailCount'>0</b>回
+            </div>
+
+            <div class='scenario-detail-section'>
+              <div class='scenario-detail-heading passed'>通過済み</div>
+              <div class='scenario-detail-names' id='scenarioPassedNames'></div>
+            </div>
+
+            <div class='scenario-detail-section'>
+              <div class='scenario-detail-heading watched'>視聴済み</div>
+              <div class='scenario-detail-names' id='scenarioWatchedNames'></div>
+            </div>
+
+            <button class='calendar-modal-close' type='button'
+                    onclick='closeScenarioDetail()'>閉じる</button>
+          </div>
+        </div>
+
         <div class='calendar-modal' id='statsModal' onclick='closeStats(event)'>
           <div class='calendar-modal-card stats-card' onclick='event.stopPropagation()'>
             <h3 class='calendar-modal-title'>つぶぐみ卓データ</h3>
@@ -3126,8 +3476,8 @@ async def calendar_page(request: Request, month: str = ""):
                 <span>累計シナリオ数</span>
               </div>
               <div class='stats-type-row'>
-                <div><b>{total_stats["trpg"]}</b><span>TRPGの卓数</span></div>
-                <div><b>{total_stats["madamis"]}</b><span>マダミスの卓数</span></div>
+                <div><b>{total_stats["trpg"]}</b><span>累計TRPG卓数</span></div>
+                <div><b>{total_stats["madamis"]}</b><span>累計マダミス卓数</span></div>
               </div>
 
               <div class='stats-ranking-title'>GM TOP3</div>
@@ -3231,6 +3581,10 @@ async def calendar_page(request: Request, month: str = ""):
             "#manualAddModal input[name='game_type']:checked"
           );
           const isEvent=selected && selected.value==='EVENT';
+          const scenarioInput=document.getElementById('manualScenarioInput');
+          if(scenarioInput){{
+            scenarioInput.placeholder=isEvent?'イベント名を入力':'シナリオ名を入力';
+          }}
 
           const timeField=document.getElementById('manualTimeField');
           const gmField=document.getElementById('manualGmField');
@@ -3281,6 +3635,116 @@ async def calendar_page(request: Request, month: str = ""):
           const modal=document.getElementById('manualAddModal');
           if(modal) modal.classList.remove('open');
           document.body.style.overflow='';
+        }}
+
+        const scenarioDetailData={scenario_detail_json};
+
+        function openProgress(ev){{
+          if(ev) ev.stopPropagation();
+          const modal=document.getElementById('progressModal');
+          if(modal) modal.classList.add('open');
+          document.body.style.overflow='hidden';
+        }}
+
+        function closeProgress(ev){{
+          if(ev && ev.target!==document.getElementById('progressModal')) return;
+          const modal=document.getElementById('progressModal');
+          if(modal) modal.classList.remove('open');
+          document.body.style.overflow='';
+        }}
+
+        function switchProgressTab(type,btn){{
+          document.querySelectorAll('.progress-tab').forEach(
+            x=>x.classList.remove('active')
+          );
+          if(btn) btn.classList.add('active');
+
+          document.querySelectorAll('.progress-panel').forEach(
+            x=>x.classList.remove('active')
+          );
+          const panel=document.getElementById('progressPanel'+type);
+          if(panel) panel.classList.add('active');
+        }}
+
+        async function cycleProgress(btn){{
+          const current=btn.dataset.status||'';
+          const next=
+            current==='' ? 'PASSED' :
+            current==='PASSED' ? 'WATCHED' : '';
+
+          const fd=new FormData();
+          fd.append('csrf_token','{progress_csrf}');
+          fd.append('game_type',btn.dataset.gameType||'');
+          fd.append('scenario_name',btn.dataset.scenario||'');
+          fd.append('discord_id',btn.dataset.userId||'');
+          fd.append('status',next);
+
+          try{{
+            const res=await fetch('/calendar/progress-set',{{
+              method:'POST',
+              body:fd
+            }});
+            if(!res.ok) throw new Error('save failed');
+
+            btn.dataset.status=next;
+            btn.classList.remove('passed','watched');
+
+            if(next==='PASSED'){{
+              btn.classList.add('passed');
+              btn.textContent='○';
+            }}else if(next==='WATCHED'){{
+              btn.classList.add('watched');
+              btn.textContent='○';
+            }}else{{
+              btn.textContent='－';
+            }}
+          }}catch(e){{
+            alert('更新に失敗しました。ページを再読み込みしてもう一度お試しください。');
+          }}
+        }}
+
+        function openScenarioDetail(el){{
+          const gt=el.dataset.gameType||'';
+          const name=el.dataset.scenario||'';
+          const key=gt+'\x1f'+name;
+          const data=scenarioDetailData[key]||{{count:0,passed:[],watched:[]}};
+
+          document.getElementById('scenarioDetailTitle').textContent=name;
+          document.getElementById('scenarioDetailCount').textContent=data.count||0;
+
+          const passed=document.getElementById('scenarioPassedNames');
+          const watched=document.getElementById('scenarioWatchedNames');
+          passed.innerHTML='';
+          watched.innerHTML='';
+
+          (data.passed||[]).forEach(n=>{{
+            const chip=document.createElement('span');
+            chip.className='scenario-name-chip passed';
+            chip.textContent=n;
+            passed.appendChild(chip);
+          }});
+
+          (data.watched||[]).forEach(n=>{{
+            const chip=document.createElement('span');
+            chip.className='scenario-name-chip watched';
+            chip.textContent=n;
+            watched.appendChild(chip);
+          }});
+
+          if(!passed.children.length){{
+            passed.innerHTML='<span class="muted small">なし</span>';
+          }}
+          if(!watched.children.length){{
+            watched.innerHTML='<span class="muted small">なし</span>';
+          }}
+
+          document.getElementById('scenarioDetailModal').classList.add('open');
+        }}
+
+        function closeScenarioDetail(ev){{
+          if(ev && ev.target!==document.getElementById('scenarioDetailModal')) return;
+          const modal=document.getElementById('scenarioDetailModal');
+          if(modal) modal.classList.remove('open');
         }}
 
         function openStats(ev){{
@@ -3433,6 +3897,8 @@ async def calendar_page(request: Request, month: str = ""):
             closeCalendarDetail();
             closeManualAdd();
             closeStats();
+            closeProgress();
+            closeScenarioDetail();
           }}
         }});
         </script>
@@ -3533,6 +3999,30 @@ async def calendar_delete(
         raise HTTPException(404, "予定が見つかりません")
 
     return RedirectResponse("/calendar", status_code=303)
+
+
+
+@app.post("/calendar/progress-set")
+async def calendar_progress_set(
+    request: Request,
+    game_type: str = Form(...),
+    scenario_name: str = Form(...),
+    discord_id: str = Form(...),
+    status: str = Form(""),
+):
+    require_login(request)
+    await require_csrf(request)
+
+    if not set_scenario_progress_status(
+        game_type,
+        scenario_name,
+        discord_id,
+        status,
+        iso_now(),
+    ):
+        raise HTTPException(400, "通過状態を更新できません")
+
+    return {"ok": True}
 
 
 @app.get("/join", response_class=HTMLResponse)
