@@ -1905,6 +1905,141 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   font-weight:900;
 }}
 
+
+/* v51 UI polish */
+.manual-date-line{{
+  margin:2px 0 12px;
+  text-align:center;
+  color:#d9e2ee;
+  font-size:.98rem;
+  font-weight:900;
+}}
+.manual-scenario-box{{
+  min-height:78px;
+  padding-top:10px;
+  padding-bottom:10px;
+}}
+.manual-field-spaced{{
+  margin-top:16px;
+}}
+.manual-control-box{{
+  padding-top:16px;
+}}
+.manual-control-box .field-label{{
+  margin-bottom:8px;
+}}
+.manual-gm-box{{
+  padding-top:18px;
+  padding-bottom:12px;
+}}
+.manual-gm-box select{{
+  margin-top:4px;
+}}
+.calendar-save-btn{{
+  width:100%;
+  margin-top:14px;
+  padding:12px;
+  border:1px solid rgba(34,197,94,.38);
+  border-radius:12px;
+  background:rgba(34,197,94,.18);
+  color:#69e89b;
+  font-weight:950;
+  cursor:pointer;
+}}
+.calendar-danger-actions{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-top:12px;
+}}
+.calendar-hide-small,
+.calendar-delete-small{{
+  padding:8px 10px;
+  border-radius:10px;
+  font-size:.78rem;
+  font-weight:900;
+  cursor:pointer;
+}}
+.calendar-hide-small{{
+  border:1px solid rgba(234,179,8,.35);
+  background:rgba(234,179,8,.10);
+  color:#f3cc5c;
+}}
+.calendar-delete-small{{
+  border:1px solid rgba(239,68,68,.38);
+  background:rgba(239,68,68,.10);
+  color:#ff8d96;
+}}
+.calendar-danger-confirm{{
+  display:none;
+  margin-top:12px;
+  padding:12px;
+  border:1px solid rgba(234,179,8,.35);
+  border-radius:12px;
+  background:rgba(234,179,8,.05);
+}}
+.calendar-danger-confirm.delete{{
+  border-color:rgba(239,68,68,.36);
+  background:rgba(239,68,68,.05);
+}}
+.calendar-danger-confirm.open{{
+  display:block;
+}}
+.calendar-danger-confirm p{{
+  margin:0 0 10px;
+  color:#d8e0ea;
+  font-size:.8rem;
+  line-height:1.5;
+}}
+.stats-wide-card{{
+  min-height:86px;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  margin-bottom:9px;
+  border-radius:13px;
+  background:#121c29;
+  text-align:center;
+}}
+.stats-wide-card b{{
+  font-size:1.45rem;
+}}
+.stats-wide-card span{{
+  margin-top:3px;
+  color:#8e9bad;
+  font-size:.68rem;
+}}
+.stats-wide-card.total-count{{
+  min-height:102px;
+}}
+.stats-wide-card.total-count b{{
+  font-size:1.75rem;
+}}
+.stats-type-row{{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:8px;
+  margin-bottom:15px;
+}}
+.stats-type-row div{{
+  min-width:0;
+  padding:12px 5px;
+  border-radius:12px;
+  background:#121c29;
+  text-align:center;
+}}
+.stats-type-row b{{
+  display:block;
+  font-size:1.28rem;
+}}
+.stats-type-row span{{
+  display:block;
+  margin-top:3px;
+  color:#8e9bad;
+  font-size:.62rem;
+}}
+
 </style>
 </head>
 <body>
@@ -2894,10 +3029,7 @@ async def calendar_page(request: Request, month: str = ""):
               {csrf_field(request)}
               <input type='hidden' name='event_date' id='manualEventDate'>
 
-              <div class='calendar-modal-row'>
-                <span class='calendar-modal-label'>日付</span>
-                <strong id='manualDateLabel'></strong>
-              </div>
+              <div class='manual-date-line' id='manualDateLabel'></div>
 
               <div class='manual-type-toggle'>
                 <label>
@@ -2915,9 +3047,8 @@ async def calendar_page(request: Request, month: str = ""):
               </div>
 
               <label class='field manual-field-spaced'>
-                <div class='field-box no-icon'>
+                <div class='field-box no-icon manual-scenario-box'>
                   <div class='field-stack'>
-                    <span class='field-label'>シナリオ名</span>
                     <input type='text' name='scenario_name'
                            placeholder='シナリオ名を入力'
                            autocomplete='off' required>
@@ -2926,7 +3057,7 @@ async def calendar_page(request: Request, month: str = ""):
               </label>
 
               <label class='field manual-field-spaced' id='manualTimeField'>
-                <div class='field-box no-icon manual-time-box'>
+                <div class='field-box no-icon manual-time-box manual-control-box'>
                   <div class='field-stack'>
                     <span class='field-label'>開催時間</span>
                     <input type='time' name='start_time' value='21:00'>
@@ -2935,7 +3066,7 @@ async def calendar_page(request: Request, month: str = ""):
               </label>
 
               <label class='field manual-field-spaced manual-gm-field' id='manualGmField'>
-                <div class='field-box no-icon'>
+                <div class='field-box no-icon manual-control-box manual-gm-box'>
                   <div class='field-stack'>
                     <span class='field-label'>GM</span>
                     <select name='gm_discord_id' required>
@@ -2961,18 +3092,20 @@ async def calendar_page(request: Request, month: str = ""):
 
         <div class='calendar-modal' id='statsModal' onclick='closeStats(event)'>
           <div class='calendar-modal-card stats-card' onclick='event.stopPropagation()'>
-            <h3 class='calendar-modal-title'>つぶぐみデータ</h3>
+            <h3 class='calendar-modal-title'>つぶぐみ卓データ</h3>
 
             <div class='stats-section'>
               <div class='stats-section-title'>
                 {activity_term_number}年目
                 <span>{activity_year}/6/1〜{activity_year+1}/5/31</span>
               </div>
-              <div class='stats-number-grid'>
-                <div><b>{year_stats["total"]}</b><span>卓</span></div>
-                <div><b>{year_stats["trpg"]}</b><span>TRPG</span></div>
-                <div><b>{year_stats["madamis"]}</b><span>マダミス</span></div>
-                <div><b>{year_stats["new_scenarios"]}</b><span>新規シナリオ</span></div>
+              <div class='stats-wide-card'>
+                <b>{year_stats["new_scenarios"]}</b>
+                <span>新規シナリオ</span>
+              </div>
+              <div class='stats-type-row'>
+                <div><b>{year_stats["trpg"]}</b><span>TRPGの卓数</span></div>
+                <div><b>{year_stats["madamis"]}</b><span>マダミスの卓数</span></div>
               </div>
 
               <div class='stats-ranking-title'>GM TOP3</div>
@@ -2984,11 +3117,17 @@ async def calendar_page(request: Request, month: str = ""):
 
             <div class='stats-section total'>
               <div class='stats-section-title'>TOTAL</div>
-              <div class='stats-number-grid'>
-                <div><b>{total_stats["total"]}</b><span>卓</span></div>
-                <div><b>{total_stats["trpg"]}</b><span>TRPG</span></div>
-                <div><b>{total_stats["madamis"]}</b><span>マダミス</span></div>
-                <div><b>{total_stats["scenario_count"]}</b><span>シナリオ</span></div>
+              <div class='stats-wide-card total-count'>
+                <b>{total_stats["total"]}</b>
+                <span>累計卓数</span>
+              </div>
+              <div class='stats-wide-card'>
+                <b>{total_stats["scenario_count"]}</b>
+                <span>累計シナリオ数</span>
+              </div>
+              <div class='stats-type-row'>
+                <div><b>{total_stats["trpg"]}</b><span>TRPGの卓数</span></div>
+                <div><b>{total_stats["madamis"]}</b><span>マダミスの卓数</span></div>
               </div>
 
               <div class='stats-ranking-title'>GM TOP3</div>
@@ -3029,23 +3168,32 @@ async def calendar_page(request: Request, month: str = ""):
               <form method='post' id='calendarMembersEditForm'>
                 {csrf_field(request)}
                 <input type='hidden' id='calendarEditSessionId' name='calendar_session_id'>
+
                 <div class='calendar-modal-row'>
                   <span class='calendar-modal-label'>PLを編集</span>
                   <div class='manual-user-list' id='calendarEditPlList'>
                     {pl_checks}
                   </div>
                 </div>
-                <button class='btn green' type='submit'
-                        formaction='/calendar/edit-members'>PLを保存</button>
+
+                <button class='calendar-save-btn' type='submit'
+                        formaction='/calendar/edit-members'>保存</button>
               </form>
 
-              <div class='calendar-danger-block'>
+              <div class='calendar-danger-actions'>
+                <button class='calendar-hide-small' type='button'
+                        onclick="openDangerConfirm('hide')">非表示</button>
+                <button class='calendar-delete-small' type='button'
+                        onclick="openDangerConfirm('delete')">削除</button>
+              </div>
+
+              <div class='calendar-danger-confirm' id='hideDangerConfirm'>
+                <p>本当にこの卓をカレンダーから非表示にしますか？</p>
                 <label class='danger-confirm-line'>
                   <input type='checkbox' id='hideConfirmCheck'
                          onchange='syncDangerButtons()'>
-                  <span>✅ 確認しました</span>
+                  <span>確認しました</span>
                 </label>
-                <p class='danger-question'>本当にこの卓をカレンダーから非表示にしますか？</p>
                 <form method='post' action='/calendar/hide'>
                   {csrf_field(request)}
                   <input type='hidden' class='calendarDangerSessionId'
@@ -3055,13 +3203,13 @@ async def calendar_page(request: Request, month: str = ""):
                 </form>
               </div>
 
-              <div class='calendar-danger-block delete'>
+              <div class='calendar-danger-confirm delete' id='deleteDangerConfirm'>
+                <p>本当にこの卓データを完全に削除しますか？</p>
                 <label class='danger-confirm-line'>
                   <input type='checkbox' id='deleteConfirmCheck'
                          onchange='syncDangerButtons()'>
-                  <span>✅ 確認しました</span>
+                  <span>確認しました</span>
                 </label>
-                <p class='danger-question'>本当にこの卓データを完全に削除しますか？</p>
                 <form method='post' action='/calendar/delete'>
                   {csrf_field(request)}
                   <input type='hidden' class='calendarDangerSessionId'
@@ -3119,7 +3267,10 @@ async def calendar_page(request: Request, month: str = ""):
           const ds=cell.dataset.date;
           if(!modal || !ds) return;
           document.getElementById('manualEventDate').value=ds;
-          document.getElementById('manualDateLabel').textContent=ds;
+          const wd=['日','月','火','水','木','金','土'];
+          const dt=new Date(ds+'T00:00:00');
+          document.getElementById('manualDateLabel').textContent=
+            ds+'（'+wd[dt.getDay()]+'）';
           syncManualType();
           modal.classList.add('open');
           document.body.style.overflow='hidden';
@@ -3157,12 +3308,14 @@ async def calendar_page(request: Request, month: str = ""):
           );
 
           document.getElementById('calendarEditPanel').classList.remove('open');
+          document.getElementById('hideDangerConfirm').classList.remove('open');
+          document.getElementById('deleteDangerConfirm').classList.remove('open');
           document.getElementById('hideConfirmCheck').checked=false;
           document.getElementById('deleteConfirmCheck').checked=false;
           syncDangerButtons();
 
           const editBtn=document.getElementById('calendarEditOpenBtn');
-          if(editBtn) editBtn.style.display=isEvent?'inline-flex':'inline-flex';
+          if(editBtn) editBtn.style.display='inline-flex';
 
           document.getElementById('calendarDetailTitle').textContent=
             el.dataset.title||'';
@@ -3215,9 +3368,47 @@ async def calendar_page(request: Request, month: str = ""):
           document.body.style.overflow='hidden';
         }}
 
+        function refreshCalendarEditPreview(){{
+          const box=document.getElementById('calendarDetailMembers');
+          if(!box) return;
+          box.innerHTML='';
+          document.querySelectorAll(
+            "#calendarEditPlList input[name='participant_ids']:checked"
+          ).forEach(cb=>{{
+            const span=document.createElement('span');
+            span.className='calendar-modal-member';
+            span.textContent=cb.dataset.name||'';
+            box.appendChild(span);
+          }});
+        }}
+
+        document.querySelectorAll(
+          "#calendarEditPlList input[name='participant_ids']"
+        ).forEach(cb=>{{
+          cb.addEventListener('change',refreshCalendarEditPreview);
+        }});
+
         function openCalendarEdit(){{
           const panel=document.getElementById('calendarEditPanel');
-          if(panel) panel.classList.toggle('open');
+          const btn=document.getElementById('calendarEditOpenBtn');
+          if(panel){{
+            panel.classList.add('open');
+            if(btn) btn.style.display='none';
+          }}
+        }}
+
+        function openDangerConfirm(kind){{
+          const hide=document.getElementById('hideDangerConfirm');
+          const del=document.getElementById('deleteDangerConfirm');
+          if(hide) hide.classList.toggle('open',kind==='hide');
+          if(del) del.classList.toggle('open',kind==='delete');
+
+          if(kind==='hide'){{
+            document.getElementById('hideConfirmCheck').checked=false;
+          }}else{{
+            document.getElementById('deleteConfirmCheck').checked=false;
+          }}
+          syncDangerButtons();
         }}
 
         function syncDangerButtons(){{
