@@ -2296,6 +2296,38 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 .progress-person-state.unpassed{{color:#718096}}
 .admin-back-btn{{display:inline-flex;width:auto;margin-bottom:12px;padding:7px 11px;font-size:.72rem}}
 
+
+/* v56 final UI polish */
+.home-mini-card{{
+  justify-content:center;
+  text-align:center;
+}}
+.home-mini-card > div:first-child{{
+  width:100%;
+  text-align:center;
+}}
+.home-mini-card .menu-title,
+.home-mini-card .menu-sub{{
+  text-align:center;
+}}
+.home-mini-card .chev{{
+  position:absolute;
+  right:12px;
+}}
+.home-mini-card{{
+  position:relative;
+}}
+
+#progressScenarioTitle{{
+  text-align:center;
+  width:100%;
+}}
+.progress-person-legend .passed,
+.progress-person-legend .watched{{
+  font-size:1.02rem;
+  font-weight:1000;
+}}
+
 </style>
 </head>
 <body>
@@ -3131,7 +3163,7 @@ async def home(request: Request):
         <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
         <div class='home-mini-grid'>
           <a class='menu-card home-mini-card calendar' href='/calendar'><div><div class='menu-title'>カレンダー</div><div class='menu-sub'>成立卓の予定</div></div><div class='chev'>›</div></a>
-          <a class='menu-card home-mini-card schedule' href='{schedule_href}'><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
+          <a class='menu-card home-mini-card schedule' href='{schedule_href}'><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ作成</div></div><div class='chev'>›</div></a>
         </div>
       </div>
       {("<div class='admin-gear-wrap'><a class='admin-gear' href='/admin' aria-label='管理画面'>⚙</a></div>" if str(uid or "") == YUZUKY_SPECIAL_USER_ID else "")}
@@ -3552,8 +3584,8 @@ async def calendar_page(request: Request, month: str = ""):
                onclick='event.stopPropagation()'>
             <h3 class='calendar-modal-title' id='progressScenarioTitle'></h3>
             <div class='progress-person-legend'>
-              <span class='passed'>緑○ 通過済み</span>
-              <span class='watched'>青○ 視聴済み</span>
+              <span class='passed'>○</span>
+              <span class='watched'>○</span>
               <span>－ 未通過</span>
             </div>
             <div class='progress-person-list' id='progressPersonList'></div>
