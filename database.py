@@ -142,6 +142,7 @@ def init_db():
                 game_type TEXT NOT NULL,
                 scenario_name TEXT NOT NULL,
                 event_date TEXT NOT NULL,
+                start_time TEXT,
                 gm_discord_id TEXT NOT NULL,
                 calendar_visible INTEGER NOT NULL DEFAULT 1,
                 created_at TEXT NOT NULL
@@ -206,6 +207,22 @@ def ensure_recruitment_columns():
             )
 
 
+def ensure_calendar_columns():
+    """既存のカレンダー履歴テーブルへ追加列を安全に足す。"""
+    with db() as c:
+        cols = {
+            r["name"]
+            for r in c.execute(
+                "PRAGMA table_info(calendar_sessions)"
+            ).fetchall()
+        }
+        if "start_time" not in cols:
+            c.execute(
+                "ALTER TABLE calendar_sessions "
+                "ADD COLUMN start_time TEXT"
+            )
+
+
 def backfill_calendar_history():
     """現在残っている成立卓を永久保存テーブルへ一度だけ移す。"""
     with db() as c:
@@ -213,6 +230,7 @@ def backfill_calendar_history():
             """SELECT s.id AS session_id,
                       s.recruitment_id,
                       s.event_date,
+                      s.start_time,
                       s.created_at,
                       r.game_type,
                       r.scenario_name,
@@ -225,12 +243,12 @@ def backfill_calendar_history():
             c.execute(
                 """INSERT OR IGNORE INTO calendar_sessions(
                        source_session_id,source_recruitment_id,game_type,
-                       scenario_name,event_date,gm_discord_id,calendar_visible,created_at
-                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                       scenario_name,event_date,start_time,gm_discord_id,calendar_visible,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?)""",
                 (
                     row["session_id"], row["recruitment_id"],
                     row["game_type"], row["scenario_name"],
-                    row["event_date"], row["gm_discord_id"],
+                    row["event_date"], row["start_time"], row["gm_discord_id"],
                     0 if row["game_type"] == "EVENT" else 1,
                     row["created_at"],
                 ),
@@ -250,6 +268,18 @@ def backfill_calendar_history():
                 [(cal["id"], m["discord_id"]) for m in members],
             )
 
+        # v43-v45ですでに保存済みの履歴にも、元sessionsが残っていれば開始時間を補完。
+        c.execute(
+            """UPDATE calendar_sessions
+               SET start_time=(
+                   SELECT s.start_time
+                   FROM sessions s
+                   WHERE s.id=calendar_sessions.source_session_id
+               )
+               WHERE (start_time IS NULL OR start_time='')
+                 AND source_session_id IS NOT NULL"""
+        )
+
 
 def archive_confirmed_session(
     source_session_id: int,
@@ -257,6 +287,7 @@ def archive_confirmed_session(
     game_type: str,
     scenario_name: str,
     event_date: str,
+    start_time: str,
     gm_discord_id: str,
     participant_ids: list[str],
     created_at: str,
@@ -272,17 +303,18 @@ def archive_confirmed_session(
         c.execute(
             """INSERT INTO calendar_sessions(
                    source_session_id,source_recruitment_id,game_type,scenario_name,
-                   event_date,gm_discord_id,calendar_visible,created_at
-               ) VALUES(?,?,?,?,?,?,?,?)
+                   event_date,start_time,gm_discord_id,calendar_visible,created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)
                ON CONFLICT(source_session_id) DO UPDATE SET
                  game_type=excluded.game_type,
                  scenario_name=excluded.scenario_name,
                  event_date=excluded.event_date,
+                 start_time=excluded.start_time,
                  gm_discord_id=excluded.gm_discord_id,
                  calendar_visible=excluded.calendar_visible""",
             (
                 source_session_id, source_recruitment_id, game_type, scenario_name,
-                event_date, gm_discord_id, 1 if visible else 0, created_at,
+                event_date, start_time, gm_discord_id, 1 if visible else 0, created_at,
             ),
         )
         cal = c.execute(
@@ -330,6 +362,35 @@ def calendar_entries(start_date: str, end_date: str):
         return out
 
 
+def calendar_conflicts_for_users(discord_ids: list[str], event_dates: list[str]) -> set[tuple[str, str]]:
+    """複数ユーザーについて、(discord_id, 日付) の重複予定セットを返す。"""
+    users = [str(x) for x in dict.fromkeys(discord_ids) if x]
+    dates = [str(x) for x in dict.fromkeys(event_dates) if x]
+    if not users or not dates:
+        return set()
+
+    user_ph = ",".join("?" for _ in users)
+    date_ph = ",".join("?" for _ in dates)
+
+    with db() as c:
+        rows = c.execute(
+            f"""SELECT DISTINCT cs.gm_discord_id AS discord_id, cs.event_date
+                FROM calendar_sessions cs
+                WHERE cs.gm_discord_id IN ({user_ph})
+                  AND cs.event_date IN ({date_ph})
+                UNION
+                SELECT DISTINCT csm.discord_id AS discord_id, cs.event_date
+                FROM calendar_sessions cs
+                JOIN calendar_session_members csm
+                  ON csm.calendar_session_id=cs.id
+                WHERE csm.discord_id IN ({user_ph})
+                  AND cs.event_date IN ({date_ph})""",
+            [*users, *dates, *users, *dates],
+        ).fetchall()
+
+    return {(str(x["discord_id"]), str(x["event_date"])) for x in rows}
+
+
 def calendar_conflict_dates(discord_id: str, event_dates: list[str]) -> set[str]:
     """ユーザーがGMまたはPLとして既に成立卓を持つ日付を返す。"""
     clean_dates = [str(x) for x in dict.fromkeys(event_dates) if x]
@@ -357,8 +418,10 @@ def initialize_database():
     """既存DBを保持したまま、必要なテーブル・列だけ追加する。"""
     init_db()
     ensure_recruitment_columns()
+    ensure_calendar_columns()
     backfill_calendar_history()
 
 
 # main.py から import された時点で従来どおり初期化する。
 initialize_database()
+
