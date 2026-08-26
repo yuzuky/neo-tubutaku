@@ -1894,16 +1894,16 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 <title>{esc(title)} - つぶたく</title>
 <style>{CSS}
 /* v50: calendar detail modal polish */
-#calendarDetailTitle{
+#calendarDetailTitle{{
   text-align:center;
   width:100%;
-}
-.calendar-modal-gm-tag{
+}}
+.calendar-modal-gm-tag{{
   background:rgba(168,85,247,.18);
   color:#d08aff;
   border:1px solid rgba(168,85,247,.08);
   font-weight:900;
-}
+}}
 
 </style>
 </head>
