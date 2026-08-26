@@ -414,6 +414,198 @@ def calendar_conflict_dates(discord_id: str, event_dates: list[str]) -> set[str]
     return {str(x["event_date"]) for x in rows}
 
 
+
+def calendar_manual_options():
+    """手動追加フォーム用のシナリオ候補・ユーザー候補。"""
+    with db() as c:
+        scenarios = c.execute(
+            """SELECT DISTINCT game_type, scenario_name
+               FROM calendar_sessions
+               WHERE game_type IN ('TRPG','MADMIS','マダミス')
+                 AND scenario_name<>''
+               ORDER BY game_type, scenario_name"""
+        ).fetchall()
+        users = c.execute(
+            """SELECT discord_id,
+                      COALESCE(display_name, username, discord_id) AS display_name
+               FROM users
+               ORDER BY display_name"""
+        ).fetchall()
+    return scenarios, users
+
+
+def add_manual_calendar_session(
+    game_type: str,
+    scenario_name: str,
+    event_date: str,
+    start_time: str,
+    gm_discord_id: str,
+    participant_ids: list[str],
+    created_at: str,
+) -> int:
+    """Discordへ何も送らず、履歴・カレンダーDBだけへ卓を追加する。"""
+    with db() as c:
+        cur = c.execute(
+            """INSERT INTO calendar_sessions(
+                   source_session_id,source_recruitment_id,
+                   game_type,scenario_name,event_date,start_time,
+                   gm_discord_id,calendar_visible,created_at
+               ) VALUES(NULL,NULL,?,?,?,?,?,?,?)""",
+            (
+                game_type,
+                scenario_name.strip(),
+                event_date,
+                start_time or "未定",
+                str(gm_discord_id),
+                1,
+                created_at,
+            ),
+        )
+        cal_id = int(cur.lastrowid)
+
+        member_ids = [
+            str(uid)
+            for uid in dict.fromkeys(participant_ids)
+            if str(uid) != str(gm_discord_id)
+        ]
+        if member_ids:
+            c.executemany(
+                """INSERT OR IGNORE INTO calendar_session_members(
+                       calendar_session_id,discord_id
+                   ) VALUES(?,?)""",
+                [(cal_id, uid) for uid in member_ids],
+            )
+        return cal_id
+
+
+def calendar_stats(period_start: str | None = None, period_end: str | None = None):
+    """指定期間（未指定なら累計）の卓数・種類別件数・GM/PL Top3等。"""
+    with db() as c:
+        if period_start and period_end:
+            where = "WHERE cs.event_date>=? AND cs.event_date<?"
+            params = [period_start, period_end]
+        else:
+            where = ""
+            params = []
+
+        total = int(c.execute(
+            f"SELECT COUNT(*) AS n FROM calendar_sessions cs {where}",
+            params,
+        ).fetchone()["n"])
+
+        type_rows = c.execute(
+            f"""SELECT
+                    CASE WHEN game_type='マダミス' THEN 'MADMIS' ELSE game_type END AS gt,
+                    COUNT(*) AS n
+                FROM calendar_sessions cs
+                {where}
+                GROUP BY gt""",
+            params,
+        ).fetchall()
+        by_type = {str(x["gt"]): int(x["n"]) for x in type_rows}
+
+        gm_top = c.execute(
+            f"""SELECT cs.gm_discord_id AS discord_id,
+                       COALESCE(u.display_name,u.username,cs.gm_discord_id) AS display_name,
+                       COUNT(*) AS n
+                FROM calendar_sessions cs
+                LEFT JOIN users u ON u.discord_id=cs.gm_discord_id
+                {where}
+                GROUP BY cs.gm_discord_id
+                ORDER BY n DESC, display_name
+                LIMIT 3""",
+            params,
+        ).fetchall()
+
+        pl_where = ""
+        pl_params = []
+        if period_start and period_end:
+            pl_where = "WHERE cs.event_date>=? AND cs.event_date<?"
+            pl_params = [period_start, period_end]
+
+        pl_top = c.execute(
+            f"""SELECT csm.discord_id AS discord_id,
+                       COALESCE(u.display_name,u.username,csm.discord_id) AS display_name,
+                       COUNT(*) AS n
+                FROM calendar_session_members csm
+                JOIN calendar_sessions cs ON cs.id=csm.calendar_session_id
+                LEFT JOIN users u ON u.discord_id=csm.discord_id
+                {pl_where}
+                GROUP BY csm.discord_id
+                ORDER BY n DESC, display_name
+                LIMIT 3""",
+            pl_params,
+        ).fetchall()
+
+        scenario_where = ""
+        scenario_params = []
+        if period_start and period_end:
+            scenario_where = (
+                "WHERE cs.event_date>=? AND cs.event_date<? "
+                "AND cs.game_type IN ('TRPG','MADMIS','マダミス') "
+                "AND cs.scenario_name<>''"
+            )
+            scenario_params = [period_start, period_end]
+        else:
+            scenario_where = (
+                "WHERE cs.game_type IN ('TRPG','MADMIS','マダミス') "
+                "AND cs.scenario_name<>''"
+            )
+
+        scenario_count = int(c.execute(
+            f"""SELECT COUNT(*) AS n FROM (
+                    SELECT
+                      CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END AS gt,
+                      cs.scenario_name
+                    FROM calendar_sessions cs
+                    {scenario_where}
+                    GROUP BY gt, cs.scenario_name
+                )""",
+            scenario_params,
+        ).fetchone()["n"])
+
+    return {
+        "total": total,
+        "trpg": int(by_type.get("TRPG", 0)),
+        "madamis": int(by_type.get("MADMIS", 0)),
+        "event": int(by_type.get("EVENT", 0)),
+        "scenario_count": scenario_count,
+        "gm_top": gm_top,
+        "pl_top": pl_top,
+    }
+
+
+def new_scenario_count(period_start: str, period_end: str) -> int:
+    """その年度に初めて履歴へ登場したTRPG/マダミスのシナリオ数。"""
+    with db() as c:
+        row = c.execute(
+            """SELECT COUNT(*) AS n
+               FROM (
+                 SELECT
+                   CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END AS gt,
+                   cs.scenario_name
+                 FROM calendar_sessions cs
+                 WHERE cs.event_date>=?
+                   AND cs.event_date<?
+                   AND cs.game_type IN ('TRPG','MADMIS','マダミス')
+                   AND cs.scenario_name<>''
+                 GROUP BY gt, cs.scenario_name
+                 HAVING NOT EXISTS (
+                   SELECT 1
+                   FROM calendar_sessions old
+                   WHERE
+                     (CASE WHEN old.game_type='マダミス' THEN 'MADMIS' ELSE old.game_type END)
+                       =
+                     (CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END)
+                     AND old.scenario_name=cs.scenario_name
+                     AND old.event_date<?
+                 )
+               )""",
+            (period_start, period_end, period_start),
+        ).fetchone()
+    return int(row["n"])
+
+
 def initialize_database():
     """既存DBを保持したまま、必要なテーブル・列だけ追加する。"""
     init_db()
@@ -424,4 +616,3 @@ def initialize_database():
 
 # main.py から import された時点で従来どおり初期化する。
 initialize_database()
-
