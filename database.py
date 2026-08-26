@@ -160,6 +160,18 @@ def init_db():
                 deleted_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS scenario_progress (
+                game_type TEXT NOT NULL,
+                scenario_name TEXT NOT NULL,
+                discord_id TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('PASSED','WATCHED')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(game_type, scenario_name, discord_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_scenario_progress_type_name
+                ON scenario_progress(game_type, scenario_name);
+
             CREATE INDEX IF NOT EXISTS idx_calendar_sessions_event_date
                 ON calendar_sessions(event_date);
             """
@@ -345,6 +357,24 @@ def archive_confirmed_session(
             "INSERT OR IGNORE INTO calendar_session_members(calendar_session_id,discord_id) VALUES(?,?)",
             [(calendar_session_id, str(uid)) for uid in dict.fromkeys(participant_ids)],
         )
+
+        gt = normalize_progress_game_type(game_type)
+        if gt in {"TRPG", "MADMIS"} and str(scenario_name or "").strip():
+            for participant_id in dict.fromkeys(participant_ids):
+                c.execute(
+                    """INSERT INTO scenario_progress(
+                           game_type,scenario_name,discord_id,status,updated_at
+                       ) VALUES(?,?,?,?,?)
+                       ON CONFLICT(game_type,scenario_name,discord_id)
+                       DO UPDATE SET status='PASSED',updated_at=excluded.updated_at""",
+                    (
+                        gt,
+                        scenario_name,
+                        str(participant_id),
+                        "PASSED",
+                        created_at,
+                    ),
+                )
         return calendar_session_id
 
 
@@ -492,6 +522,19 @@ def add_manual_calendar_session(
                    ) VALUES(?,?)""",
                 [(cal_id, uid) for uid in member_ids],
             )
+
+        gt = normalize_progress_game_type(game_type)
+        if gt in {"TRPG", "MADMIS"} and scenario_name.strip():
+            for uid in member_ids:
+                c.execute(
+                    """INSERT INTO scenario_progress(
+                           game_type,scenario_name,discord_id,status,updated_at
+                       ) VALUES(?,?,?,?,?)
+                       ON CONFLICT(game_type,scenario_name,discord_id)
+                       DO UPDATE SET status='PASSED',updated_at=excluded.updated_at""",
+                    (gt, scenario_name.strip(), uid, "PASSED", created_at),
+                )
+
         return cal_id
 
 
@@ -546,6 +589,30 @@ def update_calendar_session_members(calendar_session_id: int, participant_ids: l
                    ) VALUES(?,?)""",
                 [(calendar_session_id, uid) for uid in cleaned],
             )
+
+            info = c.execute(
+                """SELECT game_type,scenario_name,created_at
+                   FROM calendar_sessions WHERE id=?""",
+                (calendar_session_id,),
+            ).fetchone()
+            if info:
+                gt = normalize_progress_game_type(info["game_type"])
+                if gt in {"TRPG", "MADMIS"}:
+                    for uid in cleaned:
+                        c.execute(
+                            """INSERT INTO scenario_progress(
+                                   game_type,scenario_name,discord_id,status,updated_at
+                               ) VALUES(?,?,?,?,?)
+                               ON CONFLICT(game_type,scenario_name,discord_id)
+                               DO UPDATE SET status='PASSED',updated_at=excluded.updated_at""",
+                            (
+                                gt,
+                                info["scenario_name"],
+                                uid,
+                                "PASSED",
+                                info["created_at"] or "",
+                            ),
+                        )
     return True
 
 
@@ -587,6 +654,159 @@ def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: st
             (calendar_session_id,),
         )
     return True
+
+
+
+def normalize_progress_game_type(game_type: str) -> str:
+    gt = str(game_type or "").strip()
+    return "MADMIS" if gt in {"MADMIS", "マダミス"} else gt
+
+
+def backfill_scenario_progress():
+    """既存の成立卓PLを通過済みとして補完する。手動設定済みは上書きしない。"""
+    with db() as c:
+        rows = c.execute(
+            """SELECT cs.id, cs.game_type, cs.scenario_name, cs.created_at
+               FROM calendar_sessions cs
+               WHERE cs.game_type IN ('TRPG','MADMIS','マダミス')
+                 AND cs.scenario_name<>''"""
+        ).fetchall()
+
+        for row in rows:
+            gt = normalize_progress_game_type(row["game_type"])
+            members = c.execute(
+                """SELECT discord_id
+                   FROM calendar_session_members
+                   WHERE calendar_session_id=?""",
+                (row["id"],),
+            ).fetchall()
+
+            for member in members:
+                uid = str(member["discord_id"])
+                exists = c.execute(
+                    """SELECT 1 FROM scenario_progress
+                       WHERE game_type=? AND scenario_name=? AND discord_id=?""",
+                    (gt, row["scenario_name"], uid),
+                ).fetchone()
+                if not exists:
+                    c.execute(
+                        """INSERT INTO scenario_progress(
+                               game_type,scenario_name,discord_id,status,updated_at
+                           ) VALUES(?,?,?,?,?)""",
+                        (
+                            gt,
+                            row["scenario_name"],
+                            uid,
+                            "PASSED",
+                            row["created_at"] or "",
+                        ),
+                    )
+
+
+def scenario_progress_data():
+    """通過表表示用データ。"""
+    with db() as c:
+        users = c.execute(
+            """SELECT discord_id,
+                      COALESCE(display_name,username,discord_id) AS display_name
+               FROM users
+               WHERE LOWER(COALESCE(display_name,'')) <> 'okuyama'
+                 AND LOWER(COALESCE(username,'')) <> 'okuyama'
+               ORDER BY display_name"""
+        ).fetchall()
+
+        scenarios = c.execute(
+            """SELECT game_type,scenario_name FROM (
+                 SELECT
+                   CASE WHEN game_type='マダミス' THEN 'MADMIS' ELSE game_type END AS game_type,
+                   scenario_name
+                 FROM calendar_sessions
+                 WHERE game_type IN ('TRPG','MADMIS','マダミス')
+                   AND scenario_name<>''
+                 UNION
+                 SELECT game_type,scenario_name
+                 FROM scenario_progress
+               )
+               GROUP BY game_type,scenario_name
+               ORDER BY scenario_name"""
+        ).fetchall()
+
+        statuses = c.execute(
+            """SELECT game_type,scenario_name,discord_id,status
+               FROM scenario_progress"""
+        ).fetchall()
+
+    status_map = {
+        (
+            str(r["game_type"]),
+            str(r["scenario_name"]),
+            str(r["discord_id"]),
+        ): str(r["status"])
+        for r in statuses
+    }
+    return users, scenarios, status_map
+
+
+def set_scenario_progress_status(
+    game_type: str,
+    scenario_name: str,
+    discord_id: str,
+    status: str,
+    updated_at: str,
+):
+    gt = normalize_progress_game_type(game_type)
+    name = str(scenario_name or "").strip()
+    uid = str(discord_id or "").strip()
+
+    if gt not in {"TRPG", "MADMIS"} or not name or not uid:
+        return False
+
+    with db() as c:
+        if status == "":
+            c.execute(
+                """DELETE FROM scenario_progress
+                   WHERE game_type=? AND scenario_name=? AND discord_id=?""",
+                (gt, name, uid),
+            )
+        elif status in {"PASSED", "WATCHED"}:
+            c.execute(
+                """INSERT INTO scenario_progress(
+                       game_type,scenario_name,discord_id,status,updated_at
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(game_type,scenario_name,discord_id)
+                   DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at""",
+                (gt, name, uid, status, updated_at),
+            )
+        else:
+            return False
+
+    return True
+
+
+def scenario_detail(game_type: str, scenario_name: str):
+    gt = normalize_progress_game_type(game_type)
+    name = str(scenario_name or "").strip()
+
+    with db() as c:
+        played = c.execute(
+            """SELECT COUNT(*) AS n
+               FROM calendar_sessions
+               WHERE (CASE WHEN game_type='マダミス' THEN 'MADMIS' ELSE game_type END)=?
+                 AND scenario_name=?""",
+            (gt, name),
+        ).fetchone()["n"]
+
+        rows = c.execute(
+            """SELECT sp.status,
+                      COALESCE(u.display_name,u.username,sp.discord_id) AS display_name
+               FROM scenario_progress sp
+               LEFT JOIN users u ON u.discord_id=sp.discord_id
+               WHERE sp.game_type=? AND sp.scenario_name=?
+               ORDER BY display_name""",
+            (gt, name),
+        ).fetchall()
+
+    return int(played), rows
 
 
 def calendar_stats(period_start: str | None = None, period_end: str | None = None):
@@ -723,6 +943,7 @@ def initialize_database():
     ensure_recruitment_columns()
     ensure_calendar_columns()
     backfill_calendar_history()
+    backfill_scenario_progress()
 
 
 # main.py から import された時点で従来どおり初期化する。
