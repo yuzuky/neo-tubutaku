@@ -35,6 +35,15 @@ def init_db():
                 updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS registered_members (
+                discord_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                avatar_url TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS recruitments (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 parent_id INTEGER,
@@ -460,6 +469,44 @@ def calendar_conflict_dates(discord_id: str, event_dates: list[str]) -> set[str]
 
 
 
+
+def registered_member(discord_id: str):
+    with db() as c:
+        return c.execute("SELECT * FROM registered_members WHERE discord_id=?", (str(discord_id),)).fetchone()
+
+def registered_members():
+    with db() as c:
+        return c.execute("""SELECT * FROM registered_members
+            WHERE LOWER(COALESCE(display_name,'')) <> 'okuyama'
+              AND LOWER(COALESCE(username,'')) <> 'okuyama'
+            ORDER BY display_name COLLATE NOCASE""").fetchall()
+
+def upsert_registered_member(discord_id, username, display_name, avatar_url, now_iso):
+    uid=str(discord_id)
+    with db() as c:
+        c.execute("""INSERT INTO registered_members(discord_id,username,display_name,avatar_url,created_at,updated_at)
+                     VALUES(?,?,?,?,?,?)
+                     ON CONFLICT(discord_id) DO UPDATE SET username=excluded.username,
+                     display_name=excluded.display_name,avatar_url=excluded.avatar_url,updated_at=excluded.updated_at""",
+                  (uid,username,display_name,avatar_url,now_iso,now_iso))
+        c.execute("""INSERT INTO users(discord_id,username,display_name,avatar_url,updated_at) VALUES(?,?,?,?,?)
+                     ON CONFLICT(discord_id) DO UPDATE SET username=excluded.username,
+                     display_name=excluded.display_name,avatar_url=excluded.avatar_url,updated_at=excluded.updated_at""",
+                  (uid,username,display_name,avatar_url,now_iso))
+
+def refresh_registered_member_profile(discord_id, username, display_name, avatar_url, now_iso):
+    uid=str(discord_id)
+    with db() as c:
+        if not c.execute("SELECT 1 FROM registered_members WHERE discord_id=?",(uid,)).fetchone():
+            return False
+        c.execute("UPDATE registered_members SET username=?,display_name=?,avatar_url=?,updated_at=? WHERE discord_id=?",
+                  (username,display_name,avatar_url,now_iso,uid))
+        c.execute("""INSERT INTO users(discord_id,username,display_name,avatar_url,updated_at) VALUES(?,?,?,?,?)
+                     ON CONFLICT(discord_id) DO UPDATE SET username=excluded.username,
+                     display_name=excluded.display_name,avatar_url=excluded.avatar_url,updated_at=excluded.updated_at""",
+                  (uid,username,display_name,avatar_url,now_iso))
+    return True
+
 def calendar_manual_options():
     """手動追加フォーム用のシナリオ候補・ユーザー候補。"""
     with db() as c:
@@ -473,7 +520,7 @@ def calendar_manual_options():
         users = c.execute(
             """SELECT discord_id,
                       COALESCE(display_name, username, discord_id) AS display_name
-               FROM users
+               FROM registered_members
                WHERE LOWER(COALESCE(display_name,'')) <> 'okuyama'
                  AND LOWER(COALESCE(username,'')) <> 'okuyama'
                ORDER BY display_name"""
@@ -709,7 +756,7 @@ def scenario_progress_data():
         users = c.execute(
             """SELECT discord_id,
                       COALESCE(display_name,username,discord_id) AS display_name
-               FROM users
+               FROM registered_members
                WHERE LOWER(COALESCE(display_name,'')) <> 'okuyama'
                  AND LOWER(COALESCE(username,'')) <> 'okuyama'
                ORDER BY display_name"""
@@ -800,7 +847,7 @@ def scenario_detail(game_type: str, scenario_name: str):
             """SELECT sp.status,
                       COALESCE(u.display_name,u.username,sp.discord_id) AS display_name
                FROM scenario_progress sp
-               LEFT JOIN users u ON u.discord_id=sp.discord_id
+               LEFT JOIN registered_members u ON u.discord_id=sp.discord_id
                WHERE sp.game_type=? AND sp.scenario_name=?
                ORDER BY display_name""",
             (gt, name),
@@ -942,6 +989,14 @@ def initialize_database():
     init_db()
     ensure_recruitment_columns()
     ensure_calendar_columns()
+    with db() as c:
+        c.execute(
+            """INSERT OR IGNORE INTO registered_members(
+                   discord_id,username,display_name,avatar_url,created_at,updated_at
+               )
+               SELECT discord_id,username,display_name,avatar_url,updated_at,updated_at
+               FROM users"""
+        )
     backfill_calendar_history()
     backfill_scenario_progress()
 
