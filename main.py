@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, archive_confirmed_session, calendar_entries, db
+from database import DATABASE_PATH, archive_confirmed_session, calendar_conflict_dates, calendar_entries, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -723,26 +723,125 @@ button,input,textarea,select{font:inherit}
 .calendar-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 18px}
 .calendar-head h2{margin:0;font-size:1.45rem}
 .calendar-nav{display:inline-flex;align-items:center;justify-content:center;min-width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:#101722;color:#fff;text-decoration:none;font-weight:900}
-.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
-.calendar-weekday{text-align:center;color:#8f9aad;font-size:.76rem;font-weight:850;padding:4px 0 7px}
-.calendar-weekday.sun{color:#ef6a71}.calendar-weekday.sat{color:#6b91ff}
-.calendar-day{min-height:112px;border:1px solid #202b3a;background:#0d131c;border-radius:13px;padding:7px;overflow:hidden}
-.calendar-day.outside{opacity:.35}
-.calendar-date{font-size:.82rem;font-weight:900;color:#dfe6ef;margin-bottom:6px}
-.calendar-date.sun{color:#ef6a71}.calendar-date.sat{color:#6b91ff}
-.cal-session{margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.06)}
-.cal-title,.cal-person{display:block;border-radius:6px;padding:3px 5px;margin:3px 0;font-size:.68rem;font-weight:850;line-height:1.25;overflow:hidden;text-overflow:ellipsis}
+
+/* カレンダー本体：7列を完全に同じ幅にする */
+.calendar-grid{
+  display:grid;
+  grid-template-columns:repeat(7,minmax(0,1fr));
+  gap:1px;
+  width:100%;
+  overflow:hidden;
+  border:1px solid #202733;
+  border-radius:14px;
+  background:#202733;
+}
+.calendar-weekday{
+  min-width:0;
+  text-align:center;
+  color:#8f9aad;
+  background:#0b1017;
+  font-size:.76rem;
+  font-weight:850;
+  padding:8px 2px;
+}
+.calendar-weekday.sun{color:#ef6a71}
+.calendar-weekday.sat{color:#6b91ff}
+
+/* 日付マスは内容量に関係なく常に同じ高さ */
+.calendar-day{
+  box-sizing:border-box;
+  min-width:0;
+  width:100%;
+  height:150px;
+  border:0;
+  background:#0d131c;
+  border-radius:0;
+  padding:7px;
+  overflow:hidden;
+}
+.calendar-day.outside{
+  opacity:.30;
+  background:#0a0f16;
+}
+.calendar-date{
+  font-size:.82rem;
+  font-weight:900;
+  color:#dfe6ef;
+  margin-bottom:5px;
+  white-space:nowrap;
+}
+.calendar-date.sun{color:#ef6a71}
+.calendar-date.sat{color:#6b91ff}
+
+/* 1つの卓が他のマスの幅・高さを押し広げないようにする */
+.cal-session{
+  min-width:0;
+  width:100%;
+  margin-top:4px;
+  padding-top:4px;
+  overflow:hidden;
+  border-top:1px solid rgba(255,255,255,.05);
+}
+.cal-title,.cal-person{
+  display:block;
+  box-sizing:border-box;
+  width:100%;
+  max-width:100%;
+  border-radius:5px;
+  padding:3px 5px;
+  margin:2px 0;
+  font-size:.68rem;
+  font-weight:850;
+  line-height:1.25;
+
+  /* 折り返し禁止＋はみ出しは … */
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
 .cal-title.trpg{background:rgba(57,168,104,.18);color:#63d893}
 .cal-title.madamis{background:rgba(231,129,45,.18);color:#f19a4f}
 .cal-title.event{background:rgba(48,130,219,.18);color:#69a9f0}
 .cal-person.gm{background:rgba(160,92,217,.16);color:#c28aec}
 .cal-person.pl{background:rgba(207,165,42,.15);color:#e3bd52}
 .calendar-empty{text-align:center;color:var(--muted);padding:30px 10px}
+
 @media(max-width:620px){
-  .calendar-grid{gap:3px}
-  .calendar-day{min-height:88px;padding:4px;border-radius:9px}
-  .calendar-date{font-size:.72rem;margin-bottom:3px}
-  .cal-title,.cal-person{font-size:.56rem;padding:2px 3px;margin:2px 0}
+  .calendar-head{margin-bottom:12px}
+  .calendar-head h2{font-size:1.2rem}
+  .calendar-nav{min-width:38px;height:38px}
+
+  .calendar-grid{
+    gap:1px;
+    border-radius:10px;
+  }
+  .calendar-weekday{
+    font-size:.67rem;
+    padding:6px 1px;
+  }
+  .calendar-day{
+    height:118px;
+    padding:4px 3px;
+  }
+  .calendar-date{
+    font-size:.70rem;
+    margin-bottom:3px;
+  }
+  .cal-session{
+    margin-top:3px;
+    padding-top:3px;
+  }
+  .cal-title,.cal-person{
+    font-size:.54rem;
+    padding:2px 3px;
+    margin:2px 0;
+    border-radius:4px;
+  }
+}
+
+@media(max-width:390px){
+  .calendar-day{height:110px}
+  .cal-title,.cal-person{font-size:.50rem;padding:2px}
 }
 .menu-icon{
   width:56px;height:56px;
@@ -1148,6 +1247,35 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
   padding:12px 10px 10px;
   transition:.16s ease;
   overflow:hidden;
+}
+.calendar-conflict-badge{
+  position:absolute;
+  top:8px;
+  right:8px;
+  width:22px;
+  height:22px;
+  border-radius:50%;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:rgba(248,113,113,.18);
+  border:1px solid rgba(248,113,113,.38);
+  color:#ef4444;
+  font-size:.82rem;
+  font-weight:1000;
+  line-height:1;
+  z-index:2;
+}
+.conflict-legend-mark{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:18px;
+  height:18px;
+  border-radius:50%;
+  background:rgba(248,113,113,.18);
+  color:#ef4444;
+  font-weight:1000;
 }
 .answer-day.clickable{cursor:pointer}
 .answer-day.clickable:hover{transform:translateY(-1px);border-color:#47566f}
@@ -2191,11 +2319,11 @@ async def calendar_page(request: Request, month: str = ""):
     for row, members in entries:
         by_date.setdefault(str(row["event_date"]), []).append((row, members))
 
-    cal = pycalendar.Calendar(firstweekday=6)  # 日曜始まり
+    cal = pycalendar.Calendar(firstweekday=0)  # 月曜始まり
     weeks = cal.monthdatescalendar(current.year, current.month)
-    weekday_names = ["日", "月", "火", "水", "木", "金", "土"]
+    weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
     weekday_html = "".join(
-        f"<div class='calendar-weekday {'sun' if i==0 else 'sat' if i==6 else ''}'>{name}</div>"
+        f"<div class='calendar-weekday {'sat' if i==5 else 'sun' if i==6 else ''}'>{name}</div>"
         for i, name in enumerate(weekday_names)
     )
 
@@ -2203,8 +2331,8 @@ async def calendar_page(request: Request, month: str = ""):
     for week in weeks:
         for d in week:
             cls = "calendar-day" + (" outside" if d.month != current.month else "")
-            dow = (d.weekday() + 1) % 7
-            dcls = "sun" if dow == 0 else "sat" if dow == 6 else ""
+            dow = d.weekday()  # 月=0 ... 日=6
+            dcls = "sat" if dow == 5 else "sun" if dow == 6 else ""
             blocks = []
             if d.month == current.month:
                 for row, members in by_date.get(d.isoformat(), []):
@@ -2419,6 +2547,12 @@ async def simple_schedule_form(request: Request):
               </div>
             </label>
 
+            <label class='checkbox-row' style='margin-top:12px'>
+              <input type='checkbox' name='calendar_visible' value='1'>
+              カレンダーに掲載する
+            </label>
+            <p class='muted small' style='margin-top:6px'>掲載した場合、カレンダーにはイベント名のみ表示されます。</p>
+
             <div class='field-row'>
               <label>
                 <div class='field-box no-icon'>
@@ -2573,6 +2707,7 @@ async def simple_schedule_submit(
     fixed_players: int = Form(4),
     min_players: int = Form(2),
     max_players: int = Form(4),
+    calendar_visible: Optional[str] = Form(None),
     submission_token: str = Form(...),
 ):
     uid = require_login(request)
@@ -2616,8 +2751,8 @@ async def simple_schedule_submit(
 
     with db() as c:
         cur = c.execute(
-            """INSERT INTO recruitments(game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,schedule_pending,created_at,simple_schedule,target_players,gm_name_override,target_channel_id,waiting_channel_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            ("EVENT", event_name.strip(), str(uid), mn, mx, var, "", "", "", None, sv, deadline.isoformat(), "RECRUITING", 0, iso_now(), 1, target, "", str(ch.id), str(ch.id)),
+            """INSERT INTO recruitments(game_type,scenario_name,gm_discord_id,min_players,max_players,variable_players,play_time,description,guide_message,image_path,start_time,deadline,status,schedule_pending,created_at,simple_schedule,target_players,gm_name_override,target_channel_id,waiting_channel_id,calendar_visible) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            ("EVENT", event_name.strip(), str(uid), mn, mx, var, "", "", "", None, sv, deadline.isoformat(), "RECRUITING", 0, iso_now(), 1, target, "", str(ch.id), str(ch.id), 1 if calendar_visible else 0),
         )
         rid = cur.lastrowid
         c.executemany(
@@ -3335,6 +3470,7 @@ async def recruitment_page(rid: int, request: Request):
     weekday_jp = ["月","火","水","木","金","土","日"]
 
     rows = candidate_rows(rid)
+    conflict_dates = calendar_conflict_dates(uid, dates) if can_answer else set()
     available = any(len(x["yes"]) >= int(r["min_players"]) for x in rows)
     all_answered = simple_schedule_all_answered(rid) if is_simple_schedule(r) else False
 
@@ -3384,8 +3520,15 @@ async def recruitment_page(rid: int, request: Request):
         onclick = " onclick='togglePL(this)'" if can_answer else ""
         clickable = " clickable" if can_answer else ""
 
+        conflict_badge = (
+            "<span class='calendar-conflict-badge' "
+            "title='この日はすでに開催予定があります'>!</span>"
+            if ds in conflict_dates else ""
+        )
+
         cards.append(
             f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
+            f"{conflict_badge}"
             f"<div class='answer-day-head'>{day_label}</div>"
             f"<div class='answer-day-state'>{symbol}</div>"
             f"<div class='answer-members'>"
@@ -3427,6 +3570,7 @@ async def recruitment_page(rid: int, request: Request):
           <span><b class='yes-mark'>○</b>：参加可能</span>
           <span><b class='maybe-mark'>△</b>：未定</span>
           <span><b class='no-mark'>-</b>：無理</span>
+          <span><b class='conflict-legend-mark'>!</b>：すでに開催予定あり</span>
         </div>
 
         <form method='post' action='/r/{rid}/answer'>
@@ -3990,6 +4134,11 @@ async def decide_submit(
                 gm_discord_id=uid,
                 participant_ids=selected,
                 created_at=iso_now(),
+                calendar_visible=(
+                    bool(int(r["calendar_visible"] or 0))
+                    if r["game_type"] == "EVENT"
+                    else True
+                ),
             )
         except Exception as archive_error:
             log_error(f"calendar_archive sid={sid}", archive_error)
@@ -4439,9 +4588,14 @@ async def reschedule_submit(
                 deadline,
                 status,
                 created_at,
-                waiting_channel_id
+                waiting_channel_id,
+                simple_schedule,
+                target_players,
+                gm_name_override,
+                target_channel_id,
+                calendar_visible
             )
-            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 rid,
                 r["game_type"],
@@ -4459,6 +4613,11 @@ async def reschedule_submit(
                 "RECRUITING",
                 iso_now(),
                 r["waiting_channel_id"],
+                r["simple_schedule"],
+                r["target_players"],
+                r["gm_name_override"],
+                r["target_channel_id"],
+                r["calendar_visible"],
             ),
         )
         new_id = cur.lastrowid
