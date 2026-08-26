@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, db
+from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_stats, new_scenario_count, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -927,6 +927,179 @@ button,input,textarea,select{font:inherit}
   font-weight:900;
   cursor:pointer;
 }
+.calendar-head-right{
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+.stats-circle{
+  width:42px;
+  height:42px;
+  flex:0 0 42px;
+  border-radius:50%;
+  border:1px solid #334155;
+  background:#101722;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+}
+.stats-bars{
+  height:19px;
+  display:flex;
+  align-items:flex-end;
+  gap:3px;
+}
+.stats-bars i{
+  display:block;
+  width:4px;
+  border-radius:3px;
+  background:#e2e8f0;
+}
+.stats-bars i:nth-child(1){height:9px}
+.stats-bars i:nth-child(2){height:18px}
+.stats-bars i:nth-child(3){height:12px}
+
+.manual-user-list{
+  max-height:230px;
+  overflow:auto;
+  display:grid;
+  grid-template-columns:repeat(2,minmax(0,1fr));
+  gap:7px;
+}
+.manual-user-check{
+  display:flex;
+  align-items:center;
+  gap:7px;
+  min-width:0;
+  padding:8px 9px;
+  border-radius:10px;
+  background:#101824;
+  border:1px solid #263244;
+  font-size:.8rem;
+}
+.manual-user-check input{
+  width:auto;
+  flex:0 0 auto;
+}
+.manual-user-check span{
+  min-width:0;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+}
+.manual-actions{
+  display:grid;
+  grid-template-columns:1fr 1fr;
+  gap:10px;
+  margin-top:16px;
+}
+
+.stats-card{max-width:540px}
+.stats-section{
+  border:1px solid #2a3749;
+  background:#0d151f;
+  border-radius:16px;
+  padding:15px;
+  margin-top:12px;
+}
+.stats-section.total{background:#0a1119}
+.stats-section-title{
+  font-size:1rem;
+  font-weight:950;
+  margin-bottom:12px;
+}
+.stats-section-title span{
+  color:#7f8b9d;
+  font-size:.7rem;
+  margin-left:6px;
+}
+.stats-number-grid{
+  display:grid;
+  grid-template-columns:repeat(4,minmax(0,1fr));
+  gap:7px;
+  margin-bottom:15px;
+}
+.stats-number-grid div{
+  min-width:0;
+  text-align:center;
+  border-radius:12px;
+  background:#121c29;
+  padding:10px 4px;
+}
+.stats-number-grid b{
+  display:block;
+  font-size:1.25rem;
+}
+.stats-number-grid span{
+  display:block;
+  color:#8e9bad;
+  font-size:.62rem;
+  margin-top:2px;
+}
+.stats-ranking-title{
+  margin:14px 0 6px;
+  color:#9ba8ba;
+  font-size:.72rem;
+  font-weight:900;
+}
+.rank-row{
+  display:grid;
+  grid-template-columns:44px 1fr auto;
+  align-items:center;
+  gap:8px;
+  padding:7px 4px;
+}
+.rank-badge{
+  position:relative;
+  width:38px;
+  height:34px;
+  display:flex;
+  align-items:flex-start;
+  justify-content:center;
+}
+.rank-decoration{
+  font-size:1.08rem;
+  line-height:1;
+}
+.rank-badge b{
+  position:absolute;
+  bottom:2px;
+  font-size:.82rem;
+  color:#fff;
+}
+.rank-one{
+  color:#ffd866;
+  border-radius:0 0 11px 11px;
+  background:
+    radial-gradient(ellipse at 50% 100%,
+      rgba(67,160,71,.62) 0 36%,
+      rgba(67,160,71,.25) 37% 52%,
+      transparent 53%);
+}
+.rank-two{color:#cbd5e1}
+.rank-three{color:#d99a6c}
+.rank-name{
+  min-width:0;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  font-weight:850;
+}
+.rank-count{
+  color:#e5edf6;
+  font-size:.78rem;
+  font-weight:900;
+}
+@media(max-width:620px){
+  .stats-number-grid{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
+  .manual-user-list{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
+}
+
 .menu-icon{
   width:56px;height:56px;
   flex:0 0 56px;
@@ -2408,15 +2581,62 @@ async def calendar_page(request: Request, month: str = ""):
     else:
         next_month = date(current.year, current.month + 1, 1)
 
-    entries = calendar_entries(
-        current.isoformat(),
-        next_month.isoformat(),
-    )
+    entries = calendar_entries(current.isoformat(), next_month.isoformat())
     by_date: dict[str, list[tuple]] = {}
     for row, members in entries:
         by_date.setdefault(str(row["event_date"]), []).append((row, members))
 
-    cal = pycalendar.Calendar(firstweekday=0)  # 月曜始まり
+    scenarios, known_users = calendar_manual_options()
+    can_edit_calendar = bool(request.session.get("user_id"))
+
+    # つぶぐみ年度は 6/1〜翌5/31
+    activity_year = today.year if today.month >= 6 else today.year - 1
+    activity_start = date(activity_year, 6, 1)
+    activity_end = date(activity_year + 1, 6, 1)
+
+    year_stats = calendar_stats(activity_start.isoformat(), activity_end.isoformat())
+    year_stats["new_scenarios"] = new_scenario_count(
+        activity_start.isoformat(), activity_end.isoformat()
+    )
+    total_stats = calendar_stats()
+
+    def rank_html(rows):
+        if not rows:
+            return "<div class='muted small'>まだデータがありません</div>"
+        classes = ["rank-one", "rank-two", "rank-three"]
+        decorations = ["♛", "◆", "◇"]
+        out = []
+        for i, row in enumerate(rows):
+            out.append(
+                f"<div class='rank-row'>"
+                f"<span class='rank-badge {classes[i]}'>"
+                f"<span class='rank-decoration'>{decorations[i]}</span>"
+                f"<b>{i+1}</b></span>"
+                f"<span class='rank-name'>{esc(str(row['display_name']))}</span>"
+                f"<span class='rank-count'>{int(row['n'])}回</span>"
+                f"</div>"
+            )
+        return "".join(out)
+
+    scenario_opts = "".join(
+        f"<option value='{esc(str(x['scenario_name']))}'>"
+        f"{esc(str(x['scenario_name']))}</option>"
+        for x in scenarios
+    )
+    user_opts = "".join(
+        f"<option value='{esc(str(x['discord_id']))}'>"
+        f"{esc(str(x['display_name']))}</option>"
+        for x in known_users
+    )
+    pl_checks = "".join(
+        f"<label class='manual-user-check'>"
+        f"<input type='checkbox' name='participant_ids' value='{esc(str(x['discord_id']))}'>"
+        f"<span>{esc(str(x['display_name']))}</span>"
+        f"</label>"
+        for x in known_users
+    )
+
+    cal = pycalendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(current.year, current.month)
     weekday_names = ["月", "火", "水", "木", "金", "土", "日"]
     weekday_html = "".join(
@@ -2428,30 +2648,38 @@ async def calendar_page(request: Request, month: str = ""):
     for week in weeks:
         for d in week:
             cls = "calendar-day" + (" outside" if d.month != current.month else "")
-            dow = d.weekday()  # 月=0 ... 日=6
+            dow = d.weekday()
             dcls = "sat" if dow == 5 else "sun" if dow == 6 else ""
             blocks = []
+
             if d.month == current.month:
                 for row, members in by_date.get(d.isoformat(), []):
                     gt = str(row["game_type"] or "")
-                    type_cls = "trpg" if gt == "TRPG" else "madamis" if gt == "マダミス" else "event"
+                    normalized_gt = "MADMIS" if gt == "マダミス" else gt
+                    type_cls = (
+                        "trpg" if normalized_gt == "TRPG"
+                        else "madamis" if normalized_gt == "MADMIS"
+                        else "event"
+                    )
+
+                    title_text = str(row["scenario_name"] or "")
+                    time_text = str(row["start_time"] or "未定")
+
                     if type_cls == "event":
-                        title_text = str(row["scenario_name"] or "")
-                        time_text = str(row["start_time"] or "未定")
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-title='{esc(title_text)}' "
                             f"data-time='{esc(time_text)}' "
                             "data-gm='' data-members='' data-event='1' "
-                            "onclick='openCalendarDetail(this)'>"
+                            "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title event'>{esc(title_text)}</span>"
                             "</div>"
                         )
                     else:
-                        title_text = str(row["scenario_name"] or "")
-                        time_text = str(row["start_time"] or "未定")
                         gm_text = str(row["gm_name"] or "")
-                        member_text = " / ".join(str(m["display_name"] or "") for m in members)
+                        member_text = " / ".join(
+                            str(m["display_name"] or "") for m in members
+                        )
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-title='{esc(title_text)}' "
@@ -2459,31 +2687,161 @@ async def calendar_page(request: Request, month: str = ""):
                             f"data-gm='{esc(gm_text)}' "
                             f"data-members='{esc(member_text)}' "
                             "data-event='0' "
-                            "onclick='openCalendarDetail(this)'>"
+                            "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title {type_cls}'>{esc(title_text)}</span>"
                             f"<span class='cal-person gm'>{esc(gm_text)}</span>"
                             + "".join(
                                 f"<span class='cal-person pl'>{esc(m['display_name'])}</span>"
-                                for m in members
+                                for m in members[:4]
                             )
                             + "</div>"
                         )
+
+            day_click = (
+                "onclick='openManualAdd(this,event)'"
+                if can_edit_calendar and d.month == current.month
+                else ""
+            )
+
             day_cells.append(
-                f"<div class='{cls}'><div class='calendar-date {dcls}'>{d.day}</div>{''.join(blocks)}</div>"
+                f"<div class='{cls}' data-date='{d.isoformat()}' {day_click}>"
+                f"<div class='calendar-date {dcls}'>{d.day}</div>"
+                f"{''.join(blocks)}</div>"
             )
 
     return page(
         "カレンダー",
         f"""
         <a class='back-link' href='/'>‹ 戻る</a>
+
         <div class='calendar-head'>
           <a class='calendar-nav' href='/calendar?month={prev_month.strftime('%Y-%m')}'>‹</a>
           <h2>{current.year}年 {current.month}月</h2>
-          <a class='calendar-nav' href='/calendar?month={next_month.strftime('%Y-%m')}'>›</a>
+          <div class='calendar-head-right'>
+            <button class='stats-circle' type='button'
+                    onclick='openStats(event)' aria-label='データ'>
+              <span class='stats-bars'><i></i><i></i><i></i></span>
+            </button>
+            <a class='calendar-nav' href='/calendar?month={next_month.strftime('%Y-%m')}'>›</a>
+          </div>
         </div>
+
         <div class='calendar-grid'>
           {weekday_html}
           {''.join(day_cells)}
+        </div>
+
+        <div class='calendar-modal' id='manualAddModal' onclick='closeManualAdd(event)'>
+          <div class='calendar-modal-card' onclick='event.stopPropagation()'>
+            <h3 class='calendar-modal-title'>卓をカレンダーに追加</h3>
+            <form method='post' action='/calendar/manual-add'>
+              {csrf_field(request)}
+              <input type='hidden' name='event_date' id='manualEventDate'>
+
+              <div class='calendar-modal-row'>
+                <span class='calendar-modal-label'>日付</span>
+                <strong id='manualDateLabel'></strong>
+              </div>
+
+              <label class='field' style='margin-top:12px'>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>種類</span>
+                    <select name='game_type' required>
+                      <option value='TRPG'>TRPG</option>
+                      <option value='MADMIS'>マダミス</option>
+                    </select>
+                  </div>
+                </div>
+              </label>
+
+              <label class='field'>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>シナリオ名</span>
+                    <select name='scenario_name' required>
+                      <option value='' disabled selected>選択してください</option>
+                      {scenario_opts}
+                    </select>
+                  </div>
+                </div>
+              </label>
+
+              <label class='field'>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>開催時間</span>
+                    <input type='time' name='start_time' value='21:00'>
+                  </div>
+                </div>
+              </label>
+
+              <label class='field'>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>GM</span>
+                    <select name='gm_discord_id' required>
+                      <option value='' disabled selected>選択してください</option>
+                      {user_opts}
+                    </select>
+                  </div>
+                </div>
+              </label>
+
+              <div class='calendar-modal-row'>
+                <span class='calendar-modal-label'>PL（複数選択可）</span>
+                <div class='manual-user-list'>{pl_checks}</div>
+              </div>
+
+              <div class='manual-actions'>
+                <button class='btn alt' type='button' onclick='closeManualAdd()'>キャンセル</button>
+                <button class='btn green' type='submit'>追加</button>
+              </div>
+            </form>
+          </div>
+        </div>
+
+        <div class='calendar-modal' id='statsModal' onclick='closeStats(event)'>
+          <div class='calendar-modal-card stats-card' onclick='event.stopPropagation()'>
+            <h3 class='calendar-modal-title'>つぶぐみデータ</h3>
+
+            <div class='stats-section'>
+              <div class='stats-section-title'>
+                {activity_year}年度
+                <span>6/1〜{activity_year+1}/5/31</span>
+              </div>
+              <div class='stats-number-grid'>
+                <div><b>{year_stats["total"]}</b><span>卓</span></div>
+                <div><b>{year_stats["trpg"]}</b><span>TRPG</span></div>
+                <div><b>{year_stats["madamis"]}</b><span>マダミス</span></div>
+                <div><b>{year_stats["new_scenarios"]}</b><span>新規シナリオ</span></div>
+              </div>
+
+              <div class='stats-ranking-title'>GM TOP3</div>
+              {rank_html(year_stats["gm_top"])}
+
+              <div class='stats-ranking-title'>PL TOP3</div>
+              {rank_html(year_stats["pl_top"])}
+            </div>
+
+            <div class='stats-section total'>
+              <div class='stats-section-title'>TOTAL</div>
+              <div class='stats-number-grid'>
+                <div><b>{total_stats["total"]}</b><span>卓</span></div>
+                <div><b>{total_stats["trpg"]}</b><span>TRPG</span></div>
+                <div><b>{total_stats["madamis"]}</b><span>マダミス</span></div>
+                <div><b>{total_stats["scenario_count"]}</b><span>シナリオ</span></div>
+              </div>
+
+              <div class='stats-ranking-title'>GM TOP3</div>
+              {rank_html(total_stats["gm_top"])}
+
+              <div class='stats-ranking-title'>PL TOP3</div>
+              {rank_html(total_stats["pl_top"])}
+            </div>
+
+            <button class='calendar-modal-close' type='button' onclick='closeStats()'>閉じる</button>
+          </div>
         </div>
 
         <div class='calendar-modal' id='calendarDetailModal' onclick='closeCalendarDetail(event)'>
@@ -2503,17 +2861,53 @@ async def calendar_page(request: Request, month: str = ""):
                 <div class='calendar-modal-members' id='calendarDetailMembers'></div>
               </div>
             </div>
-            <button class='calendar-modal-close' type='button' onclick='closeCalendarDetail()'>閉じる</button>
+            <button class='calendar-modal-close' type='button'
+                    onclick='closeCalendarDetail()'>閉じる</button>
           </div>
         </div>
 
         <script>
+        function openManualAdd(cell,ev){{
+          if(ev && ev.target.closest('.cal-session')) return;
+          const modal=document.getElementById('manualAddModal');
+          const ds=cell.dataset.date;
+          if(!modal || !ds) return;
+          document.getElementById('manualEventDate').value=ds;
+          document.getElementById('manualDateLabel').textContent=ds;
+          modal.classList.add('open');
+          document.body.style.overflow='hidden';
+        }}
+
+        function closeManualAdd(ev){{
+          if(ev && ev.target!==document.getElementById('manualAddModal')) return;
+          const modal=document.getElementById('manualAddModal');
+          if(modal) modal.classList.remove('open');
+          document.body.style.overflow='';
+        }}
+
+        function openStats(ev){{
+          if(ev) ev.stopPropagation();
+          const modal=document.getElementById('statsModal');
+          if(modal) modal.classList.add('open');
+          document.body.style.overflow='hidden';
+        }}
+
+        function closeStats(ev){{
+          if(ev && ev.target!==document.getElementById('statsModal')) return;
+          const modal=document.getElementById('statsModal');
+          if(modal) modal.classList.remove('open');
+          document.body.style.overflow='';
+        }}
+
         function openCalendarDetail(el){{
           const modal=document.getElementById('calendarDetailModal');
           const isEvent=el.dataset.event==='1';
-          document.getElementById('calendarDetailTitle').textContent=el.dataset.title||'';
+
+          document.getElementById('calendarDetailTitle').textContent=
+            el.dataset.title||'';
           document.getElementById('calendarDetailTime').textContent=
-            (el.dataset.time && el.dataset.time!=='未定') ? el.dataset.time : '未定';
+            (el.dataset.time && el.dataset.time!=='未定')
+              ? el.dataset.time : '未定';
 
           const gmRow=document.getElementById('calendarDetailGmRow');
           const membersRow=document.getElementById('calendarDetailMembersRow');
@@ -2524,15 +2918,20 @@ async def calendar_page(request: Request, month: str = ""):
           }}else{{
             gmRow.style.display='block';
             membersRow.style.display='block';
-            document.getElementById('calendarDetailGm').textContent=el.dataset.gm||'';
+            document.getElementById('calendarDetailGm').textContent=
+              el.dataset.gm||'';
+
             const box=document.getElementById('calendarDetailMembers');
             box.innerHTML='';
-            (el.dataset.members||'').split(' / ').filter(Boolean).forEach(name=>{{
-              const span=document.createElement('span');
-              span.className='calendar-modal-member';
-              span.textContent=name;
-              box.appendChild(span);
-            }});
+            (el.dataset.members||'')
+              .split(' / ')
+              .filter(Boolean)
+              .forEach(name=>{{
+                const span=document.createElement('span');
+                span.className='calendar-modal-member';
+                span.textContent=name;
+                box.appendChild(span);
+              }});
           }}
 
           modal.classList.add('open');
@@ -2547,11 +2946,52 @@ async def calendar_page(request: Request, month: str = ""):
         }}
 
         document.addEventListener('keydown',e=>{{
-          if(e.key==='Escape') closeCalendarDetail();
+          if(e.key==='Escape'){{
+            closeCalendarDetail();
+            closeManualAdd();
+            closeStats();
+          }}
         }});
         </script>
         """,
         request,
+    )
+
+
+@app.post("/calendar/manual-add")
+async def calendar_manual_add(
+    request: Request,
+    event_date: str = Form(...),
+    game_type: str = Form(...),
+    scenario_name: str = Form(...),
+    start_time: str = Form("21:00"),
+    gm_discord_id: str = Form(...),
+    participant_ids: list[str] = Form(default=[]),
+):
+    require_login(request)
+    await require_csrf(request)
+
+    if game_type not in {"TRPG", "MADMIS"}:
+        raise HTTPException(400, "種類が不正です")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", event_date):
+        raise HTTPException(400, "日付が不正です")
+    if not scenario_name.strip():
+        raise HTTPException(400, "シナリオ名を選択してください")
+
+    add_manual_calendar_session(
+        game_type=game_type,
+        scenario_name=scenario_name.strip(),
+        event_date=event_date,
+        start_time=start_time.strip() or "未定",
+        gm_discord_id=str(gm_discord_id),
+        participant_ids=[str(x) for x in participant_ids],
+        created_at=iso_now(),
+    )
+
+    d = date.fromisoformat(event_date)
+    return RedirectResponse(
+        f"/calendar?month={d.strftime('%Y-%m')}",
+        status_code=303,
     )
 
 
@@ -3709,19 +4149,10 @@ async def recruitment_page(rid: int, request: Request):
         onclick = " onclick='togglePL(this)'" if can_answer else ""
         clickable = " clickable" if can_answer else ""
 
-        own_conflict_badge = (
-            "<span class='calendar-conflict-badge' "
-            "title='この日は別の開催予定があります'>!</span>"
-            if can_answer and (uid, ds) in user_conflicts else ""
-        )
-
         cards.append(
             f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
             f"<div class='answer-day-head'>{day_label}</div>"
-            f"<div class='answer-day-state-wrap'>"
-            f"{own_conflict_badge}"
             f"<div class='answer-day-state'>{symbol}</div>"
-            f"</div>"
             f"<div class='answer-members'>"
             f"{''.join(member_lines) if member_lines else '<div class=\"muted small\">未回答</div>'}"
             f"</div>"
