@@ -2287,6 +2287,15 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 /* Old matrix no longer used */
 .progress-table-scroll{{display:none}}
 
+
+/* v55 */
+.progress-person-legend{{align-items:center}}
+.progress-person-legend span{{display:inline-flex;align-items:center;justify-content:center;min-height:22px;line-height:1}}
+.progress-save-btn{{width:100%;margin-top:14px}}
+.progress-cancel-btn{{width:100%;margin-top:8px}}
+.progress-person-state.unpassed{{color:#718096}}
+.admin-back-btn{{display:inline-flex;width:auto;margin-bottom:12px;padding:7px 11px;font-size:.72rem}}
+
 </style>
 </head>
 <body>
@@ -3140,7 +3149,7 @@ async def admin_page(request: Request):
         "<div class='admin-username'>@"+esc(r["username"])+" ・ ID "+esc(r["discord_id"])+"</div></div></div>"
         for r in rows
     ) or "<div class='muted small'>登録済みメンバーはいません。</div>"
-    body="<div class='card admin-card'><h2 class='admin-title'>⚙ ネオ・ツブタク管理</h2><p class='admin-sub'>yuzuky専用管理画面</p>"          "<h3>Discordユーザーを登録</h3><form class='admin-id-form' method='post' action='/admin/member/lookup'>"+csrf_field(request)+          "<input type='text' inputmode='numeric' name='discord_id' placeholder='DiscordユーザーID' required><button class='btn green' type='submit'>確認</button></form>"          "<div class='muted small'>BotがこのDiscordサーバーの実在メンバーか確認してから登録します。</div>"          "<h3 style='margin-top:24px'>登録済みメンバー</h3><div class='admin-member-list'>"+member_rows+"</div></div>"
+    body="<div class='card admin-card'><a class='btn alt admin-back-btn' href='/'>← ホームに戻る</a><h2 class='admin-title'>⚙ ネオ・ツブタク管理</h2><p class='admin-sub'>yuzuky専用管理画面</p>"          "<h3>Discordユーザーを登録</h3><form class='admin-id-form' method='post' action='/admin/member/lookup'>"+csrf_field(request)+          "<input type='text' inputmode='numeric' name='discord_id' placeholder='DiscordユーザーID' required><button class='btn green' type='submit'>確認</button></form>"          "<div class='muted small'>BotがこのDiscordサーバーの実在メンバーか確認してから登録します。</div>"          "<h3 style='margin-top:24px'>登録済みメンバー</h3><div class='admin-member-list'>"+member_rows+"</div></div>"
     return page("管理",body,request)
 
 @app.post("/admin/member/lookup", response_class=HTMLResponse)
@@ -3548,8 +3557,10 @@ async def calendar_page(request: Request, month: str = ""):
               <span>－ 未通過</span>
             </div>
             <div class='progress-person-list' id='progressPersonList'></div>
-            <button class='calendar-modal-close' type='button'
-                    onclick='closeProgressScenario()'>閉じる</button>
+            <button class='btn green progress-save-btn' type='button'
+                    onclick='saveProgressScenario()'>保存</button>
+            <button class='calendar-modal-close progress-cancel-btn' type='button'
+                    onclick='closeProgressScenario(null, true)'>保存せずに閉じる</button>
           </div>
         </div>
 
@@ -3813,72 +3824,72 @@ async def calendar_page(request: Request, month: str = ""):
           const key=gt+'\x1f'+name;
           currentProgressScenarioKey=key;
           document.getElementById('progressScenarioTitle').textContent=name;
-
           const list=document.getElementById('progressPersonList');
           list.innerHTML='';
           (progressEditorData[key]||[]).forEach(person=>{{
             const row=document.createElement('button');
-            row.type='button';
-            row.className='progress-person-row';
-            row.dataset.gameType=gt;
-            row.dataset.scenario=name;
-            row.dataset.userId=person.id;
-            row.dataset.status=person.status||'';
-
-            const n=document.createElement('span');
-            n.className='progress-person-name';
-            n.textContent=person.name;
-
-            const state=document.createElement('span');
-            state.className='progress-person-state';
+            row.type='button'; row.className='progress-person-row';
+            row.dataset.gameType=gt; row.dataset.scenario=name; row.dataset.userId=person.id;
+            row.dataset.originalStatus=person.status||''; row.dataset.status=person.status||'';
+            const n=document.createElement('span'); n.className='progress-person-name'; n.textContent=person.name;
+            const state=document.createElement('span'); state.className='progress-person-state';
             applyProgressState(state,person.status||'');
-
-            row.appendChild(n);
-            row.appendChild(state);
+            row.appendChild(n); row.appendChild(state);
             row.onclick=()=>cycleProgressPerson(row,state);
             list.appendChild(row);
           }});
-
           document.getElementById('progressScenarioModal').classList.add('open');
         }}
 
         function applyProgressState(el,status){{
           el.className='progress-person-state';
-          if(status==='PASSED'){{
-            el.classList.add('passed'); el.textContent='○';
-          }}else if(status==='WATCHED'){{
-            el.classList.add('watched'); el.textContent='○';
-          }}else{{
-            el.textContent='－';
-          }}
+          if(status==='PASSED'){{el.classList.add('passed');el.textContent='○';}}
+          else if(status==='WATCHED'){{el.classList.add('watched');el.textContent='○';}}
+          else{{el.classList.add('unpassed');el.textContent='－';}}
         }}
 
-        async function cycleProgressPerson(row,stateEl){{
+        function cycleProgressPerson(row,stateEl){{
           const current=row.dataset.status||'';
           const next=current===''?'PASSED':current==='PASSED'?'WATCHED':'';
-          const fd=new FormData();
-          fd.append('csrf_token','{progress_csrf}');
-          fd.append('game_type',row.dataset.gameType||'');
-          fd.append('scenario_name',row.dataset.scenario||'');
-          fd.append('discord_id',row.dataset.userId||'');
-          fd.append('status',next);
+          row.dataset.status=next;
+          applyProgressState(stateEl,next);
+        }}
+
+        async function saveProgressScenario(){{
+          const modal=document.getElementById('progressScenarioModal');
+          const changed=[...modal.querySelectorAll('.progress-person-row')]
+            .filter(row=>(row.dataset.status||'')!==(row.dataset.originalStatus||''));
+          if(changed.length===0){{modal.classList.remove('open');return;}}
+          const btn=modal.querySelector('.progress-save-btn');
+          btn.disabled=true;btn.textContent='保存中…';
           try{{
-            const res=await fetch('/calendar/progress-set',{{method:'POST',body:fd}});
-            if(!res.ok) throw new Error('save failed');
-            row.dataset.status=next;
-            applyProgressState(stateEl,next);
-            const people=progressEditorData[currentProgressScenarioKey]||[];
-            const p=people.find(x=>String(x.id)===String(row.dataset.userId));
-            if(p) p.status=next;
+            for(const row of changed){{
+              const fd=new FormData();
+              fd.append('csrf_token','{progress_csrf}');
+              fd.append('game_type',row.dataset.gameType||'');
+              fd.append('scenario_name',row.dataset.scenario||'');
+              fd.append('discord_id',row.dataset.userId||'');
+              fd.append('status',row.dataset.status||'');
+              const res=await fetch('/calendar/progress-set',{{method:'POST',body:fd}});
+              if(!res.ok)throw new Error('save failed');
+              const people=progressEditorData[currentProgressScenarioKey]||[];
+              const person=people.find(x=>String(x.id)===String(row.dataset.userId));
+              if(person)person.status=row.dataset.status||'';
+            }}
+            window.location.reload();
           }}catch(e){{
-            alert('更新に失敗しました。ページを再読み込みしてもう一度お試しください。');
+            btn.disabled=false;btn.textContent='保存';
+            alert('更新に失敗しました。もう一度お試しください。');
           }}
         }}
 
-        function closeProgressScenario(ev){{
-          if(ev && ev.target!==document.getElementById('progressScenarioModal')) return;
+        function closeProgressScenario(ev,discard=false){{
           const modal=document.getElementById('progressScenarioModal');
-          if(modal) modal.classList.remove('open');
+          if(!modal)return;
+          if(ev && ev.target!==modal)return;
+          if(ev && !discard)return;
+          modal.classList.remove('open');
+          currentProgressScenarioKey='';
         }}
 
         function openScenarioDetail(el){{
@@ -4077,7 +4088,6 @@ async def calendar_page(request: Request, month: str = ""):
             closeStats();
             closeProgress();
             closeScenarioDetail();
-            closeProgressScenario();
           }}
         }});
         </script>
