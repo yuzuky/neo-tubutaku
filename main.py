@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, scenario_detail, scenario_progress_data, set_scenario_progress_status, update_calendar_session_members, db
+from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_scenario_progress_status, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -2244,6 +2244,20 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   background:rgba(78,162,255,.11);
 }}
 
+
+.admin-gear-wrap{{display:flex;justify-content:center;margin:26px 0 4px}}
+.admin-gear{{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;text-decoration:none;background:#111925;border:1px solid #2b3748;color:#8e9bad;font-size:18px}}
+.admin-card{{max-width:620px;margin:0 auto}} .admin-title{{text-align:center}}
+.admin-sub{{text-align:center;color:#7f8b9d;font-size:.75rem}}
+.admin-id-form{{display:flex;gap:8px;margin:14px 0}} .admin-id-form input{{flex:1;min-width:0}}
+.admin-member-list{{display:flex;flex-direction:column;gap:8px;margin-top:14px}}
+.admin-member-row{{display:flex;align-items:center;gap:10px;padding:10px;border-radius:12px;background:#111925;border:1px solid #263244}}
+.admin-avatar{{width:38px;height:38px;border-radius:50%;object-fit:cover;background:#263244}}
+.admin-member-main{{min-width:0;flex:1}} .admin-display{{font-weight:900}}
+.admin-username{{font-size:.7rem;color:#7f8b9d}} .admin-confirm{{margin-top:16px;padding:14px;border-radius:14px;background:#101824;border:1px solid #314056;text-align:center}}
+.admin-confirm .admin-avatar{{width:58px;height:58px}} .admin-confirm-name{{font-size:1.05rem;font-weight:950}}
+.admin-confirm-user{{font-size:.75rem;color:#8e9bad}} .admin-confirm-actions{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}}
+
 </style>
 </head>
 <body>
@@ -2305,6 +2319,13 @@ SIMPLE_SCHEDULE_ALLOWED_CATEGORIES = {
 }
 
 YUZUKY_SPECIAL_USER_ID = "804350794371039272"
+
+def require_yuzuky_admin(request: Request) -> str:
+    uid = require_login(request)
+    if uid != YUZUKY_SPECIAL_USER_ID:
+        raise HTTPException(status_code=403, detail="この管理画面はyuzukyのみ利用できます")
+    return uid
+
 
 
 async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChannel]:
@@ -2961,10 +2982,32 @@ async def before_deadline_scheduler():
     await bot.wait_until_ready()
 
 
+
+async def sync_registered_member_profiles():
+    guild=bot.get_guild(GUILD_ID)
+    if guild is None: return
+    for row in registered_members():
+        uid=str(row["discord_id"])
+        if not uid.isdigit(): continue
+        member=guild.get_member(int(uid))
+        if member is None:
+            try: member=await guild.fetch_member(int(uid))
+            except (discord.NotFound,discord.Forbidden,discord.HTTPException): continue
+        refresh_registered_member_profile(uid,member.name,member.display_name,str(member.display_avatar.url),iso_now())
+
+@bot.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    if after.guild.id != GUILD_ID: return
+    refresh_registered_member_profile(str(after.id),after.name,after.display_name,str(after.display_avatar.url),iso_now())
+
 @bot.event
 async def on_ready():
     global _reminders_restored
     print(f"Discord ready: {bot.user}")
+    try:
+        await sync_registered_member_profiles()
+    except Exception as e:
+        log_error("registered_member_sync", e)
     if not _reminders_restored:
         _reminders_restored = True
         await restore_reminder_tasks()
@@ -3050,8 +3093,59 @@ async def home(request: Request):
         <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
         <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>投稿・チャンネル作成・日程調整</div></div><div class='chev'>›</div></a>
         <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
-      </div>""",request)
+      </div>
+      {("<div class='admin-gear-wrap'><a class='admin-gear' href='/admin' aria-label='管理画面'>⚙</a></div>" if str(uid or "") == YUZUKY_SPECIAL_USER_ID else "")}
+      """,request)
 
+
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page(request: Request):
+    require_yuzuky_admin(request)
+    rows=registered_members()
+    member_rows="".join(
+        "<div class='admin-member-row'><img class='admin-avatar' src='"+esc(r["avatar_url"] or "")+"' alt=''>"
+        "<div class='admin-member-main'><div class='admin-display'>"+esc(r["display_name"])+"</div>"
+        "<div class='admin-username'>@"+esc(r["username"])+" ・ ID "+esc(r["discord_id"])+"</div></div></div>"
+        for r in rows
+    ) or "<div class='muted small'>登録済みメンバーはいません。</div>"
+    body="<div class='card admin-card'><h2 class='admin-title'>⚙ ネオ・ツブタク管理</h2><p class='admin-sub'>yuzuky専用管理画面</p>"          "<h3>Discordユーザーを登録</h3><form class='admin-id-form' method='post' action='/admin/member/lookup'>"+csrf_field(request)+          "<input type='text' inputmode='numeric' name='discord_id' placeholder='DiscordユーザーID' required><button class='btn green' type='submit'>確認</button></form>"          "<div class='muted small'>BotがこのDiscordサーバーの実在メンバーか確認してから登録します。</div>"          "<h3 style='margin-top:24px'>登録済みメンバー</h3><div class='admin-member-list'>"+member_rows+"</div></div>"
+    return page("管理",body,request)
+
+@app.post("/admin/member/lookup", response_class=HTMLResponse)
+async def admin_member_lookup(request: Request, discord_id: str=Form(...)):
+    require_yuzuky_admin(request); await require_csrf(request)
+    uid=str(discord_id or "").strip()
+    if not uid.isdigit() or len(uid)>30: raise HTTPException(400,"DiscordユーザーIDの形式が正しくありません")
+    guild=bot.get_guild(GUILD_ID)
+    if guild is None: raise HTTPException(503,"Discordサーバー情報を取得できません")
+    member=guild.get_member(int(uid))
+    if member is None:
+        try: member=await guild.fetch_member(int(uid))
+        except discord.NotFound: raise HTTPException(404,"このDiscordサーバーのメンバーではありません")
+        except discord.Forbidden: raise HTTPException(503,"Botがメンバー情報を取得できません")
+        except discord.HTTPException: raise HTTPException(503,"Discordからメンバー情報を取得できません")
+    exists=registered_member(uid)
+    msg="このユーザーはすでに登録済みです。最新情報へ更新しますか？" if exists else "この人を追加しますか？"
+    button="最新情報に更新" if exists else "追加する"
+    body="<div class='card admin-card'><h2 class='admin-title'>メンバー確認</h2><div class='admin-confirm'>"          "<img class='admin-avatar' src='"+esc(str(member.display_avatar.url))+"' alt=''><div class='admin-confirm-name'>"+esc(member.display_name)+"</div>"          "<div class='admin-confirm-user'>Discord名："+esc(member.name)+"</div><div class='admin-confirm-user'>ID："+esc(uid)+"</div>"          "<p><b>"+esc(msg)+"</b></p><form method='post' action='/admin/member/add'>"+csrf_field(request)+          "<input type='hidden' name='discord_id' value='"+esc(uid)+"'><div class='admin-confirm-actions'><a class='btn alt' href='/admin'>キャンセル</a>"          "<button class='btn green' type='submit'>"+esc(button)+"</button></div></form></div></div>"
+    return page("メンバー確認",body,request)
+
+@app.post("/admin/member/add")
+async def admin_member_add(request: Request, discord_id: str=Form(...)):
+    require_yuzuky_admin(request); await require_csrf(request)
+    uid=str(discord_id or "").strip()
+    if not uid.isdigit(): raise HTTPException(400,"DiscordユーザーIDの形式が正しくありません")
+    guild=bot.get_guild(GUILD_ID)
+    if guild is None: raise HTTPException(503,"Discordサーバー情報を取得できません")
+    member=guild.get_member(int(uid))
+    if member is None:
+        try: member=await guild.fetch_member(int(uid))
+        except discord.NotFound: raise HTTPException(404,"このDiscordサーバーのメンバーではありません")
+        except discord.Forbidden: raise HTTPException(503,"Botがメンバー情報を取得できません")
+        except discord.HTTPException: raise HTTPException(503,"Discordからメンバー情報を取得できません")
+    upsert_registered_member(uid,member.name,member.display_name,str(member.display_avatar.url),iso_now())
+    return RedirectResponse("/admin",status_code=303)
 
 @app.get("/calendar", response_class=HTMLResponse)
 async def calendar_page(request: Request, month: str = ""):
