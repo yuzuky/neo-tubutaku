@@ -132,6 +132,30 @@ def init_db():
                 PRIMARY KEY(session_id, discord_id),
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+
+
+            -- 成立卓の永久保存用。recruitments/sessionsが90日後に消えても残す。
+            CREATE TABLE IF NOT EXISTS calendar_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_session_id INTEGER UNIQUE,
+                source_recruitment_id INTEGER,
+                game_type TEXT NOT NULL,
+                scenario_name TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                gm_discord_id TEXT NOT NULL,
+                calendar_visible INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS calendar_session_members (
+                calendar_session_id INTEGER NOT NULL,
+                discord_id TEXT NOT NULL,
+                PRIMARY KEY(calendar_session_id, discord_id),
+                FOREIGN KEY(calendar_session_id) REFERENCES calendar_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_calendar_sessions_event_date
+                ON calendar_sessions(event_date);
             """
         )
 
@@ -177,10 +201,128 @@ def ensure_recruitment_columns():
             c.execute("ALTER TABLE recruitments ADD COLUMN target_message_id TEXT")
 
 
+def backfill_calendar_history():
+    """現在残っている成立卓を永久保存テーブルへ一度だけ移す。"""
+    with db() as c:
+        rows = c.execute(
+            """SELECT s.id AS session_id,
+                      s.recruitment_id,
+                      s.event_date,
+                      s.created_at,
+                      r.game_type,
+                      r.scenario_name,
+                      r.gm_discord_id
+               FROM sessions s
+               JOIN recruitments r ON r.id=s.recruitment_id"""
+        ).fetchall()
+
+        for row in rows:
+            c.execute(
+                """INSERT OR IGNORE INTO calendar_sessions(
+                       source_session_id,source_recruitment_id,game_type,
+                       scenario_name,event_date,gm_discord_id,calendar_visible,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (
+                    row["session_id"], row["recruitment_id"],
+                    row["game_type"], row["scenario_name"],
+                    row["event_date"], row["gm_discord_id"],
+                    0 if row["game_type"] == "EVENT" else 1,
+                    row["created_at"],
+                ),
+            )
+            cal = c.execute(
+                "SELECT id FROM calendar_sessions WHERE source_session_id=?",
+                (row["session_id"],),
+            ).fetchone()
+            if not cal:
+                continue
+            members = c.execute(
+                "SELECT discord_id FROM session_members WHERE session_id=?",
+                (row["session_id"],),
+            ).fetchall()
+            c.executemany(
+                "INSERT OR IGNORE INTO calendar_session_members(calendar_session_id,discord_id) VALUES(?,?)",
+                [(cal["id"], m["discord_id"]) for m in members],
+            )
+
+
+def archive_confirmed_session(
+    source_session_id: int,
+    source_recruitment_id: int,
+    game_type: str,
+    scenario_name: str,
+    event_date: str,
+    gm_discord_id: str,
+    participant_ids: list[str],
+    created_at: str,
+) -> int:
+    """成立卓をカレンダー/履歴用DBへ永久保存する。"""
+    with db() as c:
+        c.execute(
+            """INSERT INTO calendar_sessions(
+                   source_session_id,source_recruitment_id,game_type,scenario_name,
+                   event_date,gm_discord_id,calendar_visible,created_at
+               ) VALUES(?,?,?,?,?,?,?,?)
+               ON CONFLICT(source_session_id) DO UPDATE SET
+                 game_type=excluded.game_type,
+                 scenario_name=excluded.scenario_name,
+                 event_date=excluded.event_date,
+                 gm_discord_id=excluded.gm_discord_id""",
+            (
+                source_session_id, source_recruitment_id, game_type, scenario_name,
+                event_date, gm_discord_id, 0 if game_type == "EVENT" else 1, created_at,
+            ),
+        )
+        cal = c.execute(
+            "SELECT id FROM calendar_sessions WHERE source_session_id=?",
+            (source_session_id,),
+        ).fetchone()
+        calendar_session_id = int(cal["id"])
+        c.execute(
+            "DELETE FROM calendar_session_members WHERE calendar_session_id=?",
+            (calendar_session_id,),
+        )
+        c.executemany(
+            "INSERT OR IGNORE INTO calendar_session_members(calendar_session_id,discord_id) VALUES(?,?)",
+            [(calendar_session_id, str(uid)) for uid in dict.fromkeys(participant_ids)],
+        )
+        return calendar_session_id
+
+
+def calendar_entries(start_date: str, end_date: str):
+    """指定期間の公開カレンダー用成立卓を取得する。"""
+    with db() as c:
+        rows = c.execute(
+            """SELECT cs.*,
+                      COALESCE(u.display_name,u.username,cs.gm_discord_id) AS gm_name
+               FROM calendar_sessions cs
+               LEFT JOIN users u ON u.discord_id=cs.gm_discord_id
+               WHERE cs.calendar_visible=1
+                 AND cs.event_date>=?
+                 AND cs.event_date<?
+               ORDER BY cs.event_date, cs.id""",
+            (start_date, end_date),
+        ).fetchall()
+        out = []
+        for row in rows:
+            members = c.execute(
+                """SELECT csm.discord_id,
+                          COALESCE(u.display_name,u.username,csm.discord_id) AS display_name
+                   FROM calendar_session_members csm
+                   LEFT JOIN users u ON u.discord_id=csm.discord_id
+                   WHERE csm.calendar_session_id=?
+                   ORDER BY display_name""",
+                (row["id"],),
+            ).fetchall()
+            out.append((row, members))
+        return out
+
+
 def initialize_database():
     """既存DBを保持したまま、必要なテーブル・列だけ追加する。"""
     init_db()
     ensure_recruitment_columns()
+    backfill_calendar_history()
 
 
 # main.py から import された時点で従来どおり初期化する。
