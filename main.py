@@ -2258,6 +2258,35 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 .admin-confirm .admin-avatar{{width:58px;height:58px}} .admin-confirm-name{{font-size:1.05rem;font-weight:950}}
 .admin-confirm-user{{font-size:.75rem;color:#8e9bad}} .admin-confirm-actions{{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:14px}}
 
+
+/* v54 home */
+.home-mini-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+.home-mini-card{{min-height:64px;padding:11px 13px}}
+.home-mini-card .menu-title{{font-size:.88rem}}
+.home-mini-card .menu-sub{{font-size:.62rem;margin-top:2px}}
+.home-mini-card .chev{{font-size:1.1rem}}
+
+/* v54 progress: vertical scenario -> vertical member */
+.progress-scenario-list{{display:flex;flex-direction:column;gap:8px;max-height:55vh;overflow-y:auto;padding:1px}}
+.progress-scenario-row{{width:100%;border:1px solid #263244;background:#0d1621;border-radius:12px;padding:12px 13px;color:#e8edf5;display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;text-align:left}}
+.progress-scenario-name{{font-weight:900;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+.progress-scenario-counts{{display:flex;align-items:center;gap:8px;flex-shrink:0;font-size:.68rem}}
+.progress-scenario-counts .passed{{color:#32d875}}
+.progress-scenario-counts .watched{{color:#4ea2ff}}
+.progress-person-card{{width:min(460px,100%);max-height:84vh}}
+.progress-person-legend{{display:flex;justify-content:center;flex-wrap:wrap;gap:10px;color:#8b98aa;font-size:.68rem;margin-bottom:10px}}
+.progress-person-legend .passed{{color:#32d875}}
+.progress-person-legend .watched{{color:#4ea2ff}}
+.progress-person-list{{display:flex;flex-direction:column;gap:6px;max-height:56vh;overflow-y:auto}}
+.progress-person-row{{width:100%;display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border:1px solid #263244;border-radius:11px;background:#0d1621;color:#e8edf5;cursor:pointer}}
+.progress-person-name{{font-weight:850;text-align:left}}
+.progress-person-state{{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-weight:1000;color:#718096;background:#111925}}
+.progress-person-state.passed{{color:#32d875;background:rgba(50,216,117,.11)}}
+.progress-person-state.watched{{color:#4ea2ff;background:rgba(78,162,255,.11)}}
+
+/* Old matrix no longer used */
+.progress-table-scroll{{display:none}}
+
 </style>
 </head>
 <body>
@@ -3089,10 +3118,12 @@ async def home(request: Request):
     return page("ホーム",f"""
       <section class='hero'><div class='hero-kicker'>Discord × 日程調整</div><h1>○と△だけで、<br>もっと手軽に。</h1></section>
       <div class='menu-stack'>
-        <a class='menu-card calendar' href='/calendar'><div class='menu-icon'>🗓️</div><div><div class='menu-title'>カレンダー</div><div class='menu-sub'>成立卓の予定を一覧表示</div></div><div class='chev'>›</div></a>
-        <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
         <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>投稿・チャンネル作成・日程調整</div></div><div class='chev'>›</div></a>
         <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
+        <div class='home-mini-grid'>
+          <a class='menu-card home-mini-card calendar' href='/calendar'><div><div class='menu-title'>カレンダー</div><div class='menu-sub'>成立卓の予定</div></div><div class='chev'>›</div></a>
+          <a class='menu-card home-mini-card schedule' href='{schedule_href}'><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
+        </div>
       </div>
       {("<div class='admin-gear-wrap'><a class='admin-gear' href='/admin' aria-label='管理画面'>⚙</a></div>" if str(uid or "") == YUZUKY_SPECIAL_USER_ID else "")}
       """,request)
@@ -3301,7 +3332,7 @@ async def calendar_page(request: Request, month: str = ""):
                 f"{''.join(blocks)}</div>"
             )
 
-    def progress_matrix(game_type):
+    def progress_scenario_list(game_type):
         scenarios_for_type = [
             x for x in progress_scenarios
             if str(x["game_type"]) == game_type
@@ -3309,53 +3340,31 @@ async def calendar_page(request: Request, month: str = ""):
         if not scenarios_for_type:
             return "<div class='progress-empty'>シナリオデータはまだありません。</div>"
 
-        headers = "".join(
-            f"<th class='progress-scenario-head' "
-            f"data-game-type='{esc(game_type)}' "
-            f"data-scenario='{esc(str(s['scenario_name']))}' "
-            f"onclick='openScenarioDetail(this)'>"
-            f"{esc(str(s['scenario_name']))}</th>"
-            for s in scenarios_for_type
-        )
-
-        body_rows = []
-        for user in progress_users:
-            uid = str(user["discord_id"])
-            cells = []
-            for scenario in scenarios_for_type:
-                name = str(scenario["scenario_name"])
-                status = progress_statuses.get((game_type, name, uid), "")
-                cls = (
-                    " passed" if status == "PASSED"
-                    else " watched" if status == "WATCHED"
-                    else ""
-                )
-                symbol = "○" if status else "－"
-                cells.append(
-                    f"<td><button type='button' "
-                    f"class='progress-cell{cls}' "
-                    f"data-game-type='{esc(game_type)}' "
-                    f"data-scenario='{esc(name)}' "
-                    f"data-user-id='{esc(uid)}' "
-                    f"data-status='{esc(status)}' "
-                    f"onclick='cycleProgress(this)'>{symbol}</button></td>"
-                )
-
-            body_rows.append(
-                f"<tr><th class='progress-user-name'>"
-                f"{esc(str(user['display_name']))}</th>{''.join(cells)}</tr>"
+        cards = []
+        for scenario in scenarios_for_type:
+            name = str(scenario["scenario_name"])
+            passed_count = sum(
+                1 for user in progress_users
+                if progress_statuses.get((game_type, name, str(user["discord_id"]))) == "PASSED"
             )
+            watched_count = sum(
+                1 for user in progress_users
+                if progress_statuses.get((game_type, name, str(user["discord_id"]))) == "WATCHED"
+            )
+            cards.append(
+                f"<button type='button' class='progress-scenario-row' "
+                f"data-game-type='{esc(game_type)}' data-scenario='{esc(name)}' "
+                f"onclick='openProgressScenario(this)'>"
+                f"<span class='progress-scenario-name'>{esc(name)}</span>"
+                f"<span class='progress-scenario-counts'>"
+                f"<b class='passed'>通過 {passed_count}</b>"
+                f"<b class='watched'>視聴 {watched_count}</b>"
+                f"<span class='chev'>›</span></span></button>"
+            )
+        return "<div class='progress-scenario-list'>" + "".join(cards) + "</div>"
 
-        return (
-            "<div class='progress-table-scroll'>"
-            "<table class='progress-table'>"
-            f"<thead><tr><th class='progress-corner'>名前</th>{headers}</tr></thead>"
-            f"<tbody>{''.join(body_rows)}</tbody>"
-            "</table></div>"
-        )
-
-    progress_trpg_html = progress_matrix("TRPG")
-    progress_madamis_html = progress_matrix("MADMIS")
+    progress_trpg_html = progress_scenario_list("TRPG")
+    progress_madamis_html = progress_scenario_list("MADMIS")
     progress_csrf = esc(get_csrf_token(request))
 
     scenario_detail_map = {}
@@ -3377,6 +3386,25 @@ async def calendar_page(request: Request, month: str = ""):
 
     scenario_detail_json = json.dumps(
         scenario_detail_map, ensure_ascii=False
+    ).replace("</", "<\\/")
+
+
+    progress_editor_map = {}
+    for scenario in progress_scenarios:
+        gt = str(scenario["game_type"])
+        name = str(scenario["scenario_name"])
+        progress_editor_map[f"{gt}\x1f{name}"] = [
+            {
+                "id": str(user["discord_id"]),
+                "name": str(user["display_name"]),
+                "status": progress_statuses.get(
+                    (gt, name, str(user["discord_id"])), ""
+                ),
+            }
+            for user in progress_users
+        ]
+    progress_editor_json = json.dumps(
+        progress_editor_map, ensure_ascii=False
     ).replace("</", "<\\/")
 
     return page(
@@ -3501,11 +3529,27 @@ async def calendar_page(request: Request, month: str = ""):
             </div>
 
             <p class='progress-hint'>
-              セルをタップ：－ → 緑○ → 青○ → －
+              シナリオを選ぶと、メンバーごとの通過状況を編集できます。
             </p>
 
             <button class='calendar-modal-close' type='button'
                     onclick='closeProgress()'>閉じる</button>
+          </div>
+        </div>
+
+        <div class='calendar-modal' id='progressScenarioModal'
+             onclick='closeProgressScenario(event)'>
+          <div class='calendar-modal-card progress-person-card'
+               onclick='event.stopPropagation()'>
+            <h3 class='calendar-modal-title' id='progressScenarioTitle'></h3>
+            <div class='progress-person-legend'>
+              <span class='passed'>緑○ 通過済み</span>
+              <span class='watched'>青○ 視聴済み</span>
+              <span>－ 未通過</span>
+            </div>
+            <div class='progress-person-list' id='progressPersonList'></div>
+            <button class='calendar-modal-close' type='button'
+                    onclick='closeProgressScenario()'>閉じる</button>
           </div>
         </div>
 
@@ -3760,41 +3804,81 @@ async def calendar_page(request: Request, month: str = ""):
           if(panel) panel.classList.add('active');
         }}
 
-        async function cycleProgress(btn){{
-          const current=btn.dataset.status||'';
-          const next=
-            current==='' ? 'PASSED' :
-            current==='PASSED' ? 'WATCHED' : '';
+        const progressEditorData={progress_editor_json};
+        let currentProgressScenarioKey='';
 
+        function openProgressScenario(el){{
+          const gt=el.dataset.gameType||'';
+          const name=el.dataset.scenario||'';
+          const key=gt+'\x1f'+name;
+          currentProgressScenarioKey=key;
+          document.getElementById('progressScenarioTitle').textContent=name;
+
+          const list=document.getElementById('progressPersonList');
+          list.innerHTML='';
+          (progressEditorData[key]||[]).forEach(person=>{{
+            const row=document.createElement('button');
+            row.type='button';
+            row.className='progress-person-row';
+            row.dataset.gameType=gt;
+            row.dataset.scenario=name;
+            row.dataset.userId=person.id;
+            row.dataset.status=person.status||'';
+
+            const n=document.createElement('span');
+            n.className='progress-person-name';
+            n.textContent=person.name;
+
+            const state=document.createElement('span');
+            state.className='progress-person-state';
+            applyProgressState(state,person.status||'');
+
+            row.appendChild(n);
+            row.appendChild(state);
+            row.onclick=()=>cycleProgressPerson(row,state);
+            list.appendChild(row);
+          }});
+
+          document.getElementById('progressScenarioModal').classList.add('open');
+        }}
+
+        function applyProgressState(el,status){{
+          el.className='progress-person-state';
+          if(status==='PASSED'){{
+            el.classList.add('passed'); el.textContent='○';
+          }}else if(status==='WATCHED'){{
+            el.classList.add('watched'); el.textContent='○';
+          }}else{{
+            el.textContent='－';
+          }}
+        }}
+
+        async function cycleProgressPerson(row,stateEl){{
+          const current=row.dataset.status||'';
+          const next=current===''?'PASSED':current==='PASSED'?'WATCHED':'';
           const fd=new FormData();
           fd.append('csrf_token','{progress_csrf}');
-          fd.append('game_type',btn.dataset.gameType||'');
-          fd.append('scenario_name',btn.dataset.scenario||'');
-          fd.append('discord_id',btn.dataset.userId||'');
+          fd.append('game_type',row.dataset.gameType||'');
+          fd.append('scenario_name',row.dataset.scenario||'');
+          fd.append('discord_id',row.dataset.userId||'');
           fd.append('status',next);
-
           try{{
-            const res=await fetch('/calendar/progress-set',{{
-              method:'POST',
-              body:fd
-            }});
+            const res=await fetch('/calendar/progress-set',{{method:'POST',body:fd}});
             if(!res.ok) throw new Error('save failed');
-
-            btn.dataset.status=next;
-            btn.classList.remove('passed','watched');
-
-            if(next==='PASSED'){{
-              btn.classList.add('passed');
-              btn.textContent='○';
-            }}else if(next==='WATCHED'){{
-              btn.classList.add('watched');
-              btn.textContent='○';
-            }}else{{
-              btn.textContent='－';
-            }}
+            row.dataset.status=next;
+            applyProgressState(stateEl,next);
+            const people=progressEditorData[currentProgressScenarioKey]||[];
+            const p=people.find(x=>String(x.id)===String(row.dataset.userId));
+            if(p) p.status=next;
           }}catch(e){{
             alert('更新に失敗しました。ページを再読み込みしてもう一度お試しください。');
           }}
+        }}
+
+        function closeProgressScenario(ev){{
+          if(ev && ev.target!==document.getElementById('progressScenarioModal')) return;
+          const modal=document.getElementById('progressScenarioModal');
+          if(modal) modal.classList.remove('open');
         }}
 
         function openScenarioDetail(el){{
@@ -3993,6 +4077,7 @@ async def calendar_page(request: Request, month: str = ""):
             closeStats();
             closeProgress();
             closeScenarioDetail();
+            closeProgressScenario();
           }}
         }});
         </script>
