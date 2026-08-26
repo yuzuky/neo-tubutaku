@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import calendar as pycalendar
 import html
 import json
 import os
@@ -24,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, db
+from database import DATABASE_PATH, archive_confirmed_session, calendar_entries, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -713,6 +714,36 @@ button,input,textarea,select{font:inherit}
 }
 .menu-card.schedule .menu-sub{color:rgba(255,255,255,.76)}
 .menu-card.schedule .chev{color:white}
+.menu-card.calendar{
+  background:linear-gradient(135deg,#17325c 0%,#2457a6 100%);
+  border-color:rgba(255,255,255,.13);
+}
+.menu-card.calendar .menu-sub{color:rgba(255,255,255,.76)}
+.menu-card.calendar .chev{color:white}
+.calendar-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0 18px}
+.calendar-head h2{margin:0;font-size:1.45rem}
+.calendar-nav{display:inline-flex;align-items:center;justify-content:center;min-width:42px;height:42px;border:1px solid var(--line);border-radius:12px;background:#101722;color:#fff;text-decoration:none;font-weight:900}
+.calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:6px}
+.calendar-weekday{text-align:center;color:#8f9aad;font-size:.76rem;font-weight:850;padding:4px 0 7px}
+.calendar-weekday.sun{color:#ef6a71}.calendar-weekday.sat{color:#6b91ff}
+.calendar-day{min-height:112px;border:1px solid #202b3a;background:#0d131c;border-radius:13px;padding:7px;overflow:hidden}
+.calendar-day.outside{opacity:.35}
+.calendar-date{font-size:.82rem;font-weight:900;color:#dfe6ef;margin-bottom:6px}
+.calendar-date.sun{color:#ef6a71}.calendar-date.sat{color:#6b91ff}
+.cal-session{margin-top:5px;padding-top:5px;border-top:1px solid rgba(255,255,255,.06)}
+.cal-title,.cal-person{display:block;border-radius:6px;padding:3px 5px;margin:3px 0;font-size:.68rem;font-weight:850;line-height:1.25;overflow:hidden;text-overflow:ellipsis}
+.cal-title.trpg{background:rgba(57,168,104,.18);color:#63d893}
+.cal-title.madamis{background:rgba(231,129,45,.18);color:#f19a4f}
+.cal-title.event{background:rgba(48,130,219,.18);color:#69a9f0}
+.cal-person.gm{background:rgba(160,92,217,.16);color:#c28aec}
+.cal-person.pl{background:rgba(207,165,42,.15);color:#e3bd52}
+.calendar-empty{text-align:center;color:var(--muted);padding:30px 10px}
+@media(max-width:620px){
+  .calendar-grid{gap:3px}
+  .calendar-day{min-height:88px;padding:4px;border-radius:9px}
+  .calendar-date{font-size:.72rem;margin-bottom:3px}
+  .cal-title,.cal-person{font-size:.56rem;padding:2px 3px;margin:2px 0}
+}
 .menu-icon{
   width:56px;height:56px;
   flex:0 0 56px;
@@ -2127,10 +2158,95 @@ async def home(request: Request):
     return page("ホーム",f"""
       <section class='hero'><div class='hero-kicker'>Discord × 日程調整</div><h1>○と△だけで、<br>もっと手軽に。</h1></section>
       <div class='menu-stack'>
+        <a class='menu-card calendar' href='/calendar'><div class='menu-icon'>🗓️</div><div><div class='menu-title'>カレンダー</div><div class='menu-sub'>成立卓の予定を一覧表示</div></div><div class='chev'>›</div></a>
         <a class='menu-card schedule' href='{schedule_href}'><div class='menu-icon'>📅</div><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ</div></div><div class='chev'>›</div></a>
         <a class='menu-card primary' href='{new_href}'><div class='menu-icon asset'><img src='{HOME_CREATE_IMAGE}' alt='卓を立てる'></div><div><div class='menu-title'>卓を立てる</div><div class='menu-sub'>投稿・チャンネル作成・日程調整</div></div><div class='chev'>›</div></a>
         <a class='menu-card' href='{join_href}'><div class='menu-icon asset'><img src='{HOME_JOIN_IMAGE}' alt='卓に参加する'></div><div><div class='menu-title'>卓に参加する</div><div class='menu-sub'>募集一覧と回答状況</div></div><div class='chev'>›</div></a>
       </div>""",request)
+
+
+@app.get("/calendar", response_class=HTMLResponse)
+async def calendar_page(request: Request, month: str = ""):
+    today = now_jst().date()
+    try:
+        if month and re.fullmatch(r"\d{4}-\d{2}", month):
+            year, mon = map(int, month.split("-"))
+            current = date(year, mon, 1)
+        else:
+            current = date(today.year, today.month, 1)
+    except ValueError:
+        current = date(today.year, today.month, 1)
+
+    prev_month = (current - timedelta(days=1)).replace(day=1)
+    if current.month == 12:
+        next_month = date(current.year + 1, 1, 1)
+    else:
+        next_month = date(current.year, current.month + 1, 1)
+
+    entries = calendar_entries(
+        current.isoformat(),
+        next_month.isoformat(),
+    )
+    by_date: dict[str, list[tuple]] = {}
+    for row, members in entries:
+        by_date.setdefault(str(row["event_date"]), []).append((row, members))
+
+    cal = pycalendar.Calendar(firstweekday=6)  # 日曜始まり
+    weeks = cal.monthdatescalendar(current.year, current.month)
+    weekday_names = ["日", "月", "火", "水", "木", "金", "土"]
+    weekday_html = "".join(
+        f"<div class='calendar-weekday {'sun' if i==0 else 'sat' if i==6 else ''}'>{name}</div>"
+        for i, name in enumerate(weekday_names)
+    )
+
+    day_cells = []
+    for week in weeks:
+        for d in week:
+            cls = "calendar-day" + (" outside" if d.month != current.month else "")
+            dow = (d.weekday() + 1) % 7
+            dcls = "sun" if dow == 0 else "sat" if dow == 6 else ""
+            blocks = []
+            if d.month == current.month:
+                for row, members in by_date.get(d.isoformat(), []):
+                    gt = str(row["game_type"] or "")
+                    type_cls = "trpg" if gt == "TRPG" else "madamis" if gt == "マダミス" else "event"
+                    if type_cls == "event":
+                        blocks.append(
+                            "<div class='cal-session'>"
+                            f"<span class='cal-title event' title='{esc(row['scenario_name'])}'>{esc(row['scenario_name'])}</span>"
+                            "</div>"
+                        )
+                    else:
+                        blocks.append(
+                            "<div class='cal-session'>"
+                            f"<span class='cal-title {type_cls}' title='{esc(row['scenario_name'])}'>{esc(row['scenario_name'])}</span>"
+                            f"<span class='cal-person gm' title='GM: {esc(row['gm_name'])}'>GM {esc(row['gm_name'])}</span>"
+                            + "".join(
+                                f"<span class='cal-person pl' title='PL: {esc(m['display_name'])}'>{esc(m['display_name'])}</span>"
+                                for m in members
+                            )
+                            + "</div>"
+                        )
+            day_cells.append(
+                f"<div class='{cls}'><div class='calendar-date {dcls}'>{d.day}</div>{''.join(blocks)}</div>"
+            )
+
+    return page(
+        "カレンダー",
+        f"""
+        <a class='back-link' href='/'>‹ 戻る</a>
+        <div class='calendar-head'>
+          <a class='calendar-nav' href='/calendar?month={prev_month.strftime('%Y-%m')}'>‹</a>
+          <h2>{current.year}年 {current.month}月</h2>
+          <a class='calendar-nav' href='/calendar?month={next_month.strftime('%Y-%m')}'>›</a>
+        </div>
+        <div class='calendar-grid'>
+          {weekday_html}
+          {''.join(day_cells)}
+        </div>
+        """,
+        request,
+    )
 
 
 @app.get("/join", response_class=HTMLResponse)
@@ -3861,6 +3977,22 @@ async def decide_submit(
                 "UPDATE recruitments SET status='CONFIRMED' WHERE id=?",
                 (rid,),
             )
+
+        # 成立卓を募集データとは別の永久履歴DBへ保存。
+        # recruitments/sessionsが90日後に削除されてもカレンダーには残る。
+        try:
+            archive_confirmed_session(
+                source_session_id=sid,
+                source_recruitment_id=rid,
+                game_type=r["game_type"],
+                scenario_name=r["scenario_name"],
+                event_date=event_date,
+                gm_discord_id=uid,
+                participant_ids=selected,
+                created_at=iso_now(),
+            )
+        except Exception as archive_error:
+            log_error(f"calendar_archive sid={sid}", archive_error)
 
         if ch:
             schedule_session_reminder(sid)
