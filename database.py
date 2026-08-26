@@ -155,6 +155,11 @@ def init_db():
                 FOREIGN KEY(calendar_session_id) REFERENCES calendar_sessions(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS calendar_deleted_sources (
+                source_session_id INTEGER PRIMARY KEY,
+                deleted_at TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS idx_calendar_sessions_event_date
                 ON calendar_sessions(event_date);
             """
@@ -236,7 +241,10 @@ def backfill_calendar_history():
                       r.scenario_name,
                       r.gm_discord_id
                FROM sessions s
-               JOIN recruitments r ON r.id=s.recruitment_id"""
+               JOIN recruitments r ON r.id=s.recruitment_id
+               LEFT JOIN calendar_deleted_sources cds
+                 ON cds.source_session_id=s.id
+               WHERE cds.source_session_id IS NULL"""
         ).fetchall()
 
         for row in rows:
@@ -295,6 +303,13 @@ def archive_confirmed_session(
 ) -> int:
     """成立卓をカレンダー/履歴用DBへ永久保存する。"""
     with db() as c:
+        deleted = c.execute(
+            "SELECT 1 FROM calendar_deleted_sources WHERE source_session_id=?",
+            (source_session_id,),
+        ).fetchone()
+        if deleted:
+            return 0
+
         visible = (
             bool(calendar_visible)
             if calendar_visible is not None
@@ -429,6 +444,8 @@ def calendar_manual_options():
             """SELECT discord_id,
                       COALESCE(display_name, username, discord_id) AS display_name
                FROM users
+               WHERE LOWER(COALESCE(display_name,'')) <> 'okuyama'
+                 AND LOWER(COALESCE(username,'')) <> 'okuyama'
                ORDER BY display_name"""
         ).fetchall()
     return scenarios, users
@@ -478,6 +495,100 @@ def add_manual_calendar_session(
         return cal_id
 
 
+def calendar_session_detail(calendar_session_id: int):
+    with db() as c:
+        row = c.execute(
+            """SELECT cs.*,
+                      COALESCE(u.display_name,u.username,cs.gm_discord_id) AS gm_name
+               FROM calendar_sessions cs
+               LEFT JOIN users u ON u.discord_id=cs.gm_discord_id
+               WHERE cs.id=?""",
+            (calendar_session_id,),
+        ).fetchone()
+        if not row:
+            return None, []
+        members = c.execute(
+            """SELECT csm.discord_id,
+                      COALESCE(u.display_name,u.username,csm.discord_id) AS display_name
+               FROM calendar_session_members csm
+               LEFT JOIN users u ON u.discord_id=csm.discord_id
+               WHERE csm.calendar_session_id=?
+               ORDER BY display_name""",
+            (calendar_session_id,),
+        ).fetchall()
+    return row, members
+
+
+def update_calendar_session_members(calendar_session_id: int, participant_ids: list[str]):
+    with db() as c:
+        row = c.execute(
+            "SELECT gm_discord_id, game_type FROM calendar_sessions WHERE id=?",
+            (calendar_session_id,),
+        ).fetchone()
+        if not row:
+            return False
+        if str(row["game_type"]) == "EVENT":
+            return False
+
+        c.execute(
+            "DELETE FROM calendar_session_members WHERE calendar_session_id=?",
+            (calendar_session_id,),
+        )
+        cleaned = [
+            str(uid)
+            for uid in dict.fromkeys(participant_ids)
+            if uid and str(uid) != str(row["gm_discord_id"])
+        ]
+        if cleaned:
+            c.executemany(
+                """INSERT OR IGNORE INTO calendar_session_members(
+                       calendar_session_id,discord_id
+                   ) VALUES(?,?)""",
+                [(calendar_session_id, uid) for uid in cleaned],
+            )
+    return True
+
+
+def hide_calendar_session(calendar_session_id: int):
+    with db() as c:
+        cur = c.execute(
+            "UPDATE calendar_sessions SET calendar_visible=0 WHERE id=?",
+            (calendar_session_id,),
+        )
+    return cur.rowcount > 0
+
+
+def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: str):
+    """履歴を削除。source sessionが残っていてもbackfillで復活させない。"""
+    with db() as c:
+        row = c.execute(
+            "SELECT source_session_id FROM calendar_sessions WHERE id=?",
+            (calendar_session_id,),
+        ).fetchone()
+        if not row:
+            return False
+
+        source_session_id = row["source_session_id"]
+        if source_session_id is not None:
+            c.execute(
+                """INSERT INTO calendar_deleted_sources(source_session_id,deleted_at)
+                   VALUES(?,?)
+                   ON CONFLICT(source_session_id) DO UPDATE SET
+                     deleted_at=excluded.deleted_at""",
+                (int(source_session_id), deleted_at),
+            )
+
+        c.execute(
+            "DELETE FROM calendar_session_members WHERE calendar_session_id=?",
+            (calendar_session_id,),
+        )
+        c.execute(
+            "DELETE FROM calendar_sessions WHERE id=?",
+            (calendar_session_id,),
+        )
+    return True
+
+
 def calendar_stats(period_start: str | None = None, period_end: str | None = None):
     """指定期間（未指定なら累計）の卓数・種類別件数・GM/PL Top3等。"""
     with db() as c:
@@ -510,7 +621,7 @@ def calendar_stats(period_start: str | None = None, period_end: str | None = Non
                        COUNT(*) AS n
                 FROM calendar_sessions cs
                 LEFT JOIN users u ON u.discord_id=cs.gm_discord_id
-                {where}
+                {'WHERE' if not where else where + ' AND'} cs.game_type<>'EVENT'
                 GROUP BY cs.gm_discord_id
                 ORDER BY n DESC, display_name
                 LIMIT 3""",
@@ -530,7 +641,7 @@ def calendar_stats(period_start: str | None = None, period_end: str | None = Non
                 FROM calendar_session_members csm
                 JOIN calendar_sessions cs ON cs.id=csm.calendar_session_id
                 LEFT JOIN users u ON u.discord_id=csm.discord_id
-                {pl_where}
+                {'WHERE' if not pl_where else pl_where + ' AND'} cs.game_type<>'EVENT'
                 GROUP BY csm.discord_id
                 ORDER BY n DESC, display_name
                 LIMIT 3""",
