@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, archive_confirmed_session, calendar_conflict_dates, calendar_entries, db
+from database import DATABASE_PATH, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -790,14 +790,14 @@ button,input,textarea,select{font:inherit}
   border-radius:5px;
   padding:3px 5px;
   margin:2px 0;
-  font-size:.68rem;
+  font-size:.62rem;
   font-weight:850;
   line-height:1.25;
 
-  /* 折り返し禁止＋はみ出しは … */
+  /* 折り返し禁止。狭いセルでは末尾をそのまま切る */
   white-space:nowrap;
   overflow:hidden;
-  text-overflow:ellipsis;
+  text-overflow:clip;
 }
 .cal-title.trpg{background:rgba(57,168,104,.18);color:#63d893}
 .cal-title.madamis{background:rgba(231,129,45,.18);color:#f19a4f}
@@ -832,7 +832,7 @@ button,input,textarea,select{font:inherit}
     padding-top:3px;
   }
   .cal-title,.cal-person{
-    font-size:.54rem;
+    font-size:.49rem;
     padding:2px 3px;
     margin:2px 0;
     border-radius:4px;
@@ -841,7 +841,91 @@ button,input,textarea,select{font:inherit}
 
 @media(max-width:390px){
   .calendar-day{height:110px}
-  .cal-title,.cal-person{font-size:.50rem;padding:2px}
+  .cal-title,.cal-person{font-size:.46rem;padding:2px}
+}
+
+.cal-session{
+  cursor:pointer;
+}
+.cal-session:active{
+  opacity:.78;
+}
+
+/* カレンダー予定の詳細ポップアップ */
+.calendar-modal{
+  position:fixed;
+  inset:0;
+  display:none;
+  align-items:center;
+  justify-content:center;
+  padding:20px;
+  background:rgba(0,0,0,.68);
+  z-index:9999;
+}
+.calendar-modal.open{display:flex}
+.calendar-modal-card{
+  width:min(440px,100%);
+  max-height:78vh;
+  overflow:auto;
+  border:1px solid #334155;
+  border-radius:20px;
+  background:#111925;
+  box-shadow:0 24px 70px rgba(0,0,0,.45);
+  padding:22px;
+}
+.calendar-modal-title{
+  margin:0 0 14px;
+  font-size:1.25rem;
+  font-weight:950;
+  line-height:1.45;
+  overflow-wrap:anywhere;
+}
+.calendar-modal-meta{
+  display:grid;
+  gap:10px;
+  color:#c9d2df;
+}
+.calendar-modal-row{
+  padding:10px 12px;
+  border-radius:12px;
+  background:#0b121c;
+  border:1px solid #263244;
+}
+.calendar-modal-label{
+  display:block;
+  margin-bottom:4px;
+  color:#8190a4;
+  font-size:.72rem;
+  font-weight:850;
+}
+.calendar-modal-members{
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+}
+.calendar-modal-member{
+  display:inline-block;
+  padding:4px 8px;
+  border-radius:7px;
+  background:rgba(207,165,42,.15);
+  color:#e3bd52;
+  font-size:.8rem;
+  font-weight:850;
+}
+.calendar-modal-gm{
+  color:#c28aec;
+  font-weight:900;
+}
+.calendar-modal-close{
+  width:100%;
+  margin-top:16px;
+  padding:11px;
+  border:1px solid #334155;
+  border-radius:12px;
+  background:#182231;
+  color:#fff;
+  font-weight:900;
+  cursor:pointer;
 }
 .menu-icon{
   width:56px;height:56px;
@@ -1249,22 +1333,35 @@ hr{border:0;border-top:1px solid var(--line);margin:24px 0}
   overflow:hidden;
 }
 .calendar-conflict-badge{
-  position:absolute;
-  top:8px;
-  right:8px;
-  width:22px;
-  height:22px;
-  border-radius:50%;
-  display:flex;
+  display:inline-flex;
   align-items:center;
   justify-content:center;
+  width:1.15em;
+  height:1.15em;
+  border-radius:50%;
   background:rgba(248,113,113,.18);
   border:1px solid rgba(248,113,113,.38);
   color:#ef4444;
-  font-size:.82rem;
+  font-size:1em;
   font-weight:1000;
   line-height:1;
-  z-index:2;
+  flex:0 0 auto;
+}
+.answer-member-result{
+  display:inline-flex;
+  align-items:center;
+  gap:4px;
+  flex:0 0 auto;
+}
+.answer-day-state-wrap{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+  margin:11px 0 10px;
+}
+.answer-day-state-wrap .answer-day-state{
+  margin:0;
 }
 .conflict-legend-mark{
   display:inline-flex;
@@ -2339,18 +2436,34 @@ async def calendar_page(request: Request, month: str = ""):
                     gt = str(row["game_type"] or "")
                     type_cls = "trpg" if gt == "TRPG" else "madamis" if gt == "マダミス" else "event"
                     if type_cls == "event":
+                        title_text = str(row["scenario_name"] or "")
+                        time_text = str(row["start_time"] or "未定")
                         blocks.append(
-                            "<div class='cal-session'>"
-                            f"<span class='cal-title event' title='{esc(row['scenario_name'])}'>{esc(row['scenario_name'])}</span>"
+                            "<div class='cal-session' "
+                            f"data-title='{esc(title_text)}' "
+                            f"data-time='{esc(time_text)}' "
+                            "data-gm='' data-members='' data-event='1' "
+                            "onclick='openCalendarDetail(this)'>"
+                            f"<span class='cal-title event'>{esc(title_text)}</span>"
                             "</div>"
                         )
                     else:
+                        title_text = str(row["scenario_name"] or "")
+                        time_text = str(row["start_time"] or "未定")
+                        gm_text = str(row["gm_name"] or "")
+                        member_text = " / ".join(str(m["display_name"] or "") for m in members)
                         blocks.append(
-                            "<div class='cal-session'>"
-                            f"<span class='cal-title {type_cls}' title='{esc(row['scenario_name'])}'>{esc(row['scenario_name'])}</span>"
-                            f"<span class='cal-person gm' title='GM: {esc(row['gm_name'])}'>GM {esc(row['gm_name'])}</span>"
+                            "<div class='cal-session' "
+                            f"data-title='{esc(title_text)}' "
+                            f"data-time='{esc(time_text)}' "
+                            f"data-gm='{esc(gm_text)}' "
+                            f"data-members='{esc(member_text)}' "
+                            "data-event='0' "
+                            "onclick='openCalendarDetail(this)'>"
+                            f"<span class='cal-title {type_cls}'>{esc(title_text)}</span>"
+                            f"<span class='cal-person gm'>{esc(gm_text)}</span>"
                             + "".join(
-                                f"<span class='cal-person pl' title='PL: {esc(m['display_name'])}'>{esc(m['display_name'])}</span>"
+                                f"<span class='cal-person pl'>{esc(m['display_name'])}</span>"
                                 for m in members
                             )
                             + "</div>"
@@ -2372,6 +2485,71 @@ async def calendar_page(request: Request, month: str = ""):
           {weekday_html}
           {''.join(day_cells)}
         </div>
+
+        <div class='calendar-modal' id='calendarDetailModal' onclick='closeCalendarDetail(event)'>
+          <div class='calendar-modal-card' onclick='event.stopPropagation()'>
+            <h3 class='calendar-modal-title' id='calendarDetailTitle'></h3>
+            <div class='calendar-modal-meta'>
+              <div class='calendar-modal-row'>
+                <span class='calendar-modal-label'>開催時間</span>
+                <span id='calendarDetailTime'></span>
+              </div>
+              <div class='calendar-modal-row' id='calendarDetailGmRow'>
+                <span class='calendar-modal-label'>GM</span>
+                <span class='calendar-modal-gm' id='calendarDetailGm'></span>
+              </div>
+              <div class='calendar-modal-row' id='calendarDetailMembersRow'>
+                <span class='calendar-modal-label'>PL</span>
+                <div class='calendar-modal-members' id='calendarDetailMembers'></div>
+              </div>
+            </div>
+            <button class='calendar-modal-close' type='button' onclick='closeCalendarDetail()'>閉じる</button>
+          </div>
+        </div>
+
+        <script>
+        function openCalendarDetail(el){{
+          const modal=document.getElementById('calendarDetailModal');
+          const isEvent=el.dataset.event==='1';
+          document.getElementById('calendarDetailTitle').textContent=el.dataset.title||'';
+          document.getElementById('calendarDetailTime').textContent=
+            (el.dataset.time && el.dataset.time!=='未定') ? el.dataset.time : '未定';
+
+          const gmRow=document.getElementById('calendarDetailGmRow');
+          const membersRow=document.getElementById('calendarDetailMembersRow');
+
+          if(isEvent){{
+            gmRow.style.display='none';
+            membersRow.style.display='none';
+          }}else{{
+            gmRow.style.display='block';
+            membersRow.style.display='block';
+            document.getElementById('calendarDetailGm').textContent=el.dataset.gm||'';
+            const box=document.getElementById('calendarDetailMembers');
+            box.innerHTML='';
+            (el.dataset.members||'').split(' / ').filter(Boolean).forEach(name=>{{
+              const span=document.createElement('span');
+              span.className='calendar-modal-member';
+              span.textContent=name;
+              box.appendChild(span);
+            }});
+          }}
+
+          modal.classList.add('open');
+          document.body.style.overflow='hidden';
+        }}
+
+        function closeCalendarDetail(ev){{
+          if(ev && ev.target!==document.getElementById('calendarDetailModal')) return;
+          const modal=document.getElementById('calendarDetailModal');
+          if(modal) modal.classList.remove('open');
+          document.body.style.overflow='';
+        }}
+
+        document.addEventListener('keydown',e=>{{
+          if(e.key==='Escape') closeCalendarDetail();
+        }});
+        </script>
         """,
         request,
     )
@@ -2547,11 +2725,10 @@ async def simple_schedule_form(request: Request):
               </div>
             </label>
 
-            <label class='checkbox-row' style='margin-top:12px'>
+            <label class='checkbox-row' style='margin-top:10px;margin-bottom:8px'>
               <input type='checkbox' name='calendar_visible' value='1'>
               カレンダーに掲載する
             </label>
-            <p class='muted small' style='margin-top:6px'>掲載した場合、カレンダーにはイベント名のみ表示されます。</p>
 
             <div class='field-row'>
               <label>
@@ -3470,7 +3647,10 @@ async def recruitment_page(rid: int, request: Request):
     weekday_jp = ["月","火","水","木","金","土","日"]
 
     rows = candidate_rows(rid)
-    conflict_dates = calendar_conflict_dates(uid, dates) if can_answer else set()
+    # 回答状況に表示される各参加者について、その日に別の成立卓があるかを取得。
+    # 自分自身の大きな○/△にも同じ警告を出せるようuidも含める。
+    conflict_users = list(dict.fromkeys([*pl_uids, uid]))
+    user_conflicts = calendar_conflicts_for_users(conflict_users, dates)
     available = any(len(x["yes"]) >= int(r["min_players"]) for x in rows)
     all_answered = simple_schedule_all_answered(rid) if is_simple_schedule(r) else False
 
@@ -3510,27 +3690,38 @@ async def recruitment_page(rid: int, request: Request):
                 mark = "-"
                 mcls = "no"
 
+            conflict_mark = (
+                "<span class='calendar-conflict-badge' "
+                "title='この日は別の開催予定があります'>!</span>"
+                if (str(puid), ds) in user_conflicts else ""
+            )
+
             member_lines.append(
                 f"<div class='answer-member'>"
                 f"<span class='answer-member-name'>{esc(user_display(puid))}</span>"
+                f"<span class='answer-member-result'>"
+                f"{conflict_mark}"
                 f"<span class='answer-member-symbol {mcls}'>{mark}</span>"
+                f"</span>"
                 f"</div>"
             )
 
         onclick = " onclick='togglePL(this)'" if can_answer else ""
         clickable = " clickable" if can_answer else ""
 
-        conflict_badge = (
+        own_conflict_badge = (
             "<span class='calendar-conflict-badge' "
-            "title='この日はすでに開催予定があります'>!</span>"
-            if ds in conflict_dates else ""
+            "title='この日は別の開催予定があります'>!</span>"
+            if can_answer and (uid, ds) in user_conflicts else ""
         )
 
         cards.append(
             f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
-            f"{conflict_badge}"
             f"<div class='answer-day-head'>{day_label}</div>"
+            f"<div class='answer-day-state-wrap'>"
+            f"{own_conflict_badge}"
             f"<div class='answer-day-state'>{symbol}</div>"
+            f"</div>"
             f"<div class='answer-members'>"
             f"{''.join(member_lines) if member_lines else '<div class=\"muted small\">未回答</div>'}"
             f"</div>"
@@ -4131,6 +4322,7 @@ async def decide_submit(
                 game_type=r["game_type"],
                 scenario_name=r["scenario_name"],
                 event_date=event_date,
+                start_time=r["start_time"],
                 gm_discord_id=uid,
                 participant_ids=selected,
                 created_at=iso_now(),
