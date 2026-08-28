@@ -1162,7 +1162,7 @@ FIXED_ACHIEVEMENTS = [
     {"key":"trpg_pl_250","name":"這い寄る混沌","rarity":"black","secret":1,"kind":"trpg_pl","target":250,"condition":"TRPGに250卓参加する"},
     {"key":"madamis_pl_250","name":"マダミスの家畜","rarity":"black","secret":1,"kind":"madamis_pl","target":250,"condition":"マダミスに250卓参加する"},
 
-    {"key":"pair_25","name":"ズッ卓","rarity":"bronze","secret":0,"kind":"pair","target":25,"condition":"同じ人と25卓同卓する"},
+    {"key":"pair_25","name":"ズッ友","rarity":"bronze","secret":0,"kind":"pair","target":25,"condition":"同じ人と25卓同卓する"},
     {"key":"pair_50","name":"腐れ縁","rarity":"silver","secret":0,"kind":"pair","target":50,"condition":"同じ人と50卓同卓する"},
     {"key":"pair_100","name":"運命共同体","rarity":"gold","secret":0,"kind":"pair","target":100,"condition":"同じ人と100卓同卓する"},
     {"key":"pair_250","name":"生き別れの兄弟","rarity":"black","secret":1,"kind":"pair_dynamic","target":250,"condition":"同じ人と250卓同卓する"},
