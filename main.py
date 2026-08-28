@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_data, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, RARITY_LABELS, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_data, refresh_profile_caches, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3253,6 +3253,8 @@ async def run_achievement_check(run_date=None, notify=True):
     if achievement_run_done(d):
         return []
     now_text = iso_now()
+    # v68: 重い履歴集計は20時処理に集約。プロフィール/称号画面は翌20時までキャッシュ表示。
+    refresh_profile_caches(d, now_text)
     new_rows = evaluate_achievements(d, now_text)
     mark_achievement_run(d, now_text)
     if notify:
@@ -3266,11 +3268,18 @@ async def bootstrap_achievements():
     today = now.date()
     if not achievement_bootstrapped():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
-        evaluate_achievements(as_of.isoformat(), iso_now())
+        stamp = iso_now()
+        # 初回導入時だけ現在の履歴からキャッシュを作成。以後の通常更新は毎日20時のみ。
+        refresh_profile_caches(as_of.isoformat(), stamp)
+        evaluate_achievements(as_of.isoformat(), stamp)
         mark_achievement_bootstrapped()
         if now.time() >= time(20,0):
-            mark_achievement_run(today.isoformat(), iso_now())
+            mark_achievement_run(today.isoformat(), stamp)
         return
+    # v68へ初めて更新した既存環境では、表示が空にならないよう一度だけキャッシュを初期化。
+    if not profile_cache_initialized():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        refresh_profile_caches(as_of.isoformat(), iso_now())
     # 20時にBotが落ちていた場合は、その日の起動時に1回だけ追いつく。
     if now.time() >= time(20,0) and not achievement_run_done(today.isoformat()):
         await run_achievement_check(today.isoformat(), notify=True)
