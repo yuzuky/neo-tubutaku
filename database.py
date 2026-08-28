@@ -653,16 +653,32 @@ def hide_calendar_session(calendar_session_id: int):
 
 
 def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: str):
-    """履歴を削除。source sessionが残っていてもbackfillで復活させない。"""
+    """
+    カレンダー履歴を完全削除する。
+
+    - source session が残っていても backfill で復活しないよう tombstone を残す。
+    - 削除卓だけを根拠に自動付与されていた PASSED は、同じ人・同じシナリオの
+      別カレンダー卓が残っていない場合に scenario_progress から除外する。
+    - calendar_stats は calendar_sessions を直接集計するため、削除後は累計からも外れる。
+    """
     with db() as c:
         row = c.execute(
-            "SELECT source_session_id FROM calendar_sessions WHERE id=?",
+            """SELECT source_session_id, game_type, scenario_name
+               FROM calendar_sessions WHERE id=?""",
             (calendar_session_id,),
         ).fetchone()
         if not row:
             return False
 
         source_session_id = row["source_session_id"]
+        gt = normalize_progress_game_type(row["game_type"])
+        scenario_name = str(row["scenario_name"] or "").strip()
+        member_rows = c.execute(
+            "SELECT discord_id FROM calendar_session_members WHERE calendar_session_id=?",
+            (calendar_session_id,),
+        ).fetchall()
+        deleted_member_ids = [str(x["discord_id"]) for x in member_rows if x["discord_id"]]
+
         if source_session_id is not None:
             c.execute(
                 """INSERT INTO calendar_deleted_sources(source_session_id,deleted_at)
@@ -677,9 +693,36 @@ def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: st
             (calendar_session_id,),
         )
         c.execute(
+            "DELETE FROM calendar_guest_members WHERE calendar_session_id=?",
+            (calendar_session_id,),
+        )
+        c.execute(
             "DELETE FROM calendar_sessions WHERE id=?",
             (calendar_session_id,),
         )
+
+        # カレンダー成立卓から自動反映された「通過済み」を掃除する。
+        # 同じ人が同じシナリオを別日に遊んだ履歴が残っているなら維持する。
+        if gt in {"TRPG", "MADMIS"} and scenario_name:
+            for uid in deleted_member_ids:
+                still_has_session = c.execute(
+                    """SELECT 1
+                       FROM calendar_sessions cs
+                       JOIN calendar_session_members csm
+                         ON csm.calendar_session_id=cs.id
+                       WHERE (CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END)=?
+                         AND cs.scenario_name=?
+                         AND csm.discord_id=?
+                       LIMIT 1""",
+                    (gt, scenario_name, uid),
+                ).fetchone()
+                if not still_has_session:
+                    c.execute(
+                        """DELETE FROM scenario_progress
+                           WHERE game_type=? AND scenario_name=? AND discord_id=?
+                             AND status='PASSED'""",
+                        (gt, scenario_name, uid),
+                    )
     return True
 
 
