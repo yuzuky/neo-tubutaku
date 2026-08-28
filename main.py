@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_data, refresh_profile_caches, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, RARITY_LABELS, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3253,8 +3253,8 @@ async def run_achievement_check(run_date=None, notify=True):
     if achievement_run_done(d):
         return []
     now_text = iso_now()
-    # v68: 重い履歴集計は20時処理に集約。プロフィール/称号画面は翌20時までキャッシュ表示。
-    refresh_profile_caches(d, now_text)
+    # v69: 20時は「当日の未処理卓」だけを差分加算。過去履歴の全再集計はしない。
+    apply_profile_daily_delta(d, now_text)
     new_rows = evaluate_achievements(d, now_text)
     mark_achievement_run(d, now_text)
     if notify:
@@ -3276,10 +3276,16 @@ async def bootstrap_achievements():
         if now.time() >= time(20,0):
             mark_achievement_run(today.isoformat(), stamp)
         return
-    # v68へ初めて更新した既存環境では、表示が空にならないよう一度だけキャッシュを初期化。
-    if not profile_cache_initialized():
+    # v69初回だけ、既存履歴から差分更新の基準を1度作る。以後は全履歴再集計しない。
+    if not profile_cache_initialized() or not profile_delta_initialized():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         refresh_profile_caches(as_of.isoformat(), iso_now())
+    # v70初回だけシナリオ別GM回数を既存履歴から作る。以後は20時に当日分だけ+1。
+    if not scenario_gm_counter_initialized():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        ensure_scenario_gm_counter_initialized(as_of.isoformat(), iso_now())
+        # 既に5回以上回しているシナリオも、移行時は通知を飛ばさず解除だけ反映。
+        evaluate_achievements(as_of.isoformat(), iso_now())
     # 20時にBotが落ちていた場合は、その日の起動時に1回だけ追いつく。
     if now.time() >= time(20,0) and not achievement_run_done(today.isoformat()):
         await run_achievement_check(today.isoformat(), notify=True)
@@ -3292,7 +3298,7 @@ async def deadline_scheduler():
     except Exception as e:
         log_error("deadline_scheduler", e)
 
-    # v65: 当日20時時点のカレンダーを基準に新規称号を判定
+    # v69: 当日20時に当日分だけ差分反映して称号を判定
     try:
         await run_achievement_check(now_jst().date().isoformat(), notify=True)
     except Exception as e:
@@ -3648,7 +3654,12 @@ async def calendar_page(request: Request, month: str = ""):
                             f"data-members='{esc(member_text)}' data-memberids='{esc(member_ids)}' data-memberdetail='{esc(json.dumps(member_detail, ensure_ascii=False))}' data-guestmembers='{esc(guest_members)}' data-game-type='EVENT' data-event='1' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title event'>{esc(title_text)}</span>"
-                            "</div>"
+                            + (f"<span class='cal-person gm'>{esc(gm_text)}</span>" if gm_text else "")
+                            + "".join(
+                                f"<span class='cal-person pl'>{esc(m['display_name'])}</span>"
+                                for m in members[:max(0, 5 - (1 if gm_text else 0))]
+                            )
+                            + "</div>"
                         )
                     else:
                         gm_text = str(row["gm_name"] or "")
@@ -3675,7 +3686,7 @@ async def calendar_page(request: Request, month: str = ""):
                             "data-event='0' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title {type_cls}'>{esc(title_text)}</span>"
-                            f"<span class='cal-person gm'>{esc(gm_text)}</span>"
+                            + (f"<span class='cal-person gm'>{esc(gm_text)}</span>" if gm_text else "")
                             + "".join(
                                 f"<span class='cal-person pl'>{esc(m['display_name'])}</span>"
                                 for m in members[:4]
@@ -3964,6 +3975,9 @@ async def calendar_page(request: Request, month: str = ""):
           .profile-circle {{ color:#aab6c7; text-decoration:none; font-size:1.05rem; }}
           .calendar-person-link {{ color:inherit; text-decoration:none; display:inline-flex; flex-direction:column; gap:1px; }}
           .calendar-person-link:hover {{ text-decoration:none; }}
+          .calendar-modal-name {{ color:inherit; font-size:.8rem; font-weight:900; line-height:1.25; white-space:nowrap; }}
+          a.calendar-modal-name {{ text-decoration:none; }}
+          a.calendar-modal-name:hover {{ text-decoration:underline; }}
           .calendar-person-title {{ --frame:#9ca8b8; display:inline-flex; align-items:center; justify-content:center; position:relative; color:#e7ebf1; font-size:.58rem; font-weight:850; margin-top:4px; padding:2px 13px; min-height:19px; border:1px solid var(--frame); border-radius:6px; background:rgba(12,17,24,.84); line-height:1.1; }}
           .calendar-person-title::before,.calendar-person-title::after {{ content:'◆'; position:absolute; top:50%; transform:translateY(-50%) rotate(45deg); font-size:.36rem; color:var(--frame); }}
           .calendar-person-title::before {{ left:4px; }} .calendar-person-title::after {{ right:4px; }}
@@ -4392,36 +4406,59 @@ async def calendar_page(request: Request, month: str = ""):
             gmBox.innerHTML='';
             const gmId=el.dataset.gmid||'';
             const gmName=el.dataset.gm||'';
-            const gmWrap=document.createElement(gmId?'a':'span');
-            gmWrap.className='calendar-person-link';
-            if(gmId) gmWrap.href='/profile/'+encodeURIComponent(gmId);
-            const gmNameEl=document.createElement('span'); gmNameEl.textContent=gmName; gmWrap.appendChild(gmNameEl);
-            if(el.dataset.gmtitle){{
-              const t=document.createElement('span'); t.className='calendar-person-title rarity-'+(el.dataset.gmtitlerarity||'bronze'); t.textContent=el.dataset.gmtitle;
-              if(el.dataset.gmtitledetail){{t.classList.add('clickable');t.title=el.dataset.gmtitledetail;t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(el.dataset.gmtitledetail);}};}}
-              gmWrap.appendChild(t);
+            // GMなしの卓では空の紫タグを出さない。
+            if(gmName || gmId){{
+              gmRow.style.display='block';
+              const gmNameEl=document.createElement(gmId?'a':'span');
+              gmNameEl.className='calendar-modal-name';
+              if(gmId) gmNameEl.href='/profile/'+encodeURIComponent(gmId);
+              gmNameEl.textContent=gmName || 'GM';
+              gmBox.appendChild(gmNameEl);
+              if(el.dataset.gmtitle){{
+                const t=document.createElement('span');
+                t.className='calendar-person-title rarity-'+(el.dataset.gmtitlerarity||'bronze');
+                t.textContent=el.dataset.gmtitle;
+                if(el.dataset.gmtitledetail){{
+                  t.classList.add('clickable'); t.title=el.dataset.gmtitledetail;
+                  t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(el.dataset.gmtitledetail);}};
+                }}
+                gmBox.appendChild(t);
+              }}
+            }}else{{
+              gmRow.style.display='none';
             }}
-            gmBox.appendChild(gmWrap);
 
             let memberDetail=[];
             try{{memberDetail=JSON.parse(el.dataset.memberdetail||'[]');}}catch(e){{memberDetail=[];}}
+            const fallbackNames=(el.dataset.members||'').split(' / ').filter(Boolean);
             if(!memberDetail.length){{
-              memberDetail=(el.dataset.members||'').split(' / ').filter(Boolean).map(name=>({{name,id:'',guest:true,title:'',detail:'',rarity:''}}));
+              memberDetail=fallbackNames.map(name=>({{name,id:'',guest:true,title:'',detail:'',rarity:''}}));
+            }}else{{
+              // 古い/不完全な詳細データでも、data-members の表示名を必ず使えるよう補完する。
+              memberDetail=memberDetail.map((person,i)=>({{...person,name:(person && person.name) || fallbackNames[i] || ''}}));
             }}
             const box=document.getElementById('calendarDetailMembers');
             box.innerHTML='';
             memberDetail.forEach(person=>{{
-                const chip=document.createElement('span'); chip.className='calendar-modal-member';
-                const wrap=document.createElement(person.id && !person.guest?'a':'span'); wrap.className='calendar-person-link';
-                if(person.id && !person.guest) wrap.href='/profile/'+encodeURIComponent(person.id);
-                const name=document.createElement('span'); name.textContent=person.name||''; wrap.appendChild(name);
-                if(person.title){{
-                  const t=document.createElement('span'); t.className='calendar-person-title rarity-'+(person.rarity||'bronze'); t.textContent=person.title;
-                  if(person.detail){{t.classList.add('clickable');t.title=person.detail;t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(person.detail);}};}}
-                  wrap.appendChild(t);
+              const chip=document.createElement('span');
+              chip.className='calendar-modal-member';
+              const nameEl=document.createElement(person.id && !person.guest?'a':'span');
+              nameEl.className='calendar-modal-name';
+              if(person.id && !person.guest) nameEl.href='/profile/'+encodeURIComponent(person.id);
+              nameEl.textContent=person.name||'';
+              chip.appendChild(nameEl);
+              if(person.title){{
+                const t=document.createElement('span');
+                t.className='calendar-person-title rarity-'+(person.rarity||'bronze');
+                t.textContent=person.title;
+                if(person.detail){{
+                  t.classList.add('clickable'); t.title=person.detail;
+                  t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(person.detail);}};
                 }}
-                chip.appendChild(wrap); box.appendChild(chip);
-              }});
+                chip.appendChild(t);
+              }}
+              box.appendChild(chip);
+            }});
 
             document.querySelectorAll(
               "#calendarEditPlList input[name='participant_ids']"
@@ -4596,12 +4633,19 @@ async def calendar_edit_details(
     participant_ids: list[str] = Form(default=[]), guest_participant_names: str = Form(""),
 ):
     require_login(request); await require_csrf(request)
+    detail_before, _ = calendar_session_detail(calendar_session_id)
     if not scenario_name.strip(): raise HTTPException(400, "シナリオ名 / イベント名を入力してください")
     if game_type not in {"TRPG", "MADMIS", "EVENT"}: raise HTTPException(400, "種別が不正です")
     if not update_calendar_session_details(calendar_session_id, scenario_name, gm_discord_id,
         [str(x) for x in participant_ids], gm_guest_name,
         [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type):
         raise HTTPException(404, "予定が見つかりません")
+    if detail_before and detail_before["event_date"]:
+        try:
+            d = date.fromisoformat(str(detail_before["event_date"]))
+            return RedirectResponse(f"/calendar?month={d.strftime('%Y-%m')}", status_code=303)
+        except ValueError:
+            pass
     return RedirectResponse("/calendar", status_code=303)
 
 @app.post("/calendar/hide")
@@ -4611,10 +4655,17 @@ async def calendar_hide(
 ):
     require_login(request)
     await require_csrf(request)
+    detail_before, _ = calendar_session_detail(calendar_session_id)
 
     if not hide_calendar_session(calendar_session_id):
         raise HTTPException(404, "予定が見つかりません")
 
+    if detail_before and detail_before["event_date"]:
+        try:
+            d = date.fromisoformat(str(detail_before["event_date"]))
+            return RedirectResponse(f"/calendar?month={d.strftime('%Y-%m')}", status_code=303)
+        except ValueError:
+            pass
     return RedirectResponse("/calendar", status_code=303)
 
 
@@ -4625,6 +4676,7 @@ async def calendar_delete(
 ):
     require_login(request)
     await require_csrf(request)
+    detail_before, _ = calendar_session_detail(calendar_session_id)
 
     if not permanently_delete_calendar_session(
         calendar_session_id,
@@ -4632,6 +4684,12 @@ async def calendar_delete(
     ):
         raise HTTPException(404, "予定が見つかりません")
 
+    if detail_before and detail_before["event_date"]:
+        try:
+            d = date.fromisoformat(str(detail_before["event_date"]))
+            return RedirectResponse(f"/calendar?month={d.strftime('%Y-%m')}", status_code=303)
+        except ValueError:
+            pass
     return RedirectResponse("/calendar", status_code=303)
 
 
