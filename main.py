@@ -3558,16 +3558,8 @@ async def calendar_page(request: Request, month: str = ""):
         yearly_stats.append(ys)
 
     progress_users, progress_scenarios, progress_statuses = scenario_progress_data()
-    title_map = equipped_titles_map()
     viewer_id = str(request.session.get("user_id") or "")
     profile_href = f"/profile/{viewer_id}" if viewer_id else "/login?next=/calendar"
-
-    def title_payload(uid):
-        t = title_map.get(str(uid or ""))
-        if not t:
-            return {"name":"", "detail":"", "rarity":""}
-        detail = str(t.get("context_label") or "") if str(t.get("achievement_key")) == "pair_250" else ""
-        return {"name":str(t.get("title_name") or ""), "detail":detail, "rarity":str(t.get("rarity") or "")}
 
     def rank_html(rows):
         if not rows:
@@ -3659,17 +3651,15 @@ async def calendar_page(request: Request, month: str = ""):
                         guest_members = "\n".join(str(m["display_name"] or "") for m in members if m.get("is_guest"))
                         member_detail = [
                             {"name":str(mm["display_name"] or ""), "id":str(mm.get("discord_id") or ""),
-                             "guest":bool(mm.get("is_guest")), **title_payload(mm.get("discord_id"))}
+                             "guest":bool(mm.get("is_guest"))}
                             for mm in members
                         ]
-                        gm_title = title_payload(row["gm_discord_id"])
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
                             f"data-title='{esc(title_text)}' "
                             f"data-time='{esc(time_text)}' "
                             f"data-gm='{esc(gm_text)}' data-gmid='{esc(str(row['gm_discord_id'] or ''))}' data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
-                            f"data-gmtitle='{esc(gm_title['name'])}' data-gmtitledetail='{esc(gm_title['detail'])}' data-gmtitlerarity='{esc(gm_title['rarity'])}' "
                             f"data-members='{esc(member_text)}' data-memberids='{esc(member_ids)}' data-memberdetail='{esc(json.dumps(member_detail, ensure_ascii=False))}' data-guestmembers='{esc(guest_members)}' data-game-type='EVENT' data-event='1' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title event'>{esc(title_text)}</span>"
@@ -3687,10 +3677,9 @@ async def calendar_page(request: Request, month: str = ""):
                         guest_members = "\n".join(str(m["display_name"] or "") for m in members if m.get("is_guest"))
                         member_detail = [
                             {"name":str(mm["display_name"] or ""), "id":str(mm.get("discord_id") or ""),
-                             "guest":bool(mm.get("is_guest")), **title_payload(mm.get("discord_id"))}
+                             "guest":bool(mm.get("is_guest"))}
                             for mm in members
                         ]
-                        gm_title = title_payload(row["gm_discord_id"])
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
@@ -3699,7 +3688,6 @@ async def calendar_page(request: Request, month: str = ""):
                             f"data-gm='{esc(gm_text)}' "
                             f"data-gmid='{esc(str(row['gm_discord_id'] or ''))}' "
                             f"data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
-                            f"data-gmtitle='{esc(gm_title['name'])}' data-gmtitledetail='{esc(gm_title['detail'])}' data-gmtitlerarity='{esc(gm_title['rarity'])}' "
                             f"data-members='{esc(member_text)}' "
                             f"data-memberids='{esc(member_ids)}' data-memberdetail='{esc(json.dumps(member_detail, ensure_ascii=False))}' data-guestmembers='{esc(guest_members)}' data-game-type='{esc(normalized_gt)}' "
                             "data-event='0' "
@@ -4000,12 +3988,6 @@ async def calendar_page(request: Request, month: str = ""):
           #calendarDetailGm {{ display:inline-flex; flex-direction:column; align-items:flex-start; gap:2px; }}
           a.calendar-modal-name {{ text-decoration:none; }}
           a.calendar-modal-name:hover {{ text-decoration:none; filter:brightness(1.12); }}
-          .calendar-person-title {{ --frame:#9ca8b8; display:inline-flex; align-items:center; justify-content:center; position:relative; color:#e7ebf1; font-size:.48rem; font-weight:850; margin:0 0 0 2px; padding:2px 10px; min-height:17px; border:1px solid var(--frame); border-radius:5px; background:rgba(12,17,24,.84); line-height:1.05; max-width:180px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
-          .calendar-person-title::before,.calendar-person-title::after {{ content:'◆'; position:absolute; top:50%; transform:translateY(-50%) rotate(45deg); font-size:.36rem; color:var(--frame); }}
-          .calendar-person-title::before {{ left:4px; }} .calendar-person-title::after {{ right:4px; }}
-          .calendar-person-title.rarity-bronze {{ --frame:#b8734b; }} .calendar-person-title.rarity-silver {{ --frame:#c9d0da; }} .calendar-person-title.rarity-gold {{ --frame:#e3b93f; box-shadow:0 0 7px rgba(227,185,63,.12); }} .calendar-person-title.rarity-black {{ --frame:#b8a77f; background:#080a0e; box-shadow:0 0 8px rgba(67,88,145,.13); }}
-          .calendar-person-title.rarity-gold::before,.calendar-person-title.rarity-gold::after {{ content:'✦'; transform:translateY(-50%); }} .calendar-person-title.rarity-black::before,.calendar-person-title.rarity-black::after {{ content:'❖'; transform:translateY(-50%); }}
-          .calendar-person-title.clickable {{ cursor:pointer; }}
           .annual-term-btn.active {{ background:#5865f2; border-color:#5865f2; color:white; }}
           #manualPlField textarea,#calendarEditPanel textarea {{ width:100%; margin-top:10px; box-sizing:border-box; border:1px solid #42485a; background:#1e212b; color:#fff; border-radius:10px; padding:10px; resize:vertical; }}
           .manual-event-members {{ display:block; margin:12px 0; padding:11px 13px; border-radius:10px; background:#252936; }}
@@ -4436,16 +4418,6 @@ async def calendar_page(request: Request, month: str = ""):
               if(gmId) gmNameEl.href='/profile/'+encodeURIComponent(gmId);
               gmNameEl.textContent=gmName || 'GM';
               gmBox.appendChild(gmNameEl);
-              if(el.dataset.gmtitle){{
-                const t=document.createElement('span');
-                t.className='calendar-person-title rarity-'+(el.dataset.gmtitlerarity||'bronze');
-                t.textContent=el.dataset.gmtitle;
-                if(el.dataset.gmtitledetail){{
-                  t.classList.add('clickable'); t.title=el.dataset.gmtitledetail;
-                  t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(el.dataset.gmtitledetail);}};
-                }}
-                gmBox.appendChild(t);
-              }}
             }}else{{
               gmRow.style.display='none';
             }}
@@ -4454,7 +4426,7 @@ async def calendar_page(request: Request, month: str = ""):
             try{{memberDetail=JSON.parse(el.dataset.memberdetail||'[]');}}catch(e){{memberDetail=[];}}
             const fallbackNames=(el.dataset.members||'').split(' / ').filter(Boolean);
             if(!memberDetail.length){{
-              memberDetail=fallbackNames.map(name=>({{name,id:'',guest:true,title:'',detail:'',rarity:''}}));
+              memberDetail=fallbackNames.map(name=>({{name,id:'',guest:true}}));
             }}else{{
               // 古い/不完全な詳細データでも、data-members の表示名を必ず使えるよう補完する。
               memberDetail=memberDetail.map((person,i)=>({{...person,name:(person && person.name) || fallbackNames[i] || ''}}));
@@ -4469,16 +4441,6 @@ async def calendar_page(request: Request, month: str = ""):
               if(person.id && !person.guest) nameEl.href='/profile/'+encodeURIComponent(person.id);
               nameEl.textContent=person.name||'';
               chip.appendChild(nameEl);
-              if(person.title){{
-                const t=document.createElement('span');
-                t.className='calendar-person-title rarity-'+(person.rarity||'bronze');
-                t.textContent=person.title;
-                if(person.detail){{
-                  t.classList.add('clickable'); t.title=person.detail;
-                  t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(person.detail);}};
-                }}
-                chip.appendChild(t);
-              }}
               box.appendChild(chip);
             }});
 
