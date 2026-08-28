@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_scenario_progress_status, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -2328,6 +2328,47 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   font-weight:1000;
 }}
 
+
+/* v57 final progress alignment */
+.progress-scenario-row{{
+  position:relative;
+  justify-content:center;
+  text-align:center;
+  padding-left:92px;
+  padding-right:92px;
+}}
+.progress-scenario-name{{
+  width:100%;
+  text-align:center;
+}}
+.progress-scenario-counts{{
+  position:absolute;
+  right:13px;
+  top:50%;
+  transform:translateY(-50%);
+}}
+.progress-legend{{
+  align-items:center;
+}}
+.progress-legend > span{{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-height:24px;
+  line-height:1;
+}}
+@media(max-width:620px){{
+  .progress-scenario-row{{
+    padding-left:72px;
+    padding-right:72px;
+  }}
+  .progress-scenario-counts{{
+    right:10px;
+    gap:5px;
+    font-size:.62rem;
+  }}
+}}
+
 </style>
 </head>
 <body>
@@ -3255,10 +3296,14 @@ async def calendar_page(request: Request, month: str = ""):
     activity_term_number = activity_year - 2023
 
     year_stats = calendar_stats(activity_start.isoformat(), activity_end.isoformat())
-    year_stats["new_scenarios"] = new_scenario_count(
-        activity_start.isoformat(), activity_end.isoformat()
-    )
+    year_stats["new_scenarios"] = new_scenario_count(activity_start.isoformat(), activity_end.isoformat())
     total_stats = calendar_stats()
+    yearly_stats = []
+    for term in range(1, activity_term_number + 1):
+        y = 2023 + term
+        ys = calendar_stats(date(y,6,1).isoformat(), date(y+1,6,1).isoformat())
+        ys["term"] = term; ys["year"] = y
+        yearly_stats.append(ys)
 
     progress_users, progress_scenarios, progress_statuses = scenario_progress_data()
 
@@ -3277,6 +3322,24 @@ async def calendar_page(request: Request, month: str = ""):
                 f"</div>"
             )
         return "".join(out)
+
+    def annual_stats_html():
+        panels=[]
+        for ys in yearly_stats:
+            panels.append(
+                f"<div class='annual-stats-panel {'active' if ys['term']==activity_term_number else ''}' data-term='{ys['term']}'>"
+                f"<div class='stats-section-title'>{ys['term']}年目<span>{ys['year']}/6/1〜{ys['year']+1}/5/31</span></div>"
+                f"<div class='stats-wide-card total-count'><b>{ys['total']}</b><span>卓数</span></div>"
+                f"<div class='stats-type-row'><div><b>{ys['trpg']}</b><span>TRPG卓数</span></div><div><b>{ys['madamis']}</b><span>マダミス卓数</span></div></div>"
+                f"<div class='stats-wide-card'><b>{ys['scenario_count']}</b><span>シナリオ数</span></div>"
+                f"<div class='stats-type-row'><div><b>{ys['trpg_scenarios']}</b><span>TRPGシナリオ数</span></div><div><b>{ys['madamis_scenarios']}</b><span>マダミスシナリオ数</span></div></div>"
+                f"<div class='stats-ranking-title'>GM TOP3</div>{rank_html(ys['gm_top'])}"
+                f"<div class='stats-ranking-title'>PL TOP3</div>{rank_html(ys['pl_top'])}</div>"
+            )
+        buttons=''.join(f"<button type='button' class='annual-term-btn {'active' if x['term']==activity_term_number else ''}' onclick='switchAnnualStats({x['term']},this)'>{x['term']}年目</button>" for x in yearly_stats)
+        return f"<div class='annual-term-tabs'>{buttons}</div>{''.join(panels)}"
+
+    annual_stats_markup = annual_stats_html()
 
     scenario_opts = "".join(
         f"<option value='{esc(str(x['scenario_name']))}'>"
@@ -3328,28 +3391,36 @@ async def calendar_page(request: Request, month: str = ""):
                     time_text = str(row["start_time"] or "未定")
 
                     if type_cls == "event":
+                        gm_text = str(row["gm_name"] or "")
+                        member_text = " / ".join(str(m["display_name"] or "") for m in members)
+                        member_ids = ",".join(str(m.get("discord_id") or "") for m in members if not m.get("is_guest"))
+                        guest_members = "\n".join(str(m["display_name"] or "") for m in members if m.get("is_guest"))
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
                             f"data-title='{esc(title_text)}' "
                             f"data-time='{esc(time_text)}' "
-                            "data-gm='' data-members='' data-event='1' "
+                            f"data-gm='{esc(gm_text)}' data-gmid='{esc(str(row['gm_discord_id'] or ''))}' data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
+                            f"data-members='{esc(member_text)}' data-memberids='{esc(member_ids)}' data-guestmembers='{esc(guest_members)}' data-game-type='EVENT' data-event='1' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title event'>{esc(title_text)}</span>"
                             "</div>"
                         )
                     else:
                         gm_text = str(row["gm_name"] or "")
-                        member_text = " / ".join(
-                            str(m["display_name"] or "") for m in members
-                        )
+                        member_text = " / ".join(str(m["display_name"] or "") for m in members)
+                        member_ids = ",".join(str(m.get("discord_id") or "") for m in members if not m.get("is_guest"))
+                        guest_members = "\n".join(str(m["display_name"] or "") for m in members if m.get("is_guest"))
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
                             f"data-title='{esc(title_text)}' "
                             f"data-time='{esc(time_text)}' "
                             f"data-gm='{esc(gm_text)}' "
+                            f"data-gmid='{esc(str(row['gm_discord_id'] or ''))}' "
+                            f"data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
                             f"data-members='{esc(member_text)}' "
+                            f"data-memberids='{esc(member_ids)}' data-guestmembers='{esc(guest_members)}' data-game-type='{esc(normalized_gt)}' "
                             "data-event='0' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title {type_cls}'>{esc(title_text)}</span>"
@@ -3521,18 +3592,29 @@ async def calendar_page(request: Request, month: str = ""):
               <label class='field manual-field-spaced manual-gm-field' id='manualGmField'>
                 <div class='field-box no-icon manual-control-box manual-gm-box'>
                   <div class='field-stack'>
-                    <span class='field-label'>GM</span>
-                    <select name='gm_discord_id' required>
-                      <option value='' disabled selected>選択してください</option>
+                    <span class='field-label' id='manualGmLabel'>GM</span>
+                    <select name='gm_discord_id'>
+                      <option value='' selected>GMなし</option>
                       {user_opts}
                     </select>
                   </div>
                 </div>
               </label>
+              <label class='field manual-field-spaced' id='manualGuestGmField'>
+                <div class='field-box no-icon manual-control-box'><div class='field-stack'>
+                  <span class='field-label'>一覧にいないGM / 主催者（任意）</span>
+                  <input type='text' name='gm_guest_name' placeholder='表示名だけ追加'>
+                </div></div>
+              </label>
+
+              <label class='manual-event-members' id='manualEventMembersToggle' style='display:none'>
+                <input type='checkbox' name='event_has_members' value='1' onchange='syncManualType()'> メンバーを決める
+              </label>
 
               <div class='calendar-modal-row' id='manualPlField'>
-                <span class='calendar-modal-label'>PL（複数選択可）</span>
+                <span class='calendar-modal-label' id='manualPlLabel'>PL（複数選択可）</span>
                 <div class='manual-user-list'>{pl_checks}</div>
+                <textarea name='guest_participant_names' rows='2' placeholder='一覧にいない参加者（1行に1人）'></textarea>
               </div>
 
               <div class='manual-actions'>
@@ -3550,8 +3632,8 @@ async def calendar_page(request: Request, month: str = ""):
             <h3 class='calendar-modal-title'>通過済みリスト</h3>
 
             <div class='progress-legend'>
-              <span><b class='progress-dot passed'>○</b> 通過済み</span>
-              <span><b class='progress-dot watched'>○</b> 視聴済み</span>
+              <span><b class='progress-dot passed'>○</b></span>
+              <span><b class='progress-dot watched'>○</b></span>
               <span><b>－</b> 未通過</span>
             </div>
 
@@ -3621,51 +3703,32 @@ async def calendar_page(request: Request, month: str = ""):
           </div>
         </div>
 
+        <style>
+          .annual-stats-panel {{ display:none; }}
+          .annual-stats-panel.active {{ display:block; }}
+          .annual-term-tabs {{ display:flex; gap:7px; overflow-x:auto; margin:10px 0 14px; padding-bottom:3px; }}
+          .annual-term-btn {{ flex:0 0 auto; border:1px solid #4b5563; background:#252936; color:#cbd5e1; border-radius:10px; padding:7px 12px; font-weight:700; }}
+          .annual-term-btn.active {{ background:#5865f2; border-color:#5865f2; color:white; }}
+          #manualPlField textarea,#calendarEditPanel textarea {{ width:100%; margin-top:10px; box-sizing:border-box; border:1px solid #42485a; background:#1e212b; color:#fff; border-radius:10px; padding:10px; resize:vertical; }}
+          .manual-event-members {{ display:block; margin:12px 0; padding:11px 13px; border-radius:10px; background:#252936; }}
+        </style>
+
         <div class='calendar-modal' id='statsModal' onclick='closeStats(event)'>
           <div class='calendar-modal-card stats-card' onclick='event.stopPropagation()'>
             <h3 class='calendar-modal-title'>つぶぐみ卓データ</h3>
 
-            <div class='stats-section'>
-              <div class='stats-section-title'>
-                {activity_term_number}年目
-                <span>{activity_year}/6/1〜{activity_year+1}/5/31</span>
-              </div>
-              <div class='stats-wide-card'>
-                <b>{year_stats["new_scenarios"]}</b>
-                <span>新規シナリオ</span>
-              </div>
-              <div class='stats-type-row'>
-                <div><b>{year_stats["trpg"]}</b><span>TRPGの卓数</span></div>
-                <div><b>{year_stats["madamis"]}</b><span>マダミスの卓数</span></div>
-              </div>
-
-              <div class='stats-ranking-title'>GM TOP3</div>
-              {rank_html(year_stats["gm_top"])}
-
-              <div class='stats-ranking-title'>PL TOP3</div>
-              {rank_html(year_stats["pl_top"])}
-            </div>
-
             <div class='stats-section total'>
-              <div class='stats-section-title'>TOTAL</div>
-              <div class='stats-wide-card total-count'>
-                <b>{total_stats["total"]}</b>
-                <span>累計卓数</span>
-              </div>
-              <div class='stats-wide-card'>
-                <b>{total_stats["scenario_count"]}</b>
-                <span>累計シナリオ数</span>
-              </div>
-              <div class='stats-type-row'>
-                <div><b>{total_stats["trpg"]}</b><span>累計TRPG卓数</span></div>
-                <div><b>{total_stats["madamis"]}</b><span>累計マダミス卓数</span></div>
-              </div>
-
-              <div class='stats-ranking-title'>GM TOP3</div>
-              {rank_html(total_stats["gm_top"])}
-
-              <div class='stats-ranking-title'>PL TOP3</div>
-              {rank_html(total_stats["pl_top"])}
+              <div class='stats-section-title'>累計</div>
+              <div class='stats-wide-card total-count'><b>{total_stats["total"]}</b><span>累計卓数</span></div>
+              <div class='stats-type-row'><div><b>{total_stats["trpg"]}</b><span>TRPG卓数</span></div><div><b>{total_stats["madamis"]}</b><span>マダミス卓数</span></div></div>
+              <div class='stats-wide-card'><b>{total_stats["scenario_count"]}</b><span>累計シナリオ数</span></div>
+              <div class='stats-type-row'><div><b>{total_stats["trpg_scenarios"]}</b><span>TRPGシナリオ数</span></div><div><b>{total_stats["madamis_scenarios"]}</b><span>マダミスシナリオ数</span></div></div>
+              <div class='stats-ranking-title'>GM TOP3</div>{rank_html(total_stats["gm_top"])}
+              <div class='stats-ranking-title'>PL TOP3</div>{rank_html(total_stats["pl_top"])}
+            </div>
+            <div class='stats-section'>
+              <div class='stats-section-title'>年度別</div>
+              {annual_stats_markup}
             </div>
 
             <button class='calendar-modal-close' type='button' onclick='closeStats()'>閉じる</button>
@@ -3700,15 +3763,24 @@ async def calendar_page(request: Request, month: str = ""):
                 {csrf_field(request)}
                 <input type='hidden' id='calendarEditSessionId' name='calendar_session_id'>
 
+                <div class='manual-type-toggle calendar-edit-type-toggle'>
+                  <label><input type='radio' name='game_type' value='TRPG'><span>TRPG</span></label>
+                  <label><input type='radio' name='game_type' value='MADMIS'><span>マダミス</span></label>
+                  <label><input type='radio' name='game_type' value='EVENT'><span>イベント</span></label>
+                </div>
+
+                <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>シナリオ名 / イベント名</span><input id='calendarEditScenario' name='scenario_name' required></div></div></label>
+                <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label' id='calendarEditGmLabel'>GM</span><select id='calendarEditGm' name='gm_discord_id'><option value=''>GMなし</option>{user_opts}</select><input id='calendarEditGuestGm' name='gm_guest_name' placeholder='一覧にいないGM / 主催者'></div></div></label>
                 <div class='calendar-modal-row'>
-                  <span class='calendar-modal-label'>PLを編集</span>
+                  <span class='calendar-modal-label' id='calendarEditPlLabel'>PLを編集</span>
                   <div class='manual-user-list' id='calendarEditPlList'>
                     {pl_checks}
                   </div>
+                  <textarea id='calendarEditGuestMembers' name='guest_participant_names' rows='2' placeholder='一覧にいない参加者（1行に1人）'></textarea>
                 </div>
 
                 <button class='calendar-save-btn' type='submit'
-                        formaction='/calendar/edit-members'>保存</button>
+                        formaction='/calendar/edit-details'>保存</button>
               </form>
 
               <div class='calendar-danger-actions'>
@@ -3770,10 +3842,17 @@ async def calendar_page(request: Request, month: str = ""):
           const timeField=document.getElementById('manualTimeField');
           const gmField=document.getElementById('manualGmField');
           const plField=document.getElementById('manualPlField');
+          const guestGmField=document.getElementById('manualGuestGmField');
+          const eventToggle=document.getElementById('manualEventMembersToggle');
+          const eventHas=!!document.querySelector("#manualAddModal input[name='event_has_members']:checked");
+          const gmLabel=document.getElementById('manualGmLabel'); const plLabel=document.getElementById('manualPlLabel');
+          if(gmLabel) gmLabel.textContent=isEvent?'主催者':'GM';
+          if(plLabel) plLabel.textContent=isEvent?'参加者（複数選択可）':'PL（複数選択可）';
+          if(eventToggle) eventToggle.style.display=isEvent?'block':'none';
+          const disablePeople=isEvent && !eventHas;
 
-          [timeField,gmField,plField].forEach(el=>{{
-            if(el) el.classList.toggle('manual-disabled',isEvent);
-          }});
+          if(timeField) timeField.classList.toggle('manual-disabled',isEvent);
+          [gmField,guestGmField,plField].forEach(el=>{{ if(el) el.classList.toggle('manual-disabled',disablePeople); }});
 
           const timeInput=document.querySelector(
             "#manualAddModal input[name='start_time']"
@@ -3782,14 +3861,15 @@ async def calendar_page(request: Request, month: str = ""):
             "#manualAddModal select[name='gm_discord_id']"
           );
           if(timeInput) timeInput.disabled=isEvent;
-          if(gmSelect){{
-            gmSelect.disabled=isEvent;
-            gmSelect.required=!isEvent;
-          }}
+          if(gmSelect) gmSelect.disabled=disablePeople;
+          const guestGmInput=document.querySelector("#manualAddModal input[name='gm_guest_name']");
+          if(guestGmInput) guestGmInput.disabled=disablePeople;
 
           document.querySelectorAll(
             "#manualAddModal input[name='participant_ids']"
-          ).forEach(cb=>cb.disabled=isEvent);
+          ).forEach(cb=>cb.disabled=disablePeople);
+          const guestPl=document.querySelector("#manualAddModal textarea[name='guest_participant_names']");
+          if(guestPl) guestPl.disabled=disablePeople;
         }}
 
         document.querySelectorAll(
@@ -3968,6 +4048,11 @@ async def calendar_page(request: Request, month: str = ""):
           if(modal) modal.classList.remove('open');
         }}
 
+        function switchAnnualStats(term,btn){{
+          document.querySelectorAll('.annual-stats-panel').forEach(x=>x.classList.toggle('active',x.dataset.term===String(term)));
+          document.querySelectorAll('.annual-term-btn').forEach(x=>x.classList.toggle('active',x===btn));
+        }}
+
         function openStats(ev){{
           if(ev) ev.stopPropagation();
           const modal=document.getElementById('statsModal');
@@ -3985,6 +4070,7 @@ async def calendar_page(request: Request, month: str = ""):
         function openCalendarDetail(el){{
           const modal=document.getElementById('calendarDetailModal');
           const isEvent=el.dataset.event==='1';
+          const hasEventMembers=isEvent && !!((el.dataset.gm||'') || (el.dataset.members||''));
           const sessionId=el.dataset.id||'';
 
           document.getElementById('calendarEditSessionId').value=sessionId;
@@ -4011,10 +4097,12 @@ async def calendar_page(request: Request, month: str = ""):
           const gmRow=document.getElementById('calendarDetailGmRow');
           const membersRow=document.getElementById('calendarDetailMembersRow');
 
-          if(isEvent){{
-            gmRow.style.display='none';
-            membersRow.style.display='none';
+          if(isEvent && !hasEventMembers){{
+            gmRow.style.display='none'; membersRow.style.display='none';
           }}else{{
+            gmRow.style.display='block'; membersRow.style.display='block';
+            document.querySelector('#calendarDetailGmRow .calendar-modal-label').textContent=isEvent?'主催者':'GM';
+            document.querySelector('#calendarDetailMembersRow .calendar-modal-label').textContent=isEvent?'参加者':'PL';
             gmRow.style.display='block';
             membersRow.style.display='block';
             document.getElementById('calendarDetailGm').textContent=
@@ -4035,23 +4123,44 @@ async def calendar_page(request: Request, month: str = ""):
             document.querySelectorAll(
               "#calendarEditPlList input[name='participant_ids']"
             ).forEach(cb=>{{
-              cb.checked=memberNames.includes(cb.dataset.name||'');
+              cb.checked=(el.dataset.memberids||'').split(',').filter(Boolean).includes(cb.value||'');
               cb.disabled=false;
             }});
           }}
 
-          if(isEvent){{
-            document.querySelectorAll(
-              "#calendarEditPlList input[name='participant_ids']"
-            ).forEach(cb=>{{
-              cb.checked=false;
-              cb.disabled=true;
-            }});
-          }}
+          document.getElementById('calendarEditScenario').value=el.dataset.title||'';
+          const editGameType=el.dataset.gameType || (isEvent ? 'EVENT' : 'TRPG');
+          document.querySelectorAll("#calendarMembersEditForm input[name='game_type']").forEach(r=>{{
+            r.checked=(r.value===editGameType);
+          }});
+          document.getElementById('calendarEditGm').value=el.dataset.gmid||'';
+          document.getElementById('calendarEditGuestGm').value=el.dataset.gmguest||'';
+          document.getElementById('calendarEditGuestMembers').value=el.dataset.guestmembers||'';
+          document.getElementById('calendarEditGmLabel').textContent=isEvent?'主催者':'GM';
+          document.getElementById('calendarEditPlLabel').textContent=isEvent?'参加者を編集':'PLを編集';
+          document.querySelectorAll("#calendarEditPlList input[name='participant_ids']").forEach(cb=>cb.disabled=false);
+          syncCalendarEditType();
 
           modal.classList.add('open');
           document.body.style.overflow='hidden';
         }}
+
+        function syncCalendarEditType(){{
+          const selected=document.querySelector("#calendarMembersEditForm input[name='game_type']:checked");
+          const isEventEdit=!!selected && selected.value==='EVENT';
+          const gmLabel=document.getElementById('calendarEditGmLabel');
+          const plLabel=document.getElementById('calendarEditPlLabel');
+          if(gmLabel) gmLabel.textContent=isEventEdit?'主催者':'GM';
+          if(plLabel) plLabel.textContent=isEventEdit?'参加者を編集':'PLを編集';
+          const scenario=document.getElementById('calendarEditScenario');
+          if(scenario) scenario.placeholder=isEventEdit?'イベント名を入力':'シナリオ名を入力';
+          const guestGm=document.getElementById('calendarEditGuestGm');
+          if(guestGm) guestGm.placeholder=isEventEdit?'一覧にいない主催者':'一覧にいないGM';
+        }}
+
+        document.querySelectorAll("#calendarMembersEditForm input[name='game_type']").forEach(r=>{{
+          r.addEventListener('change',syncCalendarEditType);
+        }});
 
         function refreshCalendarEditPreview(){{
           const box=document.getElementById('calendarDetailMembers');
@@ -4137,6 +4246,9 @@ async def calendar_manual_add(
     start_time: str = Form(""),
     gm_discord_id: str = Form(""),
     participant_ids: list[str] = Form(default=[]),
+    gm_guest_name: str = Form(""),
+    guest_participant_names: str = Form(""),
+    event_has_members: str = Form(""),
 ):
     require_login(request)
     await require_csrf(request)
@@ -4150,10 +4262,9 @@ async def calendar_manual_add(
 
     if game_type == "EVENT":
         start_time = "未定"
-        gm_discord_id = ""
-        participant_ids = []
-    elif not gm_discord_id:
-        raise HTTPException(400, "GMを選択してください")
+        if not event_has_members:
+            gm_discord_id = ""; gm_guest_name = ""; participant_ids = []; guest_participant_names = ""
+    # TRPG/マダミスはGMなしでも登録可能。
 
     add_manual_calendar_session(
         game_type=game_type,
@@ -4163,6 +4274,8 @@ async def calendar_manual_add(
         gm_discord_id=str(gm_discord_id),
         participant_ids=[str(x) for x in participant_ids],
         created_at=iso_now(),
+        gm_guest_name=gm_guest_name.strip(),
+        guest_participant_names=[x.strip() for x in guest_participant_names.splitlines() if x.strip()],
     )
 
     d = date.fromisoformat(event_date)
@@ -4173,23 +4286,20 @@ async def calendar_manual_add(
 
 
 
-@app.post("/calendar/edit-members")
-async def calendar_edit_members(
-    request: Request,
-    calendar_session_id: int = Form(...),
-    participant_ids: list[str] = Form(default=[]),
+@app.post("/calendar/edit-details")
+async def calendar_edit_details(
+    request: Request, calendar_session_id: int = Form(...), scenario_name: str = Form(...),
+    game_type: str = Form(...), gm_discord_id: str = Form(""), gm_guest_name: str = Form(""),
+    participant_ids: list[str] = Form(default=[]), guest_participant_names: str = Form(""),
 ):
-    require_login(request)
-    await require_csrf(request)
-
-    if not update_calendar_session_members(
-        calendar_session_id,
-        [str(x) for x in participant_ids],
-    ):
-        raise HTTPException(400, "この予定のPLは編集できません")
-
+    require_login(request); await require_csrf(request)
+    if not scenario_name.strip(): raise HTTPException(400, "シナリオ名 / イベント名を入力してください")
+    if game_type not in {"TRPG", "MADMIS", "EVENT"}: raise HTTPException(400, "種別が不正です")
+    if not update_calendar_session_details(calendar_session_id, scenario_name, gm_discord_id,
+        [str(x) for x in participant_ids], gm_guest_name,
+        [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type):
+        raise HTTPException(404, "予定が見つかりません")
     return RedirectResponse("/calendar", status_code=303)
-
 
 @app.post("/calendar/hide")
 async def calendar_hide(
