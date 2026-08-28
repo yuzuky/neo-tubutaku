@@ -1994,9 +1994,9 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   width:100%;
 }}
 .calendar-modal-gm-tag{{
-  background:rgba(168,85,247,.18);
+  background:transparent;
   color:#d08aff;
-  border:1px solid rgba(168,85,247,.08);
+  border:0;
   font-weight:900;
 }}
 
@@ -3994,10 +3994,13 @@ async def calendar_page(request: Request, month: str = ""):
           .profile-circle {{ color:#aab6c7; text-decoration:none; font-size:1.05rem; }}
           .calendar-person-link {{ color:inherit; text-decoration:none; display:inline-flex; flex-direction:column; gap:1px; }}
           .calendar-person-link:hover {{ text-decoration:none; }}
-          .calendar-modal-name {{ color:inherit; font-size:.8rem; font-weight:900; line-height:1.25; white-space:nowrap; }}
+          .calendar-modal-member {{ display:inline-flex; flex-direction:column; align-items:flex-start; gap:2px; padding:0; background:transparent; color:#e3bd52; border:0; vertical-align:top; }}
+          .calendar-modal-name {{ display:inline-flex; color:#e3bd52; background:rgba(207,165,42,.15); padding:4px 8px; border-radius:7px; font-size:.8rem; font-weight:900; line-height:1.25; white-space:nowrap; }}
+          .calendar-modal-gm-tag .calendar-modal-name {{ color:#d08aff; background:rgba(168,85,247,.18); border:1px solid rgba(168,85,247,.08); }}
+          #calendarDetailGm {{ display:inline-flex; flex-direction:column; align-items:flex-start; gap:2px; }}
           a.calendar-modal-name {{ text-decoration:none; }}
-          a.calendar-modal-name:hover {{ text-decoration:underline; }}
-          .calendar-person-title {{ --frame:#9ca8b8; display:inline-flex; align-items:center; justify-content:center; position:relative; color:#e7ebf1; font-size:.58rem; font-weight:850; margin-top:4px; padding:2px 13px; min-height:19px; border:1px solid var(--frame); border-radius:6px; background:rgba(12,17,24,.84); line-height:1.1; }}
+          a.calendar-modal-name:hover {{ text-decoration:none; filter:brightness(1.12); }}
+          .calendar-person-title {{ --frame:#9ca8b8; display:inline-flex; align-items:center; justify-content:center; position:relative; color:#e7ebf1; font-size:.48rem; font-weight:850; margin:0 0 0 2px; padding:2px 10px; min-height:17px; border:1px solid var(--frame); border-radius:5px; background:rgba(12,17,24,.84); line-height:1.05; max-width:180px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
           .calendar-person-title::before,.calendar-person-title::after {{ content:'◆'; position:absolute; top:50%; transform:translateY(-50%) rotate(45deg); font-size:.36rem; color:var(--frame); }}
           .calendar-person-title::before {{ left:4px; }} .calendar-person-title::after {{ right:4px; }}
           .calendar-person-title.rarity-bronze {{ --frame:#b8734b; }} .calendar-person-title.rarity-silver {{ --frame:#c9d0da; }} .calendar-person-title.rarity-gold {{ --frame:#e3b93f; box-shadow:0 0 7px rgba(227,185,63,.12); }} .calendar-person-title.rarity-black {{ --frame:#b8a77f; background:#080a0e; box-shadow:0 0 8px rgba(67,88,145,.13); }}
@@ -4763,6 +4766,31 @@ async def profile_page(request: Request, discord_id: str):
         for i,x in enumerate(data["pair_top"])
     ) or "<div class='muted small'>まだ同卓データがありません</div>"
     own_btn = "<a class='btn profile-title-list-btn' href='/profile/{}/titles'>称号一覧を見る</a>".format(esc(str(discord_id))) if own else ""
+
+    # 自分のプロフィールでは、その下に登録メンバー全員のプロフィールを縦に表示する。
+    people_markup = ""
+    if own:
+        members_all = [dict(x) for x in registered_members() if str(x["discord_id"]) != str(discord_id)]
+        title_by_user = equipped_titles_map([x["discord_id"] for x in members_all])
+        people_rows = []
+        for person in members_all:
+            pid = str(person.get("discord_id") or "")
+            pname = str(person.get("display_name") or person.get("username") or pid)
+            avatar = str(person.get("avatar_url") or "")
+            pt = title_by_user.get(pid)
+            ptitle = ""
+            if pt:
+                rarity = str(pt.get("rarity") or "bronze")
+                ptitle = f"<span class='profile-list-title title-frame rarity-{esc(rarity)}'><span>{esc(str(pt.get('title_name') or ''))}</span></span>"
+            people_rows.append(
+                f"<a class='profile-list-row' href='/profile/{esc(pid)}'>"
+                f"<img class='profile-list-avatar' src='{esc(avatar)}' alt=''>"
+                f"<span class='profile-list-main'><b>{esc(pname)}</b>{ptitle}</span>"
+                f"<span class='profile-list-chevron'>›</span></a>"
+            )
+        if people_rows:
+            people_markup = "<section class='profile-section profile-people'><h3>みんなのプロフィール</h3>" + "".join(people_rows) + "</section>"
+
     body=f"""
     <style>
       .profile-wrap{{max-width:620px;margin:0 auto}} .profile-hero{{text-align:center;margin:12px 0 20px}}
@@ -4777,8 +4805,14 @@ async def profile_page(request: Request, discord_id: str):
       .rarity-gold::before,.rarity-gold::after{{content:'✦';font-size:.84rem}}
       .rarity-black{{border-width:2px;background:linear-gradient(180deg,rgba(28,29,31,.98),rgba(5,7,10,.98));box-shadow:inset 0 0 0 1px rgba(210,195,154,.10),0 0 16px rgba(66,91,155,.12),0 6px 22px rgba(0,0,0,.38)}}
       .rarity-black::before,.rarity-black::after{{content:'❖';font-size:.8rem;color:#c3af7e}}
-      .profile-equipped{{margin:8px auto 0;font-size:.86rem;background-color:transparent}} .profile-equipped.special{{cursor:pointer}}
+      .profile-equipped{{margin:7px auto 0;font-size:.66rem;min-width:0;min-height:25px;padding:4px 22px;border-radius:7px;background-color:transparent}} .profile-equipped.special{{cursor:pointer}}
+      .profile-equipped::before{{left:6px}} .profile-equipped::after{{right:6px}}
       .profile-section{{margin-top:14px;padding:15px;border:1px solid #263244;border-radius:16px;background:#0d141e}}
+      .profile-list-row{{display:flex;align-items:center;gap:11px;padding:11px 2px;border-bottom:1px solid #202b39;color:#e8edf5;text-decoration:none}}
+      .profile-list-row:last-child{{border-bottom:0}} .profile-list-avatar{{width:44px;height:44px;border-radius:50%;object-fit:cover;background:#202a38;border:1px solid #334155;flex:0 0 auto}}
+      .profile-list-main{{min-width:0;display:flex;flex:1;flex-direction:column;align-items:flex-start;gap:4px}} .profile-list-main>b{{font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}}
+      .profile-list-title{{font-size:.55rem;min-width:0;min-height:21px;padding:3px 18px;border-radius:6px;max-width:100%}} .profile-list-title::before{{left:5px;font-size:.32rem}} .profile-list-title::after{{right:5px;font-size:.32rem}}
+      .profile-list-chevron{{color:#7f8da0;font-size:1.2rem;font-weight:900;margin-left:auto}}
       .profile-section h3{{margin:0 0 12px;font-size:.92rem}} .profile-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
       .profile-grid>div{{padding:12px;border-radius:12px;background:#111b28;display:flex;flex-direction:column;gap:3px}} .profile-grid span{{color:#8290a2;font-size:.68rem;font-weight:800}}
       .profile-grid b{{font-size:1.05rem}} .profile-year-tabs{{display:flex;gap:7px;overflow:auto;margin-bottom:10px}}
@@ -4801,6 +4835,7 @@ async def profile_page(request: Request, discord_id: str):
       <section class='profile-section'><h3>年度別</h3><div class='profile-year-tabs'>{tabs}</div>{panels}</section>
       <section class='profile-section'><h3>🤝 同卓した数TOP3</h3>{pair}</section>
       {own_btn}
+      {people_markup}
     </div>
     <script>function switchProfileYear(term,btn){{document.querySelectorAll('.profile-year-panel').forEach(x=>x.classList.toggle('active',x.dataset.term===String(term)));document.querySelectorAll('.profile-year-tab').forEach(x=>x.classList.toggle('active',x===btn));}}</script>
     """
