@@ -701,28 +701,46 @@ def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: st
             (calendar_session_id,),
         )
 
-        # カレンダー成立卓から自動反映された「通過済み」を掃除する。
-        # 同じ人が同じシナリオを別日に遊んだ履歴が残っているなら維持する。
+        # 通過済みリストはカレンダー履歴と連動させる。
+        # 同じシナリオの別開催が1件でも残っている間は、そのシナリオの進捗を維持する。
+        # 最後の1件を削除した時点で、古いバージョン由来の残骸も含めて進捗を全削除する。
         if gt in {"TRPG", "MADMIS"} and scenario_name:
-            for uid in deleted_member_ids:
-                still_has_session = c.execute(
-                    """SELECT 1
-                       FROM calendar_sessions cs
-                       JOIN calendar_session_members csm
-                         ON csm.calendar_session_id=cs.id
-                       WHERE (CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END)=?
-                         AND cs.scenario_name=?
-                         AND csm.discord_id=?
-                       LIMIT 1""",
-                    (gt, scenario_name, uid),
-                ).fetchone()
-                if not still_has_session:
-                    c.execute(
-                        """DELETE FROM scenario_progress
-                           WHERE game_type=? AND scenario_name=? AND discord_id=?
-                             AND status='PASSED'""",
+            scenario_still_exists = c.execute(
+                """SELECT 1
+                   FROM calendar_sessions cs
+                   WHERE (CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END)=?
+                     AND TRIM(cs.scenario_name)=?
+                   LIMIT 1""",
+                (gt, scenario_name),
+            ).fetchone()
+
+            if not scenario_still_exists:
+                c.execute(
+                    """DELETE FROM scenario_progress
+                       WHERE game_type=? AND TRIM(scenario_name)=?""",
+                    (gt, scenario_name),
+                )
+            else:
+                # シナリオ自体は残っているが、このPLの別参加履歴が無ければ自動PASSEDだけ外す。
+                for uid in deleted_member_ids:
+                    still_has_session = c.execute(
+                        """SELECT 1
+                           FROM calendar_sessions cs
+                           JOIN calendar_session_members csm
+                             ON csm.calendar_session_id=cs.id
+                           WHERE (CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END)=?
+                             AND TRIM(cs.scenario_name)=?
+                             AND csm.discord_id=?
+                           LIMIT 1""",
                         (gt, scenario_name, uid),
-                    )
+                    ).fetchone()
+                    if not still_has_session:
+                        c.execute(
+                            """DELETE FROM scenario_progress
+                               WHERE game_type=? AND TRIM(scenario_name)=? AND discord_id=?
+                                 AND status='PASSED'""",
+                            (gt, scenario_name, uid),
+                        )
     return True
 
 
@@ -785,19 +803,16 @@ def scenario_progress_data():
                ORDER BY display_name"""
         ).fetchall()
 
+        # 一覧に出すシナリオは「現在カレンダー履歴に存在するもの」だけ。
+        # 旧バージョンで残った orphan な scenario_progress 行が一覧へ復活するのを防ぐ。
         scenarios = c.execute(
-            """SELECT game_type,scenario_name FROM (
-                 SELECT
+            """SELECT
                    CASE WHEN game_type='マダミス' THEN 'MADMIS' ELSE game_type END AS game_type,
-                   scenario_name
-                 FROM calendar_sessions
-                 WHERE game_type IN ('TRPG','MADMIS','マダミス')
-                   AND scenario_name<>''
-                 UNION
-                 SELECT game_type,scenario_name
-                 FROM scenario_progress
-               )
-               GROUP BY game_type,scenario_name
+                   TRIM(scenario_name) AS scenario_name
+               FROM calendar_sessions
+               WHERE game_type IN ('TRPG','MADMIS','マダミス')
+                 AND TRIM(scenario_name)<>''
+               GROUP BY game_type,TRIM(scenario_name)
                ORDER BY scenario_name"""
         ).fetchall()
 
