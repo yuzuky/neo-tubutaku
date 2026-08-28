@@ -189,6 +189,40 @@ def init_db():
             CREATE INDEX IF NOT EXISTS idx_scenario_progress_type_name
                 ON scenario_progress(game_type, scenario_name);
 
+            -- v65: プロフィール / 称号
+            CREATE TABLE IF NOT EXISTS achievement_unlocks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                discord_id TEXT NOT NULL,
+                achievement_key TEXT NOT NULL,
+                context_key TEXT NOT NULL DEFAULT '',
+                title_name TEXT NOT NULL,
+                rarity TEXT NOT NULL,
+                secret INTEGER NOT NULL DEFAULT 0,
+                context_label TEXT,
+                unlocked_at TEXT NOT NULL,
+                UNIQUE(discord_id, achievement_key, context_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS equipped_titles (
+                discord_id TEXT PRIMARY KEY,
+                unlock_id INTEGER NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(unlock_id) REFERENCES achievement_unlocks(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS achievement_daily_runs (
+                run_date TEXT PRIMARY KEY,
+                processed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS achievement_meta (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_achievement_unlocks_user
+                ON achievement_unlocks(discord_id);
+
             CREATE INDEX IF NOT EXISTS idx_calendar_sessions_event_date
                 ON calendar_sessions(event_date);
             """
@@ -989,3 +1023,364 @@ def initialize_database():
 
 # main.py から import された時点で従来どおり初期化する。
 initialize_database()
+
+
+# ============================================================
+# v65: プロフィール / 称号
+# ============================================================
+
+FIXED_ACHIEVEMENTS = [
+    {"key":"pl_10","name":"ひよっこ","rarity":"bronze","secret":0,"kind":"pl","target":10,"condition":"PLとして10卓参加する"},
+    {"key":"pl_50","name":"常連","rarity":"silver","secret":0,"kind":"pl","target":50,"condition":"PLとして50卓参加する"},
+    {"key":"pl_100","name":"百戦錬磨","rarity":"gold","secret":0,"kind":"pl","target":100,"condition":"PLとして100卓参加する"},
+    {"key":"pl_250","name":"廃人","rarity":"black","secret":1,"kind":"pl","target":250,"condition":"PLとして250卓参加する"},
+
+    {"key":"gm_10","name":"駆け出しGM","rarity":"bronze","secret":0,"kind":"gm","target":10,"condition":"GMを10回する"},
+    {"key":"gm_50","name":"熟練GM","rarity":"silver","secret":0,"kind":"gm","target":50,"condition":"GMを50回する"},
+    {"key":"gm_100","name":"観測者","rarity":"gold","secret":0,"kind":"gm","target":100,"condition":"GMを100回する"},
+    {"key":"gm_250","name":"悠久の語り部","rarity":"black","secret":1,"kind":"gm","target":250,"condition":"GMを250回する"},
+
+    {"key":"trpg_pl_250","name":"這い寄る混沌","rarity":"black","secret":1,"kind":"trpg_pl","target":250,"condition":"TRPGに250卓参加する"},
+    {"key":"madamis_pl_250","name":"マダミスの家畜","rarity":"black","secret":1,"kind":"madamis_pl","target":250,"condition":"マダミスに250卓参加する"},
+
+    {"key":"pair_25","name":"ズッ卓","rarity":"bronze","secret":0,"kind":"pair","target":25,"condition":"同じ人と25卓同卓する"},
+    {"key":"pair_50","name":"腐れ縁","rarity":"silver","secret":0,"kind":"pair","target":50,"condition":"同じ人と50卓同卓する"},
+    {"key":"pair_100","name":"運命共同体","rarity":"gold","secret":0,"kind":"pair","target":100,"condition":"同じ人と100卓同卓する"},
+    {"key":"pair_250","name":"生き別れの兄弟","rarity":"black","secret":1,"kind":"pair_dynamic","target":250,"condition":"同じ人と250卓同卓する"},
+
+    {"key":"active_year_1","name":"新人","rarity":"bronze","secret":0,"kind":"active_years","target":1,"condition":"つぶぐみに1年在籍する（毎年1卓以上参加）"},
+    {"key":"active_year_3","name":"暇人","rarity":"silver","secret":0,"kind":"active_years","target":3,"condition":"つぶぐみに3年在籍する（毎年1卓以上参加）"},
+    {"key":"active_year_5","name":"古参勢","rarity":"gold","secret":0,"kind":"active_years","target":5,"condition":"つぶぐみに5年在籍する（毎年1卓以上参加）"},
+    {"key":"active_year_10","name":"三葉虫","rarity":"black","secret":1,"kind":"active_years","target":10,"condition":"つぶぐみに10年在籍する"},
+
+    {"key":"day_3","name":"3度の飯より暇つぶし","rarity":"gold","secret":1,"kind":"max_day","target":3,"condition":"1日に3卓参加する"},
+    {"key":"christmas","name":"聖夜のサン卓ロース","rarity":"gold","secret":1,"kind":"christmas","target":1,"condition":"12月24日または25日に卓へ参加する"},
+    {"key":"total_500","name":"卓修羅","rarity":"black","secret":1,"kind":"total_roles","target":500,"condition":"PL・GMの累計が500卓に達する"},
+
+    {"key":"streak_3","name":"ひまんちゅ","rarity":"silver","secret":0,"kind":"streak","target":3,"condition":"3日連続で卓に参加する"},
+    {"key":"streak_5","name":"暇仙人","rarity":"gold","secret":0,"kind":"streak","target":5,"condition":"5日連続で卓に参加する"},
+    {"key":"streak_7","name":"暇かよ働け","rarity":"black","secret":1,"kind":"streak","target":7,"condition":"1週間連続で卓に参加する"},
+]
+
+RARITY_LABELS = {"bronze":"🥉", "silver":"🥈", "gold":"🥇", "black":"🏆"}
+
+
+def _achievement_gt(value: str) -> str:
+    return "MADMIS" if str(value or "") == "マダミス" else str(value or "")
+
+
+def _activity_year_for_date(d: str) -> int:
+    y, m, _ = map(int, str(d).split("-"))
+    return y if m >= 6 else y - 1
+
+
+def _unique_table_records(c, as_of_date: str | None = None):
+    clauses = ["cs.game_type IN ('TRPG','MADMIS','マダミス')"]
+    params = []
+    if as_of_date:
+        clauses.append("cs.event_date<=?")
+        params.append(str(as_of_date))
+    rows = c.execute(
+        "SELECT cs.* FROM calendar_sessions cs WHERE " + " AND ".join(clauses) + " ORDER BY cs.event_date,cs.id",
+        params,
+    ).fetchall()
+    unique = {}
+    for r in rows:
+        members = tuple(sorted(str(x["discord_id"]) for x in c.execute(
+            "SELECT discord_id FROM calendar_session_members WHERE calendar_session_id=?", (r["id"],)
+        ).fetchall()))
+        guests = tuple(sorted(str(x["display_name"]) for x in c.execute(
+            "SELECT display_name FROM calendar_guest_members WHERE calendar_session_id=? ORDER BY display_name", (r["id"],)
+        ).fetchall()))
+        gt = _achievement_gt(r["game_type"])
+        key = (gt, str(r["scenario_name"] or "").strip(), str(r["gm_discord_id"] or ""), members, guests)
+        # 同一構成の複数日卓は最初の日を代表日にして1卓として扱う。
+        if key not in unique:
+            unique[key] = {
+                "id": int(r["id"]), "date": str(r["event_date"]), "game_type": gt,
+                "scenario": str(r["scenario_name"] or "").strip(),
+                "gm": str(r["gm_discord_id"] or ""), "members": members,
+            }
+    return list(unique.values())
+
+
+def _display_name(c, uid: str) -> str:
+    row = c.execute(
+        "SELECT COALESCE(display_name,username,discord_id) AS n FROM registered_members WHERE discord_id=?",
+        (str(uid),),
+    ).fetchone()
+    if not row:
+        row = c.execute(
+            "SELECT COALESCE(display_name,username,discord_id) AS n FROM users WHERE discord_id=?",
+            (str(uid),),
+        ).fetchone()
+    return str(row["n"]) if row else str(uid)
+
+
+def _member_metrics(c, uid: str, records):
+    uid = str(uid)
+    gm_records = [r for r in records if r["gm"] == uid]
+    pl_records = [r for r in records if uid in r["members"]]
+    all_records = [r for r in records if r["gm"] == uid or uid in r["members"]]
+    trpg_pl = sum(1 for r in pl_records if r["game_type"] == "TRPG")
+    madamis_pl = sum(1 for r in pl_records if r["game_type"] == "MADMIS")
+
+    pair_counts = {}
+    for r in all_records:
+        people = set(r["members"])
+        if r["gm"]:
+            people.add(r["gm"])
+        people.discard(uid)
+        for other in people:
+            if other:
+                pair_counts[other] = pair_counts.get(other, 0) + 1
+
+    dates = sorted(set(r["date"] for r in all_records))
+    max_streak = 0
+    streak = 0
+    prev = None
+    from datetime import date as _date, timedelta as _td
+    for ds in dates:
+        d = _date.fromisoformat(ds)
+        if prev is not None and d == prev + _td(days=1):
+            streak += 1
+        else:
+            streak = 1
+        max_streak = max(max_streak, streak)
+        prev = d
+
+    per_day = {}
+    for r in all_records:
+        per_day[r["date"]] = per_day.get(r["date"], 0) + 1
+    max_day = max(per_day.values(), default=0)
+    christmas = any(r["date"][5:] in ("12-24", "12-25") for r in all_records)
+    active_years = len(set(_activity_year_for_date(r["date"]) for r in all_records))
+    return {
+        "gm": len(gm_records), "pl": len(pl_records), "trpg_pl": trpg_pl, "madamis_pl": madamis_pl,
+        "total_roles": len(gm_records) + len(pl_records), "pair_counts": pair_counts,
+        "max_pair": max(pair_counts.values(), default=0), "max_streak": max_streak,
+        "max_day": max_day, "christmas": christmas, "active_years": active_years,
+        "gm_records": gm_records, "pl_records": pl_records, "all_records": all_records,
+    }
+
+
+def profile_data(discord_id: str):
+    uid = str(discord_id)
+    with db() as c:
+        member = c.execute("SELECT * FROM registered_members WHERE discord_id=?", (uid,)).fetchone()
+        if not member:
+            return None
+        records = _unique_table_records(c)
+        m = _member_metrics(c, uid, records)
+        pair_rows = []
+        for other, n in sorted(m["pair_counts"].items(), key=lambda z: (-z[1], _display_name(c,z[0]).lower()))[:3]:
+            pair_rows.append({"discord_id":other, "display_name":_display_name(c,other), "n":int(n)})
+
+        years = []
+        if records:
+            first_year = min(2024, min(_activity_year_for_date(r["date"]) for r in records))
+        else:
+            first_year = 2024
+        from datetime import date as _date
+        today = _date.today()
+        current_ay = today.year if today.month >= 6 else today.year - 1
+        for y in range(first_year, current_ay + 1):
+            yr = [r for r in records if _activity_year_for_date(r["date"]) == y]
+            mm = _member_metrics(c, uid, yr)
+            years.append({
+                "year":y, "term":y-2023, "gm":mm["gm"], "pl":mm["pl"],
+                "trpg":mm["trpg_pl"], "madamis":mm["madamis_pl"],
+            })
+        equipped = equipped_title(uid, c)
+        return {
+            "member":dict(member),
+            "total":{"gm":m["gm"],"pl":m["pl"],"trpg":m["trpg_pl"],"madamis":m["madamis_pl"]},
+            "years":years, "pair_top":pair_rows, "equipped":equipped,
+        }
+
+
+def equipped_title(discord_id: str, conn=None):
+    own = conn is None
+    cm = db() if own else None
+    c = cm.__enter__() if own else conn
+    try:
+        row = c.execute(
+            """SELECT au.* FROM equipped_titles et
+               JOIN achievement_unlocks au ON au.id=et.unlock_id
+               WHERE et.discord_id=? AND au.discord_id=?""",
+            (str(discord_id), str(discord_id)),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        if own:
+            cm.__exit__(None,None,None)
+
+
+def equipped_titles_map(discord_ids=None):
+    with db() as c:
+        params=[]; where=""
+        if discord_ids is not None:
+            ids=[str(x) for x in dict.fromkeys(discord_ids) if str(x)]
+            if not ids: return {}
+            where="WHERE et.discord_id IN ("+",".join("?" for _ in ids)+")"
+            params=ids
+        rows=c.execute(
+            f"""SELECT et.discord_id,au.* FROM equipped_titles et
+                JOIN achievement_unlocks au ON au.id=et.unlock_id {where}""", params
+        ).fetchall()
+        return {str(r["discord_id"]):dict(r) for r in rows}
+
+
+def set_equipped_title(discord_id: str, unlock_id: int | None, updated_at: str) -> bool:
+    uid=str(discord_id)
+    with db() as c:
+        if unlock_id is None:
+            c.execute("DELETE FROM equipped_titles WHERE discord_id=?",(uid,))
+            return True
+        row=c.execute("SELECT id FROM achievement_unlocks WHERE id=? AND discord_id=?",(int(unlock_id),uid)).fetchone()
+        if not row: return False
+        c.execute(
+            """INSERT INTO equipped_titles(discord_id,unlock_id,updated_at) VALUES(?,?,?)
+               ON CONFLICT(discord_id) DO UPDATE SET unlock_id=excluded.unlock_id,updated_at=excluded.updated_at""",
+            (uid,int(unlock_id),str(updated_at)),
+        )
+    return True
+
+
+def achievement_unlocks_for_user(discord_id: str):
+    with db() as c:
+        return [dict(r) for r in c.execute(
+            "SELECT * FROM achievement_unlocks WHERE discord_id=? ORDER BY id", (str(discord_id),)
+        ).fetchall()]
+
+
+def _insert_unlock(c, uid, key, context_key, name, rarity, secret, context_label, unlocked_at, new_rows):
+    cur=c.execute(
+        """INSERT OR IGNORE INTO achievement_unlocks(
+             discord_id,achievement_key,context_key,title_name,rarity,secret,context_label,unlocked_at
+           ) VALUES(?,?,?,?,?,?,?,?)""",
+        (str(uid),str(key),str(context_key or ""),str(name),str(rarity),int(bool(secret)),context_label,str(unlocked_at)),
+    )
+    if cur.rowcount:
+        row=c.execute("SELECT * FROM achievement_unlocks WHERE id=?",(cur.lastrowid,)).fetchone()
+        new_rows.append(dict(row))
+
+
+def evaluate_achievements(as_of_date: str, unlocked_at: str):
+    """as_of_date までのカレンダーを参照して未取得称号だけ解除し、新規解除行を返す。"""
+    new_rows=[]
+    with db() as c:
+        records=_unique_table_records(c, as_of_date)
+        users=[str(r["discord_id"]) for r in c.execute("SELECT discord_id FROM registered_members").fetchall()]
+        metrics={uid:_member_metrics(c,uid,records) for uid in users}
+        defs={x["key"]:x for x in FIXED_ACHIEVEMENTS}
+
+        for uid,m in metrics.items():
+            values={
+                "pl":m["pl"], "gm":m["gm"], "trpg_pl":m["trpg_pl"], "madamis_pl":m["madamis_pl"],
+                "pair":m["max_pair"], "active_years":m["active_years"], "max_day":m["max_day"],
+                "total_roles":m["total_roles"], "streak":m["max_streak"], "christmas":1 if m["christmas"] else 0,
+            }
+            for d in FIXED_ACHIEVEMENTS:
+                if d["kind"] in ("pair_dynamic",):
+                    continue
+                if d["kind"] not in values: continue
+                if values[d["kind"]] >= d["target"]:
+                    _insert_unlock(c,uid,d["key"],"",d["name"],d["rarity"],d["secret"],None,unlocked_at,new_rows)
+
+            # 生き別れの兄弟は達成相手ごとに別解除。装備時に「〇〇と250卓同卓」を表示。
+            d=defs["pair_250"]
+            for other,n in m["pair_counts"].items():
+                if n >= d["target"]:
+                    label=f"{_display_name(c,other)}と{d['target']}卓同卓"
+                    _insert_unlock(c,uid,d["key"],str(other),d["name"],d["rarity"],1,label,unlocked_at,new_rows)
+
+            # 同じシナリオを5回GM → シナリオ名そのものを黒シークレット称号として解除。
+            scenario_counts={}
+            for r in m["gm_records"]:
+                if r["scenario"]:
+                    k=(r["game_type"],r["scenario"])
+                    scenario_counts[k]=scenario_counts.get(k,0)+1
+            for (gt,name),n in scenario_counts.items():
+                if n>=5:
+                    _insert_unlock(c,uid,"scenario_5",f"{gt}\x1f{name}",name,"black",1,None,unlocked_at,new_rows)
+
+        # つぶぐみ年度ごとに、PL+GM合計50卓へ最も早く到達した1人だけMVP。
+        years=sorted(set(_activity_year_for_date(r["date"]) for r in records))
+        for y in years:
+            year_records=[r for r in records if _activity_year_for_date(r["date"])==y]
+            candidates=[]
+            for uid in users:
+                appearances=[]
+                for r in year_records:
+                    if r["gm"]==uid or uid in r["members"]:
+                        appearances.append((r["date"],r["id"]))
+                appearances.sort()
+                if len(appearances)>=50:
+                    reach=appearances[49]
+                    candidates.append((reach[0],reach[1],uid))
+            if candidates:
+                _,_,winner=min(candidates)
+                _insert_unlock(c,winner,"year_mvp",str(y),f"{y}年のMVP","black",1,None,unlocked_at,new_rows)
+    return new_rows
+
+
+def achievement_collection(discord_id: str):
+    uid=str(discord_id)
+    with db() as c:
+        records=_unique_table_records(c)
+        m=_member_metrics(c,uid,records)
+        unlocked=[dict(r) for r in c.execute("SELECT * FROM achievement_unlocks WHERE discord_id=? ORDER BY id",(uid,)).fetchall()]
+        unlock_by_key={}
+        for r in unlocked: unlock_by_key.setdefault(r["achievement_key"],[]).append(r)
+        values={
+            "pl":m["pl"],"gm":m["gm"],"trpg_pl":m["trpg_pl"],"madamis_pl":m["madamis_pl"],
+            "pair":m["max_pair"],"active_years":m["active_years"],"max_day":m["max_day"],
+            "total_roles":m["total_roles"],"streak":m["max_streak"],"christmas":1 if m["christmas"] else 0,
+        }
+        cards=[]
+        for d in FIXED_ACHIEVEMENTS:
+            if d["kind"]=="pair_dynamic":
+                rows=unlock_by_key.get(d["key"],[])
+                if rows:
+                    for r in rows: cards.append({"definition":d,"unlock":r,"value":d["target"]})
+                else:
+                    cards.append({"definition":d,"unlock":None,"value":0})
+                continue
+            rows=unlock_by_key.get(d["key"],[])
+            cards.append({"definition":d,"unlock":rows[0] if rows else None,"value":values.get(d["kind"],0)})
+
+        # 動的シークレットは取得済みだけ実名で追加。未取得の仕組みは「？？？」カードを1枚ずつ置く。
+        scenario_rows=unlock_by_key.get("scenario_5",[])
+        if scenario_rows:
+            for r in scenario_rows:
+                cards.append({"definition":{"key":"scenario_5","name":r["title_name"],"rarity":"black","secret":1,"kind":"dynamic","target":5,"condition":"同じシナリオを5回回す"},"unlock":r,"value":5})
+        else:
+            cards.append({"definition":{"key":"scenario_5","name":"？？？？？？？","rarity":"black","secret":1,"kind":"dynamic","target":5,"condition":""},"unlock":None,"value":0})
+        mvp_rows=unlock_by_key.get("year_mvp",[])
+        if mvp_rows:
+            for r in mvp_rows:
+                cards.append({"definition":{"key":"year_mvp","name":r["title_name"],"rarity":"black","secret":1,"kind":"dynamic","target":1,"condition":""},"unlock":r,"value":1})
+        else:
+            cards.append({"definition":{"key":"year_mvp","name":"？？？？？？？","rarity":"black","secret":1,"kind":"dynamic","target":1,"condition":""},"unlock":None,"value":0})
+        return cards
+
+
+def achievement_run_done(run_date: str) -> bool:
+    with db() as c:
+        return c.execute("SELECT 1 FROM achievement_daily_runs WHERE run_date=?",(str(run_date),)).fetchone() is not None
+
+
+def mark_achievement_run(run_date: str, processed_at: str):
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO achievement_daily_runs(run_date,processed_at) VALUES(?,?)",(str(run_date),str(processed_at)))
+
+
+def achievement_bootstrapped() -> bool:
+    with db() as c:
+        return c.execute("SELECT 1 FROM achievement_meta WHERE meta_key='bootstrapped' AND meta_value='1'").fetchone() is not None
+
+
+def mark_achievement_bootstrapped():
+    with db() as c:
+        c.execute("INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('bootstrapped','1')")
