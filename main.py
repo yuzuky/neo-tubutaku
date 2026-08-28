@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, RARITY_LABELS, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3276,8 +3276,27 @@ async def bootstrap_achievements():
         if now.time() >= time(20,0):
             mark_achievement_run(today.isoformat(), stamp)
         return
-    # v69初回だけ、既存履歴から差分更新の基準を1度作る。以後は全履歴再集計しない。
-    if not profile_cache_initialized() or not profile_delta_initialized():
+    # v75初回だけ、現在のカレンダーを唯一の正としてプロフィール・称号派生データを完全再構築。
+    # 称号は一度全削除して再判定するが、過去分の獲得通知は送らない。
+    # 以後は20時の当日差分更新だけに戻る。
+    if not full_derived_rebuild_v75_done():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        stamp = iso_now()
+        full_derived_rebuild_v75(as_of.isoformat(), stamp)
+        # 20時以降に再構築した場合、当日分は既に再構築へ含まれているので処理済みにする。
+        if now.time() >= time(20,0):
+            mark_achievement_run(today.isoformat(), stamp)
+        return
+
+    # v74初回だけ、プロフィール集計キャッシュをカレンダー履歴から正しい値で作り直す。
+    # TRPG / マダミスは GM + PL の両方を含む値で再構築し、その後は20時の当日差分だけ更新する。
+    if not profile_cache_v74_resynced():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        stamp = iso_now()
+        refresh_profile_caches(as_of.isoformat(), stamp)
+        mark_profile_cache_v74_resynced(stamp)
+    # 旧版からの移行保険。通常は上のv74再同期で同時に初期化済みになる。
+    elif not profile_cache_initialized() or not profile_delta_initialized():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         refresh_profile_caches(as_of.isoformat(), iso_now())
     # v73初回だけシナリオ別GM回数と5回称号をカレンダー履歴から再同期。以後は20時に当日分だけ+1。
