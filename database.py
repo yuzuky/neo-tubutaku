@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import hashlib
+import json
 from contextlib import contextmanager
 
 # ============================================================
@@ -262,6 +264,50 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_profile_pair_cache_user_rank
                 ON profile_pair_cache(discord_id, rank_no);
+
+            -- v69: 日次差分更新用。過去履歴を毎日再走査しないための小さな集計テーブル
+            CREATE TABLE IF NOT EXISTS profile_processed_tables (
+                table_key TEXT PRIMARY KEY,
+                event_date TEXT NOT NULL,
+                processed_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_pair_totals (
+                discord_id TEXT NOT NULL,
+                partner_discord_id TEXT NOT NULL,
+                table_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(discord_id, partner_discord_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_active_days (
+                discord_id TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                table_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(discord_id, event_date)
+            );
+
+            CREATE TABLE IF NOT EXISTS profile_active_years (
+                discord_id TEXT NOT NULL,
+                activity_year INTEGER NOT NULL,
+                PRIMARY KEY(discord_id, activity_year)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_profile_processed_tables_date
+                ON profile_processed_tables(event_date);
+            CREATE INDEX IF NOT EXISTS idx_profile_pair_totals_user_count
+                ON profile_pair_totals(discord_id, table_count DESC);
+            CREATE INDEX IF NOT EXISTS idx_profile_active_days_user_date
+                ON profile_active_days(discord_id, event_date);
+
+            -- v70: 同じシナリオをGMした回数を差分で保持。毎日の全履歴走査は不要。
+            CREATE TABLE IF NOT EXISTS achievement_scenario_gm_totals (
+                discord_id TEXT NOT NULL,
+                scenario_name TEXT NOT NULL,
+                gm_count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(discord_id, scenario_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_achievement_scenario_gm_user_count
+                ON achievement_scenario_gm_totals(discord_id, gm_count DESC);
 
             CREATE INDEX IF NOT EXISTS idx_calendar_sessions_event_date
                 ON calendar_sessions(event_date);
@@ -1171,7 +1217,7 @@ def _unique_table_records(c, as_of_date: str | None = None):
             unique[key] = {
                 "id": sid, "date": str(r["event_date"]), "game_type": gt,
                 "scenario": str(r["scenario_name"] or "").strip(),
-                "gm": str(r["gm_discord_id"] or ""), "members": members,
+                "gm": str(r["gm_discord_id"] or ""), "members": members, "guests": guests,
             }
     return list(unique.values())
 
@@ -1234,6 +1280,62 @@ def _member_metrics(c, uid: str, records):
         "max_day": max_day, "christmas": christmas, "active_years": active_years,
         "gm_records": gm_records, "pl_records": pl_records, "all_records": all_records,
     }
+
+
+def _record_table_key(r) -> str:
+    payload = [
+        str(r.get("game_type") or ""),
+        str(r.get("scenario") or "").strip(),
+        str(r.get("gm") or ""),
+        sorted(str(x) for x in (r.get("members") or ()) if str(x)),
+        sorted(str(x) for x in (r.get("guests") or ()) if str(x)),
+    ]
+    return hashlib.sha1(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _seed_incremental_tracking(c, records, updated_at: str):
+    """v69初回だけ、既存キャッシュと同じ履歴から差分更新用の基準を作る。"""
+    c.execute("DELETE FROM profile_processed_tables")
+    c.execute("DELETE FROM profile_pair_totals")
+    c.execute("DELETE FROM profile_active_days")
+    c.execute("DELETE FROM profile_active_years")
+
+    pair_counts = {}
+    day_counts = {}
+    active_years = set()
+    for r in records:
+        key = _record_table_key(r)
+        c.execute(
+            "INSERT OR IGNORE INTO profile_processed_tables(table_key,event_date,processed_at) VALUES(?,?,?)",
+            (key, str(r["date"]), str(updated_at)),
+        )
+        people = set(str(x) for x in r.get("members", ()) if str(x))
+        if str(r.get("gm") or ""):
+            people.add(str(r["gm"]))
+        for uid in people:
+            dk = (uid, str(r["date"]))
+            day_counts[dk] = day_counts.get(dk, 0) + 1
+            active_years.add((uid, _activity_year_for_date(str(r["date"]))))
+            for other in people:
+                if other != uid:
+                    pk = (uid, other)
+                    pair_counts[pk] = pair_counts.get(pk, 0) + 1
+
+    if pair_counts:
+        c.executemany(
+            "INSERT INTO profile_pair_totals(discord_id,partner_discord_id,table_count) VALUES(?,?,?)",
+            [(a,b,n) for (a,b),n in pair_counts.items()],
+        )
+    if day_counts:
+        c.executemany(
+            "INSERT INTO profile_active_days(discord_id,event_date,table_count) VALUES(?,?,?)",
+            [(u,d,n) for (u,d),n in day_counts.items()],
+        )
+    if active_years:
+        c.executemany(
+            "INSERT INTO profile_active_years(discord_id,activity_year) VALUES(?,?)",
+            list(active_years),
+        )
 
 
 def refresh_profile_caches(as_of_date: str, updated_at: str):
@@ -1302,6 +1404,8 @@ def refresh_profile_caches(as_of_date: str, updated_at: str):
                     (uid,str(other),int(n),rank_no,str(updated_at)),
                 )
 
+        _seed_incremental_tracking(c, records, str(updated_at))
+
         c.execute(
             "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_as_of',?)",
             (str(as_of_date),),
@@ -1310,6 +1414,47 @@ def refresh_profile_caches(as_of_date: str, updated_at: str):
             "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_updated_at',?)",
             (str(updated_at),),
         )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_delta_v69_seeded','1')"
+        )
+
+
+def scenario_gm_counter_initialized() -> bool:
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='scenario_gm_delta_v70_seeded' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def ensure_scenario_gm_counter_initialized(as_of_date: str, updated_at: str):
+    """v70初回だけ既存履歴からシナリオ別GM回数を作る。
+
+    以後は apply_profile_daily_delta() が当日分だけ +1 するため、
+    毎日過去履歴を読み直すことはない。
+    """
+    with db() as c:
+        seeded = c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='scenario_gm_delta_v70_seeded' AND meta_value='1'"
+        ).fetchone()
+        if seeded:
+            return
+        records = _unique_table_records(c, str(as_of_date))
+        counts = {}
+        for r in records:
+            gm = str(r.get("gm") or "")
+            scenario = str(r.get("scenario") or "").strip()
+            if not gm or not scenario:
+                continue
+            counts[(gm, scenario)] = counts.get((gm, scenario), 0) + 1
+        c.execute("DELETE FROM achievement_scenario_gm_totals")
+        if counts:
+            c.executemany(
+                "INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,?)",
+                [(uid, scenario, n) for (uid, scenario), n in counts.items()],
+            )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('scenario_gm_delta_v70_seeded','1')"
+        )
 
 
 def profile_cache_initialized() -> bool:
@@ -1317,6 +1462,235 @@ def profile_cache_initialized() -> bool:
         return c.execute(
             "SELECT 1 FROM achievement_meta WHERE meta_key='profile_cache_as_of'"
         ).fetchone() is not None
+
+
+def profile_delta_initialized() -> bool:
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='profile_delta_v69_seeded' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def _unique_table_records_for_date(c, event_date: str):
+    rows = c.execute(
+        """SELECT id,event_date,game_type,scenario_name,gm_discord_id
+             FROM calendar_sessions
+            WHERE event_date=? AND game_type IN ('TRPG','MADMIS','マダミス')
+            ORDER BY id""",
+        (str(event_date),),
+    ).fetchall()
+    if not rows:
+        return []
+    ids = [int(r["id"]) for r in rows]
+    member_map = {sid: [] for sid in ids}
+    guest_map = {sid: [] for sid in ids}
+    for start in range(0, len(ids), 800):
+        chunk = ids[start:start+800]
+        ph = ",".join("?" for _ in chunk)
+        for x in c.execute(
+            f"SELECT calendar_session_id,discord_id FROM calendar_session_members WHERE calendar_session_id IN ({ph})",
+            chunk,
+        ).fetchall():
+            member_map[int(x["calendar_session_id"])].append(str(x["discord_id"]))
+        for x in c.execute(
+            f"SELECT calendar_session_id,display_name FROM calendar_guest_members WHERE calendar_session_id IN ({ph})",
+            chunk,
+        ).fetchall():
+            guest_map[int(x["calendar_session_id"])].append(str(x["display_name"]))
+    unique = {}
+    for r in rows:
+        sid = int(r["id"])
+        rec = {
+            "id": sid,
+            "date": str(r["event_date"]),
+            "game_type": _achievement_gt(r["game_type"]),
+            "scenario": str(r["scenario_name"] or "").strip(),
+            "gm": str(r["gm_discord_id"] or ""),
+            "members": tuple(sorted(member_map.get(sid, ()))),
+            "guests": tuple(sorted(guest_map.get(sid, ()))),
+        }
+        unique.setdefault(_record_table_key(rec), rec)
+    return list(unique.values())
+
+
+def _streak_ending_on(c, uid: str, event_date: str) -> int:
+    from datetime import date as _date, timedelta as _td
+    d = _date.fromisoformat(str(event_date))
+    n = 0
+    while True:
+        row = c.execute(
+            "SELECT 1 FROM profile_active_days WHERE discord_id=? AND event_date=?",
+            (str(uid), d.isoformat()),
+        ).fetchone()
+        if not row:
+            break
+        n += 1
+        d -= _td(days=1)
+    return n
+
+
+def _refresh_pair_top_for_user(c, uid: str, updated_at: str):
+    c.execute("DELETE FROM profile_pair_cache WHERE discord_id=?", (str(uid),))
+    rows = c.execute(
+        """SELECT pt.partner_discord_id,pt.table_count,
+                  COALESCE(rm.display_name,rm.username,u.display_name,u.username,pt.partner_discord_id) AS n
+             FROM profile_pair_totals pt
+             LEFT JOIN registered_members rm ON rm.discord_id=pt.partner_discord_id
+             LEFT JOIN users u ON u.discord_id=pt.partner_discord_id
+            WHERE pt.discord_id=?
+            ORDER BY pt.table_count DESC, n COLLATE NOCASE ASC
+            LIMIT 3""",
+        (str(uid),),
+    ).fetchall()
+    for rank_no, r in enumerate(rows, 1):
+        c.execute(
+            """INSERT INTO profile_pair_cache(discord_id,partner_discord_id,table_count,rank_no,updated_at)
+               VALUES(?,?,?,?,?)""",
+            (str(uid), str(r["partner_discord_id"]), int(r["table_count"]), rank_no, str(updated_at)),
+        )
+
+
+def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
+    """v69: 指定日の未処理卓だけをプロフィールキャッシュへ加算する。
+
+    過去の全履歴は読まない。初回v69移行時だけ refresh_profile_caches() で
+    基準を作り、それ以降の20時処理はこの関数だけを使う。
+    """
+    day = str(event_date)
+    with db() as c:
+        records = _unique_table_records_for_date(c, day)
+        if not records:
+            c.execute(
+                "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_as_of',?)",
+                (day,),
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_updated_at',?)",
+                (str(updated_at),),
+            )
+            return 0
+
+        registered = {str(r["discord_id"]) for r in c.execute("SELECT discord_id FROM registered_members").fetchall()}
+        affected = set()
+        added = 0
+        ay = _activity_year_for_date(day)
+        term = ay - 2023
+
+        for r in records:
+            key = _record_table_key(r)
+            cur = c.execute(
+                "INSERT OR IGNORE INTO profile_processed_tables(table_key,event_date,processed_at) VALUES(?,?,?)",
+                (key, day, str(updated_at)),
+            )
+            if not cur.rowcount:
+                continue
+            added += 1
+
+            gm = str(r.get("gm") or "")
+            members = [str(x) for x in r.get("members", ()) if str(x)]
+            people = set(members)
+            if gm:
+                people.add(gm)
+            people &= registered
+
+            for uid in people:
+                c.execute(
+                    """INSERT OR IGNORE INTO profile_stats_cache(
+                         discord_id,gm_count,pl_count,trpg_count,madamis_count,total_roles,
+                         max_pair,active_years,max_day,max_streak,christmas,updated_at
+                       ) VALUES(?,0,0,0,0,0,0,0,0,0,0,?)""",
+                    (uid, str(updated_at)),
+                )
+                c.execute(
+                    """INSERT OR IGNORE INTO profile_year_stats_cache(
+                         discord_id,activity_year,term,gm_count,pl_count,trpg_count,madamis_count,updated_at
+                       ) VALUES(?,?,?,0,0,0,0,?)""",
+                    (uid, ay, term, str(updated_at)),
+                )
+
+            if gm in registered:
+                c.execute(
+                    "UPDATE profile_stats_cache SET gm_count=gm_count+1,total_roles=total_roles+1,updated_at=? WHERE discord_id=?",
+                    (str(updated_at), gm),
+                )
+                c.execute(
+                    "UPDATE profile_year_stats_cache SET gm_count=gm_count+1,updated_at=? WHERE discord_id=? AND activity_year=?",
+                    (str(updated_at), gm, ay),
+                )
+                affected.add(gm)
+                scenario = str(r.get("scenario") or "").strip()
+                if scenario:
+                    c.execute(
+                        """INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,1)
+                           ON CONFLICT(discord_id,scenario_name) DO UPDATE SET gm_count=gm_count+1""",
+                        (gm, scenario),
+                    )
+
+            for uid in members:
+                if uid not in registered:
+                    continue
+                type_col = "madamis_count" if str(r.get("game_type")) == "MADMIS" else "trpg_count"
+                c.execute(
+                    f"UPDATE profile_stats_cache SET pl_count=pl_count+1,{type_col}={type_col}+1,total_roles=total_roles+1,updated_at=? WHERE discord_id=?",
+                    (str(updated_at), uid),
+                )
+                c.execute(
+                    f"UPDATE profile_year_stats_cache SET pl_count=pl_count+1,{type_col}={type_col}+1,updated_at=? WHERE discord_id=? AND activity_year=?",
+                    (str(updated_at), uid, ay),
+                )
+                affected.add(uid)
+
+            for uid in people:
+                c.execute(
+                    """INSERT INTO profile_active_days(discord_id,event_date,table_count) VALUES(?,?,1)
+                       ON CONFLICT(discord_id,event_date) DO UPDATE SET table_count=table_count+1""",
+                    (uid, day),
+                )
+                c.execute(
+                    "INSERT OR IGNORE INTO profile_active_years(discord_id,activity_year) VALUES(?,?)",
+                    (uid, ay),
+                )
+                for other in people:
+                    if other == uid:
+                        continue
+                    c.execute(
+                        """INSERT INTO profile_pair_totals(discord_id,partner_discord_id,table_count) VALUES(?,?,1)
+                           ON CONFLICT(discord_id,partner_discord_id) DO UPDATE SET table_count=table_count+1""",
+                        (uid, other),
+                    )
+
+        for uid in affected:
+            day_count_row = c.execute(
+                "SELECT table_count FROM profile_active_days WHERE discord_id=? AND event_date=?",
+                (uid, day),
+            ).fetchone()
+            day_count = int(day_count_row["table_count"]) if day_count_row else 0
+            active_years = int(c.execute(
+                "SELECT COUNT(*) AS n FROM profile_active_years WHERE discord_id=?", (uid,)
+            ).fetchone()["n"])
+            max_pair = int(c.execute(
+                "SELECT COALESCE(MAX(table_count),0) AS n FROM profile_pair_totals WHERE discord_id=?", (uid,)
+            ).fetchone()["n"])
+            streak = _streak_ending_on(c, uid, day)
+            christmas = 1 if day[5:] in ("12-24", "12-25") and day_count else 0
+            c.execute(
+                """UPDATE profile_stats_cache
+                      SET max_pair=?,active_years=?,max_day=MAX(max_day,?),max_streak=MAX(max_streak,?),
+                          christmas=MAX(christmas,?),updated_at=?
+                    WHERE discord_id=?""",
+                (max_pair, active_years, day_count, streak, christmas, str(updated_at), uid),
+            )
+            _refresh_pair_top_for_user(c, uid, str(updated_at))
+
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_as_of',?)",
+            (day,),
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_updated_at',?)",
+            (str(updated_at),),
+        )
+        return added
 
 
 def profile_data(discord_id: str):
@@ -1437,63 +1811,63 @@ def _insert_unlock(c, uid, key, context_key, name, rarity, secret, context_label
 
 
 def evaluate_achievements(as_of_date: str, unlocked_at: str):
-    """as_of_date までのカレンダーを参照して未取得称号だけ解除し、新規解除行を返す。"""
-    new_rows=[]
-    with db() as c:
-        records=_unique_table_records(c, as_of_date)
-        users=[str(r["discord_id"]) for r in c.execute("SELECT discord_id FROM registered_members").fetchall()]
-        metrics={uid:_member_metrics(c,uid,records) for uid in users}
-        defs={x["key"]:x for x in FIXED_ACHIEVEMENTS}
+    """v69: 表示キャッシュだけで固定称号を判定する軽量版。
 
-        for uid,m in metrics.items():
-            values={
-                "pl":m["pl"], "gm":m["gm"], "trpg_pl":m["trpg_pl"], "madamis_pl":m["madamis_pl"],
-                "pair":m["max_pair"], "active_years":m["active_years"], "max_day":m["max_day"],
-                "total_roles":m["total_roles"], "streak":m["max_streak"], "christmas":1 if m["christmas"] else 0,
+    毎日20時に過去履歴を再走査しない。シナリオ5回 / 年間MVPの新規判定は
+    いったん停止し、既に解除済みの称号はそのまま保持する。
+    """
+    new_rows = []
+    with db() as c:
+        defs = {x["key"]: x for x in FIXED_ACHIEVEMENTS}
+        rows = c.execute(
+            """SELECT ps.*,rm.discord_id
+                 FROM profile_stats_cache ps
+                 JOIN registered_members rm ON rm.discord_id=ps.discord_id"""
+        ).fetchall()
+        for row in rows:
+            uid = str(row["discord_id"])
+            values = {
+                "pl": int(row["pl_count"]),
+                "gm": int(row["gm_count"]),
+                "trpg_pl": int(row["trpg_count"]),
+                "madamis_pl": int(row["madamis_count"]),
+                "pair": int(row["max_pair"]),
+                "active_years": int(row["active_years"]),
+                "max_day": int(row["max_day"]),
+                "total_roles": int(row["total_roles"]),
+                "streak": int(row["max_streak"]),
+                "christmas": int(row["christmas"]),
             }
             for d in FIXED_ACHIEVEMENTS:
-                if d["kind"] in ("pair_dynamic",):
+                if d["kind"] == "pair_dynamic":
                     continue
-                if d["kind"] not in values: continue
+                if d["kind"] not in values:
+                    continue
                 if values[d["kind"]] >= d["target"]:
-                    _insert_unlock(c,uid,d["key"],"",d["name"],d["rarity"],d["secret"],None,unlocked_at,new_rows)
+                    _insert_unlock(c, uid, d["key"], "", d["name"], d["rarity"], d["secret"], None, unlocked_at, new_rows)
 
-            # 生き別れの兄弟は達成相手ごとに別解除。装備時に「〇〇と250卓同卓」を表示。
-            d=defs["pair_250"]
-            for other,n in m["pair_counts"].items():
-                if n >= d["target"]:
-                    label=f"{_display_name(c,other)}と{d['target']}卓同卓"
-                    _insert_unlock(c,uid,d["key"],str(other),d["name"],d["rarity"],1,label,unlocked_at,new_rows)
+            # 生き別れの兄弟だけは相手別の累計キャッシュから判定できるので継続。
+            d = defs["pair_250"]
+            for pr in c.execute(
+                "SELECT partner_discord_id,table_count FROM profile_pair_totals WHERE discord_id=? AND table_count>=?",
+                (uid, int(d["target"])),
+            ).fetchall():
+                other = str(pr["partner_discord_id"])
+                label = f"{_display_name(c, other)}と{d['target']}卓同卓"
+                _insert_unlock(c, uid, d["key"], other, d["name"], d["rarity"], 1, label, unlocked_at, new_rows)
 
-            # 同じシナリオを5回GM → シナリオ名そのものを黒シークレット称号として解除。
-            scenario_counts={}
-            for r in m["gm_records"]:
-                if r["scenario"]:
-                    k=(r["game_type"],r["scenario"])
-                    scenario_counts[k]=scenario_counts.get(k,0)+1
-            for (gt,name),n in scenario_counts.items():
-                if n>=5:
-                    _insert_unlock(c,uid,"scenario_5",f"{gt}\x1f{name}",name,"black",1,None,unlocked_at,new_rows)
+            # v70: シナリオ5回は専用カウンターだけを見るので軽量。
+            # 条件を満たすシナリオごとに別の黒称号として解除できる。
+            for sr in c.execute(
+                "SELECT scenario_name,gm_count FROM achievement_scenario_gm_totals WHERE discord_id=? AND gm_count>=5",
+                (uid,),
+            ).fetchall():
+                scenario = str(sr["scenario_name"] or "").strip()
+                if scenario:
+                    _insert_unlock(c, uid, "scenario_5", scenario, scenario, "black", 1,
+                                   f"{scenario}を5回回す", unlocked_at, new_rows)
 
-        # つぶぐみ年度ごとに、PL+GM合計50卓へ最も早く到達した1人だけMVP。
-        years=sorted(set(_activity_year_for_date(r["date"]) for r in records))
-        for y in years:
-            year_records=[r for r in records if _activity_year_for_date(r["date"])==y]
-            candidates=[]
-            for uid in users:
-                appearances=[]
-                for r in year_records:
-                    if r["gm"]==uid or uid in r["members"]:
-                        appearances.append((r["date"],r["id"]))
-                appearances.sort()
-                if len(appearances)>=50:
-                    reach=appearances[49]
-                    candidates.append((reach[0],reach[1],uid))
-            if candidates:
-                _,_,winner=min(candidates)
-                _insert_unlock(c,winner,"year_mvp",str(y),f"{y}年のMVP","black",1,None,unlocked_at,new_rows)
     return new_rows
-
 
 def achievement_collection(discord_id: str):
     """v68: 称号進捗も20時更新のプロフィールキャッシュから表示する。"""
@@ -1531,18 +1905,11 @@ def achievement_collection(discord_id: str):
             rows=unlock_by_key.get(d["key"],[])
             cards.append({"definition":d,"unlock":rows[0] if rows else None,"value":values.get(d["kind"],0)})
 
-        scenario_rows=unlock_by_key.get("scenario_5",[])
-        if scenario_rows:
-            for r in scenario_rows:
-                cards.append({"definition":{"key":"scenario_5","name":r["title_name"],"rarity":"black","secret":1,"kind":"dynamic","target":5,"condition":"同じシナリオを5回回す"},"unlock":r,"value":5})
-        else:
-            cards.append({"definition":{"key":"scenario_5","name":"？？？？？？？","rarity":"black","secret":1,"kind":"dynamic","target":5,"condition":""},"unlock":None,"value":0})
-        mvp_rows=unlock_by_key.get("year_mvp",[])
-        if mvp_rows:
-            for r in mvp_rows:
-                cards.append({"definition":{"key":"year_mvp","name":r["title_name"],"rarity":"black","secret":1,"kind":"dynamic","target":1,"condition":""},"unlock":r,"value":1})
-        else:
-            cards.append({"definition":{"key":"year_mvp","name":"？？？？？？？","rarity":"black","secret":1,"kind":"dynamic","target":1,"condition":""},"unlock":None,"value":0})
+        # v70: シナリオ5回は差分カウンターで復活。年間MVPは引き続き新規判定を停止。
+        for r in unlock_by_key.get("scenario_5",[]):
+            cards.append({"definition":{"key":"scenario_5","name":r["title_name"],"rarity":"black","secret":1,"kind":"dynamic","target":5,"condition":"同じシナリオを5回回す"},"unlock":r,"value":5})
+        for r in unlock_by_key.get("year_mvp",[]):
+            cards.append({"definition":{"key":"year_mvp","name":r["title_name"],"rarity":"black","secret":1,"kind":"dynamic","target":1,"condition":""},"unlock":r,"value":1})
         return cards
 
 
