@@ -2389,6 +2389,49 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   }}
 }}
 
+
+
+/* v62: scenario names stay on one line, left aligned, and truncate with ellipsis */
+.progress-scenario-row{{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;
+  column-gap:10px;
+  padding:11px 13px;
+  text-align:left;
+}}
+.progress-scenario-name{{
+  display:block;
+  width:100%;
+  min-width:0;
+  text-align:left;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  line-height:1.28;
+}}
+.progress-scenario-counts{{
+  position:static;
+  transform:none;
+  align-self:center;
+  white-space:nowrap;
+}}
+@media(max-width:620px){{
+  .progress-scenario-row{{
+    grid-template-columns:minmax(0,1fr) auto;
+    padding:11px 10px;
+    column-gap:7px;
+  }}
+  .progress-scenario-counts{{
+    position:static;
+    transform:none;
+    right:auto;
+    top:auto;
+    gap:4px;
+    font-size:.60rem;
+  }}
+}}
+
 </style>
 </head>
 <body>
@@ -3634,7 +3677,7 @@ async def calendar_page(request: Request, month: str = ""):
                   <span>新規参加者を追加</span>
                 </label>
                 <div class='guest-member-input-wrap' id='manualGuestMemberInputWrap'>
-                  <textarea name='guest_participant_names' rows='2' placeholder='参加者名を入力（複数人は1行に1人）'></textarea>
+                  <textarea name='guest_participant_names' rows='2' placeholder='参加者名を入力（1行で一名追加）'></textarea>
                 </div>
               </div>
 
@@ -3802,7 +3845,7 @@ async def calendar_page(request: Request, month: str = ""):
                     <span>新規参加者を追加</span>
                   </label>
                   <div class='guest-member-input-wrap' id='editGuestMemberInputWrap'>
-                    <textarea id='calendarEditGuestMembers' name='guest_participant_names' rows='2' placeholder='参加者名を入力（複数人は1行に1人）'></textarea>
+                    <textarea id='calendarEditGuestMembers' name='guest_participant_names' rows='2' placeholder='参加者名を入力（1行で一名追加）'></textarea>
                   </div>
                 </div>
 
@@ -6817,3 +6860,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# v62 note: UI CSS override is injected above at source-generation time.
