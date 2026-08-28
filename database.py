@@ -1448,6 +1448,90 @@ def refresh_profile_caches(as_of_date: str, updated_at: str):
         )
 
 
+
+
+def full_derived_rebuild_v75_done() -> bool:
+    """v75の一度きりの完全再構築が正常完了しているか。"""
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='full_derived_rebuild_v75_done' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def full_derived_rebuild_v75(as_of_date: str, updated_at: str):
+    """現在のカレンダー履歴を唯一の正として、プロフィール・称号派生データを一度だけ完全再構築する。
+
+    カレンダー本体、募集、登録メンバー、通過状況には触れない。
+    称号解除・装備は全消去してから現在の実績だけで再判定する。
+    完了マーカーは最後に書くため、途中失敗時は次回起動で安全に再試行できる。
+    """
+    # 1) 称号だけ先に完全リセット。今回はまだ誰も装備していない前提だが、
+    #    FKや古いunlock_idを残さないため装備も明示的に空にする。
+    with db() as c:
+        c.execute("DELETE FROM equipped_titles")
+        c.execute("DELETE FROM achievement_unlocks")
+        c.execute("DELETE FROM achievement_daily_runs")
+        c.execute("DELETE FROM achievement_scenario_gm_totals")
+        c.execute("DELETE FROM achievement_meta WHERE meta_key='full_derived_rebuild_v75_done'")
+
+    # 2) 全カレンダー履歴からプロフィール表示キャッシュと、以後の差分更新基準を再生成。
+    refresh_profile_caches(str(as_of_date), str(updated_at))
+
+    # 3) シナリオ別GM回数も同じカレンダー履歴からゼロベースで再生成。
+    with db() as c:
+        records = _unique_table_records(c, str(as_of_date))
+        counts = {}
+        for r in records:
+            gm = str(r.get("gm") or "")
+            scenario = str(r.get("scenario") or "").strip()
+            if gm and scenario:
+                counts[(gm, scenario)] = counts.get((gm, scenario), 0) + 1
+        if counts:
+            c.executemany(
+                "INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,?)",
+                [(uid, scenario, n) for (uid, scenario), n in counts.items()],
+            )
+
+    # 4) 再生成したキャッシュだけを使って全称号を静かに再判定。
+    #    呼び出し側では通知しない。
+    rebuilt_unlocks = evaluate_achievements(str(as_of_date), str(updated_at))
+
+    # 5) すべて成功してから移行完了を記録。旧移行マーカーも現在状態に揃える。
+    with db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('full_derived_rebuild_v75_done','1')"
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('full_derived_rebuild_v75_done_at',?)",
+            (str(updated_at),),
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_v74_resynced','1')"
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('scenario_gm_delta_v73_seeded','1')"
+        )
+    return rebuilt_unlocks
+
+def profile_cache_v74_resynced() -> bool:
+    """v74でプロフィール集計キャッシュをカレンダー履歴から再同期済みか。"""
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='profile_cache_v74_resynced' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def mark_profile_cache_v74_resynced(updated_at: str):
+    """v74の一度きりのプロフィールキャッシュ再同期を完了扱いにする。"""
+    with db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_v74_resynced','1')"
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_v74_resynced_at',?)",
+            (str(updated_at),),
+        )
+
 def scenario_gm_counter_initialized() -> bool:
     """v73のシナリオGMカウンター再同期が完了しているか。"""
     with db() as c:
