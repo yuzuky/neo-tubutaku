@@ -232,6 +232,8 @@ def init_db():
                 pl_count INTEGER NOT NULL DEFAULT 0,
                 trpg_count INTEGER NOT NULL DEFAULT 0,
                 madamis_count INTEGER NOT NULL DEFAULT 0,
+                trpg_pl_count INTEGER NOT NULL DEFAULT 0,
+                madamis_pl_count INTEGER NOT NULL DEFAULT 0,
                 total_roles INTEGER NOT NULL DEFAULT 0,
                 max_pair INTEGER NOT NULL DEFAULT 0,
                 active_years INTEGER NOT NULL DEFAULT 0,
@@ -249,6 +251,8 @@ def init_db():
                 pl_count INTEGER NOT NULL DEFAULT 0,
                 trpg_count INTEGER NOT NULL DEFAULT 0,
                 madamis_count INTEGER NOT NULL DEFAULT 0,
+                trpg_pl_count INTEGER NOT NULL DEFAULT 0,
+                madamis_pl_count INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(discord_id, activity_year)
             );
@@ -367,6 +371,26 @@ def ensure_recruitment_columns():
                 "ALTER TABLE recruitments "
                 "ADD COLUMN calendar_visible INTEGER NOT NULL DEFAULT 0"
             )
+
+
+def ensure_profile_cache_columns():
+    """v73: 既存の表示キャッシュへPL専用内訳列を安全に追加する。
+
+    trpg_count / madamis_count は v73 以降「GM+PLで参加した卓数」。
+    称号判定用のPL専用値は別列に保持する。
+    """
+    with db() as c:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(profile_stats_cache)").fetchall()}
+        if "trpg_pl_count" not in cols:
+            c.execute("ALTER TABLE profile_stats_cache ADD COLUMN trpg_pl_count INTEGER NOT NULL DEFAULT 0")
+        if "madamis_pl_count" not in cols:
+            c.execute("ALTER TABLE profile_stats_cache ADD COLUMN madamis_pl_count INTEGER NOT NULL DEFAULT 0")
+
+        ycols = {r["name"] for r in c.execute("PRAGMA table_info(profile_year_stats_cache)").fetchall()}
+        if "trpg_pl_count" not in ycols:
+            c.execute("ALTER TABLE profile_year_stats_cache ADD COLUMN trpg_pl_count INTEGER NOT NULL DEFAULT 0")
+        if "madamis_pl_count" not in ycols:
+            c.execute("ALTER TABLE profile_year_stats_cache ADD COLUMN madamis_pl_count INTEGER NOT NULL DEFAULT 0")
 
 
 def ensure_calendar_columns():
@@ -1103,6 +1127,7 @@ def initialize_database():
     init_db()
     ensure_recruitment_columns()
     ensure_calendar_columns()
+    ensure_profile_cache_columns()
     with db() as c:
         c.execute(
             """INSERT OR IGNORE INTO registered_members(
@@ -1242,6 +1267,9 @@ def _member_metrics(c, uid: str, records):
     all_records = [r for r in records if r["gm"] == uid or uid in r["members"]]
     trpg_pl = sum(1 for r in pl_records if r["game_type"] == "TRPG")
     madamis_pl = sum(1 for r in pl_records if r["game_type"] == "MADMIS")
+    # v73: プロフィールのTRPG/マダミス数は、GM・PLどちらの参加も1卓として数える。
+    trpg_total = sum(1 for r in records if r["game_type"] == "TRPG" and (r["gm"] == uid or uid in r["members"]))
+    madamis_total = sum(1 for r in records if r["game_type"] == "MADMIS" and (r["gm"] == uid or uid in r["members"]))
 
     pair_counts = {}
     for r in all_records:
@@ -1275,6 +1303,7 @@ def _member_metrics(c, uid: str, records):
     active_years = len(set(_activity_year_for_date(r["date"]) for r in all_records))
     return {
         "gm": len(gm_records), "pl": len(pl_records), "trpg_pl": trpg_pl, "madamis_pl": madamis_pl,
+        "trpg_total": trpg_total, "madamis_total": madamis_total,
         "total_roles": len(gm_records) + len(pl_records), "pair_counts": pair_counts,
         "max_pair": max(pair_counts.values(), default=0), "max_streak": max_streak,
         "max_day": max_day, "christmas": christmas, "active_years": active_years,
@@ -1374,10 +1403,10 @@ def refresh_profile_caches(as_of_date: str, updated_at: str):
             m = _member_metrics(c, uid, records)
             c.execute(
                 """INSERT INTO profile_stats_cache(
-                     discord_id,gm_count,pl_count,trpg_count,madamis_count,total_roles,
+                     discord_id,gm_count,pl_count,trpg_count,madamis_count,trpg_pl_count,madamis_pl_count,total_roles,
                      max_pair,active_years,max_day,max_streak,christmas,updated_at
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (uid,m["gm"],m["pl"],m["trpg_pl"],m["madamis_pl"],m["total_roles"],
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (uid,m["gm"],m["pl"],m["trpg_total"],m["madamis_total"],m["trpg_pl"],m["madamis_pl"],m["total_roles"],
                  m["max_pair"],m["active_years"],m["max_day"],m["max_streak"],
                  1 if m["christmas"] else 0,str(updated_at)),
             )
@@ -1387,9 +1416,9 @@ def refresh_profile_caches(as_of_date: str, updated_at: str):
                 mm = _member_metrics(c, uid, yr)
                 c.execute(
                     """INSERT INTO profile_year_stats_cache(
-                         discord_id,activity_year,term,gm_count,pl_count,trpg_count,madamis_count,updated_at
-                       ) VALUES(?,?,?,?,?,?,?,?)""",
-                    (uid,y,y-2023,mm["gm"],mm["pl"],mm["trpg_pl"],mm["madamis_pl"],str(updated_at)),
+                         discord_id,activity_year,term,gm_count,pl_count,trpg_count,madamis_count,trpg_pl_count,madamis_pl_count,updated_at
+                       ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                    (uid,y,y-2023,mm["gm"],mm["pl"],mm["trpg_total"],mm["madamis_total"],mm["trpg_pl"],mm["madamis_pl"],str(updated_at)),
                 )
 
             pairs = sorted(
@@ -1420,24 +1449,26 @@ def refresh_profile_caches(as_of_date: str, updated_at: str):
 
 
 def scenario_gm_counter_initialized() -> bool:
+    """v73のシナリオGMカウンター再同期が完了しているか。"""
     with db() as c:
         return c.execute(
-            "SELECT 1 FROM achievement_meta WHERE meta_key='scenario_gm_delta_v70_seeded' AND meta_value='1'"
+            "SELECT 1 FROM achievement_meta WHERE meta_key='scenario_gm_delta_v73_seeded' AND meta_value='1'"
         ).fetchone() is not None
 
 
 def ensure_scenario_gm_counter_initialized(as_of_date: str, updated_at: str):
-    """v70初回だけ既存履歴からシナリオ別GM回数を作る。
+    """v73初回だけ、カレンダー履歴を正としてシナリオ5回称号を再構築する。
 
-    以後は apply_profile_daily_delta() が当日分だけ +1 するため、
-    毎日過去履歴を読み直すことはない。
+    ここで一度だけ全履歴からGM回数を作り直し、重複していた scenario_5 の解除行も
+    正規化する。以後は apply_profile_daily_delta() が当日分だけ +1 する。
     """
     with db() as c:
         seeded = c.execute(
-            "SELECT 1 FROM achievement_meta WHERE meta_key='scenario_gm_delta_v70_seeded' AND meta_value='1'"
+            "SELECT 1 FROM achievement_meta WHERE meta_key='scenario_gm_delta_v73_seeded' AND meta_value='1'"
         ).fetchone()
         if seeded:
             return
+
         records = _unique_table_records(c, str(as_of_date))
         counts = {}
         for r in records:
@@ -1446,14 +1477,52 @@ def ensure_scenario_gm_counter_initialized(as_of_date: str, updated_at: str):
             if not gm or not scenario:
                 continue
             counts[(gm, scenario)] = counts.get((gm, scenario), 0) + 1
+
+        # 現在 scenario_5 を装備している人は、再生成後の新しいunlock_idへ付け替える。
+        equipped_scenarios = {}
+        for row in c.execute(
+            """SELECT et.discord_id,au.context_key,au.title_name
+                 FROM equipped_titles et
+                 JOIN achievement_unlocks au ON au.id=et.unlock_id
+                WHERE au.achievement_key='scenario_5'"""
+        ).fetchall():
+            equipped_scenarios[str(row["discord_id"])] = str(row["context_key"] or row["title_name"] or "").strip()
+
         c.execute("DELETE FROM achievement_scenario_gm_totals")
         if counts:
             c.executemany(
                 "INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,?)",
                 [(uid, scenario, n) for (uid, scenario), n in counts.items()],
             )
+
+        # v70以前に発生した重複・不整合を一度リセットし、カレンダー実績から正しく再付与。
+        c.execute("DELETE FROM achievement_unlocks WHERE achievement_key='scenario_5'")
+        for (uid, scenario), n in counts.items():
+            if int(n) < 5:
+                continue
+            c.execute(
+                """INSERT OR IGNORE INTO achievement_unlocks(
+                     discord_id,achievement_key,context_key,title_name,rarity,secret,context_label,unlocked_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
+                (uid, "scenario_5", scenario, scenario, "black", 1, f"{scenario}を5回回す", str(updated_at)),
+            )
+
+        for uid, scenario in equipped_scenarios.items():
+            row = c.execute(
+                """SELECT id FROM achievement_unlocks
+                    WHERE discord_id=? AND achievement_key='scenario_5' AND context_key=?""",
+                (uid, scenario),
+            ).fetchone()
+            if row:
+                c.execute(
+                    "INSERT OR REPLACE INTO equipped_titles(discord_id,unlock_id,updated_at) VALUES(?,?,?)",
+                    (uid, int(row["id"]), str(updated_at)),
+                )
+            else:
+                c.execute("DELETE FROM equipped_titles WHERE discord_id=?", (uid,))
+
         c.execute(
-            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('scenario_gm_delta_v70_seeded','1')"
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('scenario_gm_delta_v73_seeded','1')"
         )
 
 
@@ -1596,25 +1665,26 @@ def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
             for uid in people:
                 c.execute(
                     """INSERT OR IGNORE INTO profile_stats_cache(
-                         discord_id,gm_count,pl_count,trpg_count,madamis_count,total_roles,
+                         discord_id,gm_count,pl_count,trpg_count,madamis_count,trpg_pl_count,madamis_pl_count,total_roles,
                          max_pair,active_years,max_day,max_streak,christmas,updated_at
-                       ) VALUES(?,0,0,0,0,0,0,0,0,0,0,?)""",
+                       ) VALUES(?,0,0,0,0,0,0,0,0,0,0,0,0,?)""",
                     (uid, str(updated_at)),
                 )
                 c.execute(
                     """INSERT OR IGNORE INTO profile_year_stats_cache(
-                         discord_id,activity_year,term,gm_count,pl_count,trpg_count,madamis_count,updated_at
-                       ) VALUES(?,?,?,0,0,0,0,?)""",
+                         discord_id,activity_year,term,gm_count,pl_count,trpg_count,madamis_count,trpg_pl_count,madamis_pl_count,updated_at
+                       ) VALUES(?,?,?,0,0,0,0,0,0,?)""",
                     (uid, ay, term, str(updated_at)),
                 )
 
             if gm in registered:
+                gm_type_col = "madamis_count" if str(r.get("game_type")) == "MADMIS" else "trpg_count"
                 c.execute(
-                    "UPDATE profile_stats_cache SET gm_count=gm_count+1,total_roles=total_roles+1,updated_at=? WHERE discord_id=?",
+                    f"UPDATE profile_stats_cache SET gm_count=gm_count+1,{gm_type_col}={gm_type_col}+1,total_roles=total_roles+1,updated_at=? WHERE discord_id=?",
                     (str(updated_at), gm),
                 )
                 c.execute(
-                    "UPDATE profile_year_stats_cache SET gm_count=gm_count+1,updated_at=? WHERE discord_id=? AND activity_year=?",
+                    f"UPDATE profile_year_stats_cache SET gm_count=gm_count+1,{gm_type_col}={gm_type_col}+1,updated_at=? WHERE discord_id=? AND activity_year=?",
                     (str(updated_at), gm, ay),
                 )
                 affected.add(gm)
@@ -1629,13 +1699,15 @@ def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
             for uid in members:
                 if uid not in registered:
                     continue
-                type_col = "madamis_count" if str(r.get("game_type")) == "MADMIS" else "trpg_count"
+                is_madamis = str(r.get("game_type")) == "MADMIS"
+                type_col = "madamis_count" if is_madamis else "trpg_count"
+                pl_type_col = "madamis_pl_count" if is_madamis else "trpg_pl_count"
                 c.execute(
-                    f"UPDATE profile_stats_cache SET pl_count=pl_count+1,{type_col}={type_col}+1,total_roles=total_roles+1,updated_at=? WHERE discord_id=?",
+                    f"UPDATE profile_stats_cache SET pl_count=pl_count+1,{type_col}={type_col}+1,{pl_type_col}={pl_type_col}+1,total_roles=total_roles+1,updated_at=? WHERE discord_id=?",
                     (str(updated_at), uid),
                 )
                 c.execute(
-                    f"UPDATE profile_year_stats_cache SET pl_count=pl_count+1,{type_col}={type_col}+1,updated_at=? WHERE discord_id=? AND activity_year=?",
+                    f"UPDATE profile_year_stats_cache SET pl_count=pl_count+1,{type_col}={type_col}+1,{pl_type_col}={pl_type_col}+1,updated_at=? WHERE discord_id=? AND activity_year=?",
                     (str(updated_at), uid, ay),
                 )
                 affected.add(uid)
@@ -1829,8 +1901,8 @@ def evaluate_achievements(as_of_date: str, unlocked_at: str):
             values = {
                 "pl": int(row["pl_count"]),
                 "gm": int(row["gm_count"]),
-                "trpg_pl": int(row["trpg_count"]),
-                "madamis_pl": int(row["madamis_count"]),
+                "trpg_pl": int(row["trpg_pl_count"]),
+                "madamis_pl": int(row["madamis_pl_count"]),
                 "pair": int(row["max_pair"]),
                 "active_years": int(row["active_years"]),
                 "max_day": int(row["max_day"]),
@@ -1877,8 +1949,8 @@ def achievement_collection(discord_id: str):
         values={
             "pl":int(stat["pl_count"]) if stat else 0,
             "gm":int(stat["gm_count"]) if stat else 0,
-            "trpg_pl":int(stat["trpg_count"]) if stat else 0,
-            "madamis_pl":int(stat["madamis_count"]) if stat else 0,
+            "trpg_pl":int(stat["trpg_pl_count"]) if stat else 0,
+            "madamis_pl":int(stat["madamis_pl_count"]) if stat else 0,
             "pair":int(stat["max_pair"]) if stat else 0,
             "active_years":int(stat["active_years"]) if stat else 0,
             "max_day":int(stat["max_day"]) if stat else 0,
