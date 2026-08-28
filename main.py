@@ -449,6 +449,80 @@ def get_recruitment_images(rid: int) -> list[str]:
         return paths
 
 
+
+
+def cleanup_posted_recruitment_images(rid: int | None = None) -> int:
+    """
+    Discordへの募集投稿が完了した画像をローカル保存から解放する。
+    Discord側の添付画像はDiscordが保持するため、投稿後のローカルコピーは不要。
+    DB上の画像参照も削除し、他の募集から参照されていない実ファイルだけ消す。
+    rid=None の場合は、既に投稿済みの募集をまとめて掃除する。
+    """
+    with db() as c:
+        if rid is None:
+            rows = c.execute(
+                """SELECT id, image_path
+                   FROM recruitments
+                   WHERE recruitment_message_id IS NOT NULL
+                     AND recruitment_message_id<>''"""
+            ).fetchall()
+            target_ids = [int(x["id"]) for x in rows]
+            legacy_paths = [str(x["image_path"]) for x in rows if x["image_path"]]
+        else:
+            row = c.execute(
+                "SELECT id, image_path FROM recruitments WHERE id=?",
+                (rid,),
+            ).fetchone()
+            if not row:
+                return 0
+            target_ids = [int(row["id"])]
+            legacy_paths = [str(row["image_path"])] if row["image_path"] else []
+
+        if not target_ids:
+            return 0
+
+        marks = ",".join("?" for _ in target_ids)
+        image_rows = c.execute(
+            f"SELECT image_path FROM recruitment_images WHERE recruitment_id IN ({marks})",
+            tuple(target_ids),
+        ).fetchall()
+        candidate_paths = {str(x["image_path"]) for x in image_rows if x["image_path"]}
+        candidate_paths.update(legacy_paths)
+
+        c.execute(
+            f"DELETE FROM recruitment_images WHERE recruitment_id IN ({marks})",
+            tuple(target_ids),
+        )
+        c.execute(
+            f"UPDATE recruitments SET image_path=NULL WHERE id IN ({marks})",
+            tuple(target_ids),
+        )
+
+        deletable = []
+        for path_str in candidate_paths:
+            still_multi = c.execute(
+                "SELECT 1 FROM recruitment_images WHERE image_path=? LIMIT 1",
+                (path_str,),
+            ).fetchone()
+            still_legacy = c.execute(
+                "SELECT 1 FROM recruitments WHERE image_path=? LIMIT 1",
+                (path_str,),
+            ).fetchone()
+            if not still_multi and not still_legacy:
+                deletable.append(path_str)
+
+    deleted = 0
+    for path_str in deletable:
+        try:
+            img_path = Path(path_str)
+            if img_path.exists() and UPLOAD_DIR in img_path.parents:
+                img_path.unlink()
+                deleted += 1
+        except Exception as e:
+            log_error("cleanup_posted_recruitment_image", e)
+
+    return deleted
+
 def get_gm_dates(rid: int) -> list[str]:
     with db() as c:
         rows = c.execute("SELECT event_date FROM gm_dates WHERE recruitment_id=? ORDER BY event_date", (rid,)).fetchall()
@@ -2788,8 +2862,12 @@ async def post_recruitment(rid: int):
             (str(first.id), str(channel.id), rid),
         )
 
+    # Discordへの投稿が正常完了したら、Railway側の画像コピーは不要。
+    # DB参照と実ファイルをすぐ解放してVolume消費を抑える。
+    deleted_images = cleanup_posted_recruitment_images(rid)
+
     print(
-        f"[RECRUITMENT] initial post sent rid={rid} channel={channel.id}",
+        f"[RECRUITMENT] initial post sent rid={rid} channel={channel.id} images_cleaned={deleted_images}",
         flush=True,
     )
 
@@ -3182,6 +3260,12 @@ async def on_ready():
         await sync_registered_member_profiles()
     except Exception as e:
         log_error("registered_member_sync", e)
+    try:
+        deleted_images = cleanup_posted_recruitment_images()
+        if deleted_images:
+            print(f"[CLEANUP] removed {deleted_images} posted recruitment images", flush=True)
+    except Exception as e:
+        log_error("posted_recruitment_image_cleanup", e)
     if not _reminders_restored:
         _reminders_restored = True
         await restore_reminder_tasks()
