@@ -1095,6 +1095,26 @@ button,input,textarea,select{font:inherit}
   grid-template-columns:repeat(2,minmax(0,1fr));
   gap:7px;
 }
+.guest-member-toggle{
+  grid-column:1 / -1;
+  width:100%;
+  box-sizing:border-box;
+  display:flex;
+  align-items:center;
+  gap:9px;
+  margin-top:9px;
+  padding:11px 12px;
+  border-radius:11px;
+  background:#161d29;
+  border:1px solid #354156;
+  font-size:.85rem;
+  font-weight:800;
+  cursor:pointer;
+}
+.guest-member-toggle input{width:auto;margin:0;}
+.guest-member-input-wrap{display:none;margin-top:8px;}
+.guest-member-input-wrap.open{display:block;}
+.guest-member-input-wrap textarea{width:100%;box-sizing:border-box;}
 .manual-user-check{
   display:flex;
   align-items:center;
@@ -3330,9 +3350,9 @@ async def calendar_page(request: Request, month: str = ""):
                 f"<div class='annual-stats-panel {'active' if ys['term']==activity_term_number else ''}' data-term='{ys['term']}'>"
                 f"<div class='stats-section-title'>{ys['term']}年目<span>{ys['year']}/6/1〜{ys['year']+1}/5/31</span></div>"
                 f"<div class='stats-wide-card total-count'><b>{ys['total']}</b><span>卓数</span></div>"
-                f"<div class='stats-type-row'><div><b>{ys['trpg']}</b><span>TRPG卓数</span></div><div><b>{ys['madamis']}</b><span>マダミス卓数</span></div></div>"
+                f"<div class='stats-type-row'><div><b>{ys['trpg']}</b><span>TRPG</span></div><div><b>{ys['madamis']}</b><span>マダミス</span></div></div>"
                 f"<div class='stats-wide-card'><b>{ys['scenario_count']}</b><span>シナリオ数</span></div>"
-                f"<div class='stats-type-row'><div><b>{ys['trpg_scenarios']}</b><span>TRPGシナリオ数</span></div><div><b>{ys['madamis_scenarios']}</b><span>マダミスシナリオ数</span></div></div>"
+                f"<div class='stats-type-row'><div><b>{ys['trpg_scenarios']}</b><span>TRPG</span></div><div><b>{ys['madamis_scenarios']}</b><span>マダミス</span></div></div>"
                 f"<div class='stats-ranking-title'>GM TOP3</div>{rank_html(ys['gm_top'])}"
                 f"<div class='stats-ranking-title'>PL TOP3</div>{rank_html(ys['pl_top'])}</div>"
             )
@@ -3594,17 +3614,12 @@ async def calendar_page(request: Request, month: str = ""):
                   <div class='field-stack'>
                     <span class='field-label' id='manualGmLabel'>GM</span>
                     <select name='gm_discord_id'>
-                      <option value='' selected>GMなし</option>
+                      <option value='' disabled selected>選択してください</option>
                       {user_opts}
+                      <option value=''>GMなし</option>
                     </select>
                   </div>
                 </div>
-              </label>
-              <label class='field manual-field-spaced' id='manualGuestGmField'>
-                <div class='field-box no-icon manual-control-box'><div class='field-stack'>
-                  <span class='field-label'>一覧にいないGM / 主催者（任意）</span>
-                  <input type='text' name='gm_guest_name' placeholder='表示名だけ追加'>
-                </div></div>
               </label>
 
               <label class='manual-event-members' id='manualEventMembersToggle' style='display:none'>
@@ -3614,7 +3629,13 @@ async def calendar_page(request: Request, month: str = ""):
               <div class='calendar-modal-row' id='manualPlField'>
                 <span class='calendar-modal-label' id='manualPlLabel'>PL（複数選択可）</span>
                 <div class='manual-user-list'>{pl_checks}</div>
-                <textarea name='guest_participant_names' rows='2' placeholder='一覧にいない参加者（1行に1人）'></textarea>
+                <label class='guest-member-toggle' id='manualGuestMemberToggle'>
+                  <input type='checkbox' id='manualGuestMemberCheck' onchange='syncGuestMemberInput("manual")'>
+                  <span>新規参加者を追加</span>
+                </label>
+                <div class='guest-member-input-wrap' id='manualGuestMemberInputWrap'>
+                  <textarea name='guest_participant_names' rows='2' placeholder='参加者名を入力（複数人は1行に1人）'></textarea>
+                </div>
               </div>
 
               <div class='manual-actions'>
@@ -3770,13 +3791,19 @@ async def calendar_page(request: Request, month: str = ""):
                 </div>
 
                 <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>シナリオ名 / イベント名</span><input id='calendarEditScenario' name='scenario_name' required></div></div></label>
-                <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label' id='calendarEditGmLabel'>GM</span><select id='calendarEditGm' name='gm_discord_id'><option value=''>GMなし</option>{user_opts}</select><input id='calendarEditGuestGm' name='gm_guest_name' placeholder='一覧にいないGM / 主催者'></div></div></label>
+                <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label' id='calendarEditGmLabel'>GM</span><select id='calendarEditGm' name='gm_discord_id'>{user_opts}<option value=''>GMなし</option></select></div></div></label>
                 <div class='calendar-modal-row'>
                   <span class='calendar-modal-label' id='calendarEditPlLabel'>PLを編集</span>
                   <div class='manual-user-list' id='calendarEditPlList'>
                     {pl_checks}
                   </div>
-                  <textarea id='calendarEditGuestMembers' name='guest_participant_names' rows='2' placeholder='一覧にいない参加者（1行に1人）'></textarea>
+                  <label class='guest-member-toggle' id='editGuestMemberToggle'>
+                    <input type='checkbox' id='editGuestMemberCheck' onchange='syncGuestMemberInput("edit")'>
+                    <span>新規参加者を追加</span>
+                  </label>
+                  <div class='guest-member-input-wrap' id='editGuestMemberInputWrap'>
+                    <textarea id='calendarEditGuestMembers' name='guest_participant_names' rows='2' placeholder='参加者名を入力（複数人は1行に1人）'></textarea>
+                  </div>
                 </div>
 
                 <button class='calendar-save-btn' type='submit'
@@ -3829,6 +3856,16 @@ async def calendar_page(request: Request, month: str = ""):
         </div>
 
         <script>
+        function syncGuestMemberInput(which){{
+          const isEdit=which==='edit';
+          const check=document.getElementById(isEdit?'editGuestMemberCheck':'manualGuestMemberCheck');
+          const wrap=document.getElementById(isEdit?'editGuestMemberInputWrap':'manualGuestMemberInputWrap');
+          if(!check || !wrap) return;
+          wrap.classList.toggle('open',!!check.checked);
+          const input=wrap.querySelector('textarea');
+          if(input) input.disabled=!check.checked;
+        }}
+
         function syncManualType(){{
           const selected=document.querySelector(
             "#manualAddModal input[name='game_type']:checked"
@@ -3842,7 +3879,6 @@ async def calendar_page(request: Request, month: str = ""):
           const timeField=document.getElementById('manualTimeField');
           const gmField=document.getElementById('manualGmField');
           const plField=document.getElementById('manualPlField');
-          const guestGmField=document.getElementById('manualGuestGmField');
           const eventToggle=document.getElementById('manualEventMembersToggle');
           const eventHas=!!document.querySelector("#manualAddModal input[name='event_has_members']:checked");
           const gmLabel=document.getElementById('manualGmLabel'); const plLabel=document.getElementById('manualPlLabel');
@@ -3852,7 +3888,7 @@ async def calendar_page(request: Request, month: str = ""):
           const disablePeople=isEvent && !eventHas;
 
           if(timeField) timeField.classList.toggle('manual-disabled',isEvent);
-          [gmField,guestGmField,plField].forEach(el=>{{ if(el) el.classList.toggle('manual-disabled',disablePeople); }});
+          [gmField,plField].forEach(el=>{{ if(el) el.classList.toggle('manual-disabled',disablePeople); }});
 
           const timeInput=document.querySelector(
             "#manualAddModal input[name='start_time']"
@@ -3862,14 +3898,15 @@ async def calendar_page(request: Request, month: str = ""):
           );
           if(timeInput) timeInput.disabled=isEvent;
           if(gmSelect) gmSelect.disabled=disablePeople;
-          const guestGmInput=document.querySelector("#manualAddModal input[name='gm_guest_name']");
-          if(guestGmInput) guestGmInput.disabled=disablePeople;
 
           document.querySelectorAll(
             "#manualAddModal input[name='participant_ids']"
           ).forEach(cb=>cb.disabled=disablePeople);
+          const guestCheck=document.getElementById('manualGuestMemberCheck');
+          if(guestCheck) guestCheck.disabled=disablePeople;
+          syncGuestMemberInput('manual');
           const guestPl=document.querySelector("#manualAddModal textarea[name='guest_participant_names']");
-          if(guestPl) guestPl.disabled=disablePeople;
+          if(guestPl && disablePeople) guestPl.disabled=true;
         }}
 
         document.querySelectorAll(
@@ -3886,6 +3923,11 @@ async def calendar_page(request: Request, month: str = ""):
           const dt=new Date(ds+'T00:00:00');
           document.getElementById('manualDateLabel').textContent=
             ds+'（'+wd[dt.getDay()]+'）';
+          const guestCheck=document.getElementById('manualGuestMemberCheck');
+          const guestText=document.querySelector("#manualAddModal textarea[name='guest_participant_names']");
+          if(guestCheck) guestCheck.checked=false;
+          if(guestText) guestText.value='';
+          syncGuestMemberInput('manual');
           syncManualType();
           modal.classList.add('open');
           document.body.style.overflow='hidden';
@@ -4134,8 +4176,10 @@ async def calendar_page(request: Request, month: str = ""):
             r.checked=(r.value===editGameType);
           }});
           document.getElementById('calendarEditGm').value=el.dataset.gmid||'';
-          document.getElementById('calendarEditGuestGm').value=el.dataset.gmguest||'';
           document.getElementById('calendarEditGuestMembers').value=el.dataset.guestmembers||'';
+          const editGuestCheck=document.getElementById('editGuestMemberCheck');
+          if(editGuestCheck) editGuestCheck.checked=!!(el.dataset.guestmembers||'').trim();
+          syncGuestMemberInput('edit');
           document.getElementById('calendarEditGmLabel').textContent=isEvent?'主催者':'GM';
           document.getElementById('calendarEditPlLabel').textContent=isEvent?'参加者を編集':'PLを編集';
           document.querySelectorAll("#calendarEditPlList input[name='participant_ids']").forEach(cb=>cb.disabled=false);
@@ -4154,8 +4198,6 @@ async def calendar_page(request: Request, month: str = ""):
           if(plLabel) plLabel.textContent=isEventEdit?'参加者を編集':'PLを編集';
           const scenario=document.getElementById('calendarEditScenario');
           if(scenario) scenario.placeholder=isEventEdit?'イベント名を入力':'シナリオ名を入力';
-          const guestGm=document.getElementById('calendarEditGuestGm');
-          if(guestGm) guestGm.placeholder=isEventEdit?'一覧にいない主催者':'一覧にいないGM';
         }}
 
         document.querySelectorAll("#calendarMembersEditForm input[name='game_type']").forEach(r=>{{
