@@ -1136,6 +1136,22 @@ def initialize_database():
                SELECT discord_id,username,display_name,avatar_url,updated_at,updated_at
                FROM users"""
         )
+
+        # v79: 「ズッ卓」→「ズッ友」の表示名変更。
+        # 全履歴や称号条件は再計算せず、既存の pair_25 レコードだけを
+        # 一度だけ更新する軽量マイグレーション。
+        migration_key = "migration_v79_pair25_zuttomo"
+        migrated = c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key=?", (migration_key,)
+        ).fetchone()
+        if not migrated:
+            c.execute(
+                "UPDATE achievement_unlocks SET title_name='ズッ友' WHERE achievement_key='pair_25'"
+            )
+            c.execute(
+                "INSERT INTO achievement_meta(meta_key, meta_value) VALUES(?, '1')",
+                (migration_key,),
+            )
     backfill_calendar_history()
     backfill_scenario_progress()
 
