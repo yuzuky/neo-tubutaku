@@ -3280,7 +3280,7 @@ async def bootstrap_achievements():
     if not profile_cache_initialized() or not profile_delta_initialized():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         refresh_profile_caches(as_of.isoformat(), iso_now())
-    # v70初回だけシナリオ別GM回数を既存履歴から作る。以後は20時に当日分だけ+1。
+    # v73初回だけシナリオ別GM回数と5回称号をカレンダー履歴から再同期。以後は20時に当日分だけ+1。
     if not scenario_gm_counter_initialized():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         ensure_scenario_gm_counter_initialized(as_of.isoformat(), iso_now())
@@ -3574,7 +3574,7 @@ async def calendar_page(request: Request, month: str = ""):
                 f"<div class='stats-section-title'>{ys['term']}年目<span>{ys['year']}/6/1〜{ys['year']+1}/5/31</span></div>"
                 f"<div class='stats-wide-card total-count'><b>{ys['total']}</b><span>卓数</span></div>"
                 f"<div class='stats-type-row'><div><b>{ys['trpg']}</b><span>TRPG</span></div><div><b>{ys['madamis']}</b><span>マダミス</span></div></div>"
-                f"<div class='stats-wide-card'><b>{ys['scenario_count']}</b><span>シナリオ数</span></div>"
+                f"<div class='stats-wide-card'><b>{ys['scenario_count']}</b><span>シナリオ種類</span></div>"
                 f"<div class='stats-type-row'><div><b>{ys['trpg_scenarios']}</b><span>TRPG</span></div><div><b>{ys['madamis_scenarios']}</b><span>マダミス</span></div></div>"
                 f"<div class='stats-ranking-title'>GM TOP3</div>{rank_html(ys['gm_top'])}"
                 f"<div class='stats-ranking-title'>PL TOP3</div>{rank_html(ys['pl_top'])}</div>"
@@ -3997,8 +3997,8 @@ async def calendar_page(request: Request, month: str = ""):
               <div class='stats-section-title'>累計</div>
               <div class='stats-wide-card total-count'><b>{total_stats["total"]}</b><span>累計卓数</span></div>
               <div class='stats-type-row'><div><b>{total_stats["trpg"]}</b><span>TRPG卓数</span></div><div><b>{total_stats["madamis"]}</b><span>マダミス卓数</span></div></div>
-              <div class='stats-wide-card'><b>{total_stats["scenario_count"]}</b><span>累計シナリオ数</span></div>
-              <div class='stats-type-row'><div><b>{total_stats["trpg_scenarios"]}</b><span>TRPGシナリオ数</span></div><div><b>{total_stats["madamis_scenarios"]}</b><span>マダミスシナリオ数</span></div></div>
+              <div class='stats-wide-card'><b>{total_stats["scenario_count"]}</b><span>累計シナリオ種類</span></div>
+              <div class='stats-type-row'><div><b>{total_stats["trpg_scenarios"]}</b><span>TRPGシナリオ種類</span></div><div><b>{total_stats["madamis_scenarios"]}</b><span>マダミスシナリオ種類</span></div></div>
               <div class='stats-ranking-title'>GM TOP3</div>{rank_html(total_stats["gm_top"])}
               <div class='stats-ranking-title'>PL TOP3</div>{rank_html(total_stats["pl_top"])}
             </div>
