@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, hide_calendar_session, new_scenario_count, permanently_delete_calendar_session, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, RARITY_LABELS, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_data, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -106,6 +106,7 @@ UNDECIDED_CATEGORY_ID = env_int("UNDECIDED_CATEGORY_ID", 1327812864261623890)
 SESSION_CATEGORY_ID = env_int("SESSION_CATEGORY_ID", 1245192932147855401)
 JOIN_EMOJI_ID = env_int("JOIN_EMOJI_ID", 1486316302308999218)
 WATCH_EMOJI_ID = env_int("WATCH_EMOJI_ID", 1486316056711794748)
+TSUBUTTER_CHANNEL_ID = int(os.getenv('TSUBUTTER_CHANNEL_ID', '1278698568231817317'))
 DEVELOPER_USER_ID = "804350794371039272"  # yuzuky / 開発者テスト用
 
 PORT = env_int("PORT", 8000)
@@ -3215,12 +3216,78 @@ async def restore_reminder_tasks():
         schedule_session_reminder(int(row["id"]))
 
 
+
+async def post_achievement_notifications(new_rows):
+    if not new_rows:
+        return
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        return
+    channel = guild.get_channel(TSUBUTTER_CHANNEL_ID)
+    if channel is None:
+        try:
+            channel = await bot.fetch_channel(TSUBUTTER_CHANNEL_ID)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return
+    grouped = {}
+    with db() as c:
+        for r in new_rows:
+            title = str(r.get("title_name") or "")
+            rarity = RARITY_LABELS.get(str(r.get("rarity") or ""), "🏷️")
+            name_row = c.execute(
+                "SELECT COALESCE(display_name,username,discord_id) AS n FROM registered_members WHERE discord_id=?",
+                (str(r.get("discord_id") or ""),),
+            ).fetchone()
+            name = str(name_row["n"]) if name_row else str(r.get("discord_id") or "")
+            grouped.setdefault((rarity,title), []).append(name)
+    lines=["🏆 **称号獲得！**"]
+    for (rarity,title), names in grouped.items():
+        # 同一人・同一称号の動的解除が同時に複数あっても名前は重複表示しない
+        names=list(dict.fromkeys(names))
+        lines.append(f"\n{rarity} **{title}** 取得🎉\n" + "、".join(names))
+    await channel.send("\n".join(lines), silent=True)
+
+
+async def run_achievement_check(run_date=None, notify=True):
+    d = str(run_date or now_jst().date().isoformat())
+    if achievement_run_done(d):
+        return []
+    now_text = iso_now()
+    new_rows = evaluate_achievements(d, now_text)
+    mark_achievement_run(d, now_text)
+    if notify:
+        await post_achievement_notifications(new_rows)
+    return new_rows
+
+
+async def bootstrap_achievements():
+    """v65初回だけ過去実績を静かに反映。以後は20時判定で新規解除を通知。"""
+    now = now_jst()
+    today = now.date()
+    if not achievement_bootstrapped():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        evaluate_achievements(as_of.isoformat(), iso_now())
+        mark_achievement_bootstrapped()
+        if now.time() >= time(20,0):
+            mark_achievement_run(today.isoformat(), iso_now())
+        return
+    # 20時にBotが落ちていた場合は、その日の起動時に1回だけ追いつく。
+    if now.time() >= time(20,0) and not achievement_run_done(today.isoformat()):
+        await run_achievement_check(today.isoformat(), notify=True)
+
+
 @tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def deadline_scheduler():
     try:
         await deadline_check()
     except Exception as e:
         log_error("deadline_scheduler", e)
+
+    # v65: 当日20時時点のカレンダーを基準に新規称号を判定
+    try:
+        await run_achievement_check(now_jst().date().isoformat(), notify=True)
+    except Exception as e:
+        log_error("achievement_scheduler", e)
 
     # DB肥大化防止：3か月を超えた卓を1日1回だけ削除
     try:
@@ -3260,6 +3327,10 @@ async def on_ready():
         await sync_registered_member_profiles()
     except Exception as e:
         log_error("registered_member_sync", e)
+    try:
+        await bootstrap_achievements()
+    except Exception as e:
+        log_error("achievement_bootstrap", e)
     try:
         deleted_images = cleanup_posted_recruitment_images()
         if deleted_images:
@@ -3453,6 +3524,16 @@ async def calendar_page(request: Request, month: str = ""):
         yearly_stats.append(ys)
 
     progress_users, progress_scenarios, progress_statuses = scenario_progress_data()
+    title_map = equipped_titles_map()
+    viewer_id = str(request.session.get("user_id") or "")
+    profile_href = f"/profile/{viewer_id}" if viewer_id else "/login?next=/calendar"
+
+    def title_payload(uid):
+        t = title_map.get(str(uid or ""))
+        if not t:
+            return {"name":"", "detail":"", "rarity":""}
+        detail = str(t.get("context_label") or "") if str(t.get("achievement_key")) == "pair_250" else ""
+        return {"name":str(t.get("title_name") or ""), "detail":detail, "rarity":str(t.get("rarity") or "")}
 
     def rank_html(rows):
         if not rows:
@@ -3542,13 +3623,20 @@ async def calendar_page(request: Request, month: str = ""):
                         member_text = " / ".join(str(m["display_name"] or "") for m in members)
                         member_ids = ",".join(str(m.get("discord_id") or "") for m in members if not m.get("is_guest"))
                         guest_members = "\n".join(str(m["display_name"] or "") for m in members if m.get("is_guest"))
+                        member_detail = [
+                            {"name":str(mm["display_name"] or ""), "id":str(mm.get("discord_id") or ""),
+                             "guest":bool(mm.get("is_guest")), **title_payload(mm.get("discord_id"))}
+                            for mm in members
+                        ]
+                        gm_title = title_payload(row["gm_discord_id"])
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
                             f"data-title='{esc(title_text)}' "
                             f"data-time='{esc(time_text)}' "
                             f"data-gm='{esc(gm_text)}' data-gmid='{esc(str(row['gm_discord_id'] or ''))}' data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
-                            f"data-members='{esc(member_text)}' data-memberids='{esc(member_ids)}' data-guestmembers='{esc(guest_members)}' data-game-type='EVENT' data-event='1' "
+                            f"data-gmtitle='{esc(gm_title['name'])}' data-gmtitledetail='{esc(gm_title['detail'])}' data-gmtitlerarity='{esc(gm_title['rarity'])}' "
+                            f"data-members='{esc(member_text)}' data-memberids='{esc(member_ids)}' data-memberdetail='{esc(json.dumps(member_detail, ensure_ascii=False))}' data-guestmembers='{esc(guest_members)}' data-game-type='EVENT' data-event='1' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title event'>{esc(title_text)}</span>"
                             "</div>"
@@ -3558,6 +3646,12 @@ async def calendar_page(request: Request, month: str = ""):
                         member_text = " / ".join(str(m["display_name"] or "") for m in members)
                         member_ids = ",".join(str(m.get("discord_id") or "") for m in members if not m.get("is_guest"))
                         guest_members = "\n".join(str(m["display_name"] or "") for m in members if m.get("is_guest"))
+                        member_detail = [
+                            {"name":str(mm["display_name"] or ""), "id":str(mm.get("discord_id") or ""),
+                             "guest":bool(mm.get("is_guest")), **title_payload(mm.get("discord_id"))}
+                            for mm in members
+                        ]
+                        gm_title = title_payload(row["gm_discord_id"])
                         blocks.append(
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
@@ -3566,8 +3660,9 @@ async def calendar_page(request: Request, month: str = ""):
                             f"data-gm='{esc(gm_text)}' "
                             f"data-gmid='{esc(str(row['gm_discord_id'] or ''))}' "
                             f"data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
+                            f"data-gmtitle='{esc(gm_title['name'])}' data-gmtitledetail='{esc(gm_title['detail'])}' data-gmtitlerarity='{esc(gm_title['rarity'])}' "
                             f"data-members='{esc(member_text)}' "
-                            f"data-memberids='{esc(member_ids)}' data-guestmembers='{esc(guest_members)}' data-game-type='{esc(normalized_gt)}' "
+                            f"data-memberids='{esc(member_ids)}' data-memberdetail='{esc(json.dumps(member_detail, ensure_ascii=False))}' data-guestmembers='{esc(guest_members)}' data-game-type='{esc(normalized_gt)}' "
                             "data-event='0' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
                             f"<span class='cal-title {type_cls}'>{esc(title_text)}</span>"
@@ -3677,6 +3772,7 @@ async def calendar_page(request: Request, month: str = ""):
           <a class='calendar-nav' href='/calendar?month={next_month.strftime('%Y-%m')}'>›</a>
 
           <div class='calendar-floating-tools'>
+            <a class='stats-circle profile-circle' href='{profile_href}' aria-label='プロフィール' title='プロフィール'>👤</a>
             <button class='stats-circle progress-circle' type='button'
                     onclick='openProgress(event)' aria-label='通過済みリスト'>
               <span class='progress-list-icon'><i></i><i></i><i></i></span>
@@ -3856,6 +3952,15 @@ async def calendar_page(request: Request, month: str = ""):
           .annual-stats-panel.active {{ display:block; }}
           .annual-term-tabs {{ display:flex; gap:7px; overflow-x:auto; margin:10px 0 14px; padding-bottom:3px; }}
           .annual-term-btn {{ flex:0 0 auto; border:1px solid #4b5563; background:#252936; color:#cbd5e1; border-radius:10px; padding:7px 12px; font-weight:700; }}
+          .profile-circle {{ color:#aab6c7; text-decoration:none; font-size:1.05rem; }}
+          .calendar-person-link {{ color:inherit; text-decoration:none; display:inline-flex; flex-direction:column; gap:1px; }}
+          .calendar-person-link:hover {{ text-decoration:none; }}
+          .calendar-person-title {{ --frame:#9ca8b8; display:inline-flex; align-items:center; justify-content:center; position:relative; color:#e7ebf1; font-size:.58rem; font-weight:850; margin-top:4px; padding:2px 13px; min-height:19px; border:1px solid var(--frame); border-radius:6px; background:rgba(12,17,24,.84); line-height:1.1; }}
+          .calendar-person-title::before,.calendar-person-title::after {{ content:'◆'; position:absolute; top:50%; transform:translateY(-50%) rotate(45deg); font-size:.36rem; color:var(--frame); }}
+          .calendar-person-title::before {{ left:4px; }} .calendar-person-title::after {{ right:4px; }}
+          .calendar-person-title.rarity-bronze {{ --frame:#b8734b; }} .calendar-person-title.rarity-silver {{ --frame:#c9d0da; }} .calendar-person-title.rarity-gold {{ --frame:#e3b93f; box-shadow:0 0 7px rgba(227,185,63,.12); }} .calendar-person-title.rarity-black {{ --frame:#b8a77f; background:#080a0e; box-shadow:0 0 8px rgba(67,88,145,.13); }}
+          .calendar-person-title.rarity-gold::before,.calendar-person-title.rarity-gold::after {{ content:'✦'; transform:translateY(-50%); }} .calendar-person-title.rarity-black::before,.calendar-person-title.rarity-black::after {{ content:'❖'; transform:translateY(-50%); }}
+          .calendar-person-title.clickable {{ cursor:pointer; }}
           .annual-term-btn.active {{ background:#5865f2; border-color:#5865f2; color:white; }}
           #manualPlField textarea,#calendarEditPanel textarea {{ width:100%; margin-top:10px; box-sizing:border-box; border:1px solid #42485a; background:#1e212b; color:#fff; border-radius:10px; padding:10px; resize:vertical; }}
           .manual-event-members {{ display:block; margin:12px 0; padding:11px 13px; border-radius:10px; background:#252936; }}
@@ -4274,19 +4379,39 @@ async def calendar_page(request: Request, month: str = ""):
             document.querySelector('#calendarDetailMembersRow .calendar-modal-label').textContent=isEvent?'参加者':'PL';
             gmRow.style.display='block';
             membersRow.style.display='block';
-            document.getElementById('calendarDetailGm').textContent=
-              el.dataset.gm||'';
+            const gmBox=document.getElementById('calendarDetailGm');
+            gmBox.innerHTML='';
+            const gmId=el.dataset.gmid||'';
+            const gmName=el.dataset.gm||'';
+            const gmWrap=document.createElement(gmId?'a':'span');
+            gmWrap.className='calendar-person-link';
+            if(gmId) gmWrap.href='/profile/'+encodeURIComponent(gmId);
+            const gmNameEl=document.createElement('span'); gmNameEl.textContent=gmName; gmWrap.appendChild(gmNameEl);
+            if(el.dataset.gmtitle){{
+              const t=document.createElement('span'); t.className='calendar-person-title rarity-'+(el.dataset.gmtitlerarity||'bronze'); t.textContent=el.dataset.gmtitle;
+              if(el.dataset.gmtitledetail){{t.classList.add('clickable');t.title=el.dataset.gmtitledetail;t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(el.dataset.gmtitledetail);}};}}
+              gmWrap.appendChild(t);
+            }}
+            gmBox.appendChild(gmWrap);
 
-            const memberNames=(el.dataset.members||'')
-              .split(' / ').filter(Boolean);
-
+            let memberDetail=[];
+            try{{memberDetail=JSON.parse(el.dataset.memberdetail||'[]');}}catch(e){{memberDetail=[];}}
+            if(!memberDetail.length){{
+              memberDetail=(el.dataset.members||'').split(' / ').filter(Boolean).map(name=>({{name,id:'',guest:true,title:'',detail:'',rarity:''}}));
+            }}
             const box=document.getElementById('calendarDetailMembers');
             box.innerHTML='';
-            memberNames.forEach(name=>{{
-                const span=document.createElement('span');
-                span.className='calendar-modal-member';
-                span.textContent=name;
-                box.appendChild(span);
+            memberDetail.forEach(person=>{{
+                const chip=document.createElement('span'); chip.className='calendar-modal-member';
+                const wrap=document.createElement(person.id && !person.guest?'a':'span'); wrap.className='calendar-person-link';
+                if(person.id && !person.guest) wrap.href='/profile/'+encodeURIComponent(person.id);
+                const name=document.createElement('span'); name.textContent=person.name||''; wrap.appendChild(name);
+                if(person.title){{
+                  const t=document.createElement('span'); t.className='calendar-person-title rarity-'+(person.rarity||'bronze'); t.textContent=person.title;
+                  if(person.detail){{t.classList.add('clickable');t.title=person.detail;t.onclick=(ev)=>{{ev.preventDefault();ev.stopPropagation();alert(person.detail);}};}}
+                  wrap.appendChild(t);
+                }}
+                chip.appendChild(wrap); box.appendChild(chip);
               }});
 
             document.querySelectorAll(
@@ -4523,6 +4648,150 @@ async def calendar_progress_set(
         raise HTTPException(400, "通過状態を更新できません")
 
     return {"ok": True}
+
+
+
+@app.get("/profile/{discord_id}", response_class=HTMLResponse)
+async def profile_page(request: Request, discord_id: str):
+    data = profile_data(discord_id)
+    if not data:
+        raise HTTPException(404, "プロフィールが見つかりません")
+    own = str(request.session.get("user_id") or "") == str(discord_id)
+    member=data["member"]; total=data["total"]; eq=data.get("equipped")
+    eq_rarity = str(eq.get("rarity") or "bronze") if eq else ""
+    title_line = f"<div class='profile-equipped title-frame rarity-{esc(eq_rarity)}' data-detail='{esc(str(eq.get('context_label') or '') if eq and eq.get('achievement_key')=='pair_250' else '')}'><span>{esc(eq['title_name'])}</span></div>" if eq else ""
+    if eq and eq.get("achievement_key")=="pair_250" and eq.get("context_label"):
+        title_line = f"<button class='profile-equipped title-frame rarity-{esc(eq_rarity)} special' type='button' onclick=\"alert('{esc(str(eq['context_label']))}')\"><span>{esc(eq['title_name'])}</span></button>"
+    years=data["years"]
+    current_term=years[-1]["term"] if years else 1
+    tabs=''.join(f"<button type='button' class='profile-year-tab {'active' if y['term']==current_term else ''}' onclick='switchProfileYear({y['term']},this)'>{y['term']}年目</button>" for y in years)
+    panels=''.join(
+        f"<div class='profile-year-panel {'active' if y['term']==current_term else ''}' data-term='{y['term']}'>"
+        f"<div class='profile-grid'><div><span>GM</span><b>{y['gm']}卓</b></div><div><span>PL</span><b>{y['pl']}卓</b></div>"
+        f"<div><span>TRPG</span><b>{y['trpg']}卓</b></div><div><span>マダミス</span><b>{y['madamis']}卓</b></div></div>"
+        f"<div class='profile-year-range'>{y['year']}/6/1〜{y['year']+1}/5/31</div></div>" for y in years
+    ) or "<div class='muted small'>まだ年度データがありません</div>"
+    medals=['🥇','🥈','🥉']
+    pair=''.join(
+        f"<a class='profile-pair-row' href='/profile/{esc(x['discord_id'])}'><span>{medals[i]} {esc(x['display_name'])}</span><b>{x['n']}卓 ›</b></a>"
+        for i,x in enumerate(data["pair_top"])
+    ) or "<div class='muted small'>まだ同卓データがありません</div>"
+    own_btn = "<a class='btn profile-title-list-btn' href='/profile/{}/titles'>称号一覧を見る</a>".format(esc(str(discord_id))) if own else ""
+    body=f"""
+    <style>
+      .profile-wrap{{max-width:620px;margin:0 auto}} .profile-hero{{text-align:center;margin:12px 0 20px}}
+      .profile-avatar{{width:76px;height:76px;border-radius:50%;object-fit:cover;background:#202a38;border:2px solid #334155}}
+      .profile-name{{font-size:1.45rem;font-weight:1000;margin-top:8px}}
+      .title-frame{{--frame:#b8734b;--frame-soft:rgba(184,115,75,.16);position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:172px;max-width:92%;min-height:38px;padding:7px 28px;border:1.5px solid var(--frame);border-radius:10px;background:linear-gradient(180deg,var(--frame-soft),rgba(7,11,17,.96));box-shadow:inset 0 0 0 1px rgba(255,255,255,.035),0 5px 18px rgba(0,0,0,.25);color:#f4eee8;font-weight:950;letter-spacing:.025em;box-sizing:border-box}}
+      .title-frame::before,.title-frame::after{{content:'◆';position:absolute;top:50%;transform:translateY(-50%) rotate(45deg);font-size:.62rem;color:var(--frame);text-shadow:0 0 8px var(--frame-soft)}}
+      .title-frame::before{{left:8px}} .title-frame::after{{right:8px}}
+      .rarity-bronze{{--frame:#b8734b;--frame-soft:rgba(184,115,75,.18)}} .rarity-silver{{--frame:#c9d0da;--frame-soft:rgba(201,208,218,.13)}}
+      .rarity-gold{{--frame:#e3b93f;--frame-soft:rgba(227,185,63,.18)}} .rarity-black{{--frame:#b8a77f;--frame-soft:rgba(184,167,127,.10)}}
+      .rarity-gold{{border-width:2px;box-shadow:inset 0 0 0 1px rgba(255,220,120,.14),0 0 14px rgba(227,185,63,.12),0 6px 20px rgba(0,0,0,.3)}}
+      .rarity-gold::before,.rarity-gold::after{{content:'✦';font-size:.84rem}}
+      .rarity-black{{border-width:2px;background:linear-gradient(180deg,rgba(28,29,31,.98),rgba(5,7,10,.98));box-shadow:inset 0 0 0 1px rgba(210,195,154,.10),0 0 16px rgba(66,91,155,.12),0 6px 22px rgba(0,0,0,.38)}}
+      .rarity-black::before,.rarity-black::after{{content:'❖';font-size:.8rem;color:#c3af7e}}
+      .profile-equipped{{margin:8px auto 0;font-size:.86rem;background-color:transparent}} .profile-equipped.special{{cursor:pointer}}
+      .profile-section{{margin-top:14px;padding:15px;border:1px solid #263244;border-radius:16px;background:#0d141e}}
+      .profile-section h3{{margin:0 0 12px;font-size:.92rem}} .profile-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+      .profile-grid>div{{padding:12px;border-radius:12px;background:#111b28;display:flex;flex-direction:column;gap:3px}} .profile-grid span{{color:#8290a2;font-size:.68rem;font-weight:800}}
+      .profile-grid b{{font-size:1.05rem}} .profile-year-tabs{{display:flex;gap:7px;overflow:auto;margin-bottom:10px}}
+      .profile-year-tab{{border:1px solid #334155;background:#111925;color:#aeb9c7;border-radius:10px;padding:7px 11px;font-weight:850;white-space:nowrap}}
+      .profile-year-tab.active{{background:#5865f2;color:white;border-color:#5865f2}} .profile-year-panel{{display:none}} .profile-year-panel.active{{display:block}}
+      .profile-year-range{{text-align:right;color:#687689;font-size:.62rem;margin-top:7px}} .profile-pair-row{{display:flex;justify-content:space-between;align-items:center;text-decoration:none;color:#e8edf5;padding:11px 3px;border-bottom:1px solid #202b39}}
+      .profile-pair-row:last-child{{border-bottom:0}} .profile-pair-row b{{font-size:.75rem;color:#95a4b6}} .profile-title-list-btn{{margin-top:16px;width:100%;box-sizing:border-box;text-align:center}}
+    </style>
+    <a class='back-link' href='/calendar'>‹ カレンダーへ</a>
+    <div class='profile-wrap'>
+      <div class='profile-hero'>
+        <img class='profile-avatar' src='{esc(member.get("avatar_url") or "")}' alt=''>
+        <div class='profile-name'>{esc(member.get("display_name") or member.get("username") or discord_id)}</div>
+        {title_line}
+      </div>
+      <section class='profile-section'><h3>累計</h3><div class='profile-grid'>
+        <div><span>GM</span><b>{total['gm']}卓</b></div><div><span>PL</span><b>{total['pl']}卓</b></div>
+        <div><span>TRPG</span><b>{total['trpg']}卓</b></div><div><span>マダミス</span><b>{total['madamis']}卓</b></div>
+      </div></section>
+      <section class='profile-section'><h3>年度別</h3><div class='profile-year-tabs'>{tabs}</div>{panels}</section>
+      <section class='profile-section'><h3>🤝 同卓した数TOP3</h3>{pair}</section>
+      {own_btn}
+    </div>
+    <script>function switchProfileYear(term,btn){{document.querySelectorAll('.profile-year-panel').forEach(x=>x.classList.toggle('active',x.dataset.term===String(term)));document.querySelectorAll('.profile-year-tab').forEach(x=>x.classList.toggle('active',x===btn));}}</script>
+    """
+    return page("プロフィール", body, request)
+
+
+@app.get("/profile/{discord_id}/titles", response_class=HTMLResponse)
+async def profile_titles_page(request: Request, discord_id: str):
+    uid=require_login(request)
+    if str(uid)!=str(discord_id):
+        raise HTTPException(403, "自分の称号一覧のみ確認できます")
+    data=profile_data(discord_id)
+    if not data: raise HTTPException(404,"プロフィールが見つかりません")
+    cards=achievement_collection(discord_id)
+    equipped=data.get("equipped")
+    out=[]
+    for item in cards:
+        d=item["definition"]; u=item["unlock"]; secret=bool(d.get("secret")); unlocked=bool(u)
+        rarity_key=str(d.get("rarity") or "bronze")
+        if secret and not unlocked:
+            out.append(f"<div class='title-card title-rarity-black locked secret'><div class='title-card-main'><div class='title-badge title-frame rarity-black'><span>🔒 ？？？？？？？</span></div><div class='title-cond'>？？？？？？？？？</div></div></div>")
+            continue
+        name=str(u["title_name"] if u else d.get("name") or "")
+        selected=bool(equipped and u and int(equipped["id"])==int(u["id"]))
+        # 自分の一覧では、シークレットも解除後だけ条件を確認できる。
+        # 未解除シークレットは上の分岐で「？？？」のまま。
+        cond=str(d.get("condition") or "")
+        progress=""
+        if not secret:
+            value=int(item.get("value") or 0); target=int(d.get("target") or 1); pct=max(0,min(100,int(value*100/target)))
+            progress=f"<div class='title-progress-text'>{min(value,target)} / {target}</div><div class='title-progress'><i style='width:{pct}%'></i></div>"
+        detail=""
+        if u and str(u.get("achievement_key"))=="pair_250" and u.get("context_label"):
+            detail=f"<div class='title-special-detail'>{esc(str(u['context_label']))}</div>"
+        radio=f"<input type='radio' name='unlock_id' value='{u['id']}' {'checked' if selected else ''}>" if u else ""
+        out.append(f"<label class='title-card title-rarity-{esc(rarity_key)} {'unlocked' if unlocked else 'locked'}'>{radio}<div class='title-card-main'><div class='title-badge title-frame rarity-{esc(rarity_key)}'><span>{esc(name)}</span></div>{detail}<div class='title-cond'>{esc(cond)}</div>{progress}</div></label>")
+    body=f"""
+    <style>
+      .titles-wrap{{max-width:620px;margin:0 auto}} .titles-head{{text-align:center;margin-bottom:14px}} .titles-head h2{{margin:0 0 5px}}
+      .titles-grid{{display:grid;grid-template-columns:1fr;gap:11px}} .title-card{{display:flex;gap:10px;padding:13px;border-radius:14px;border:1px solid #293447;background:linear-gradient(180deg,#111a26,#0d141e);color:#e9eef5;transition:.16s ease}}
+      .title-card:has(input:checked){{border-color:#35c77a;box-shadow:0 0 0 1px rgba(53,199,122,.28),0 0 18px rgba(53,199,122,.08)}}
+      .title-card.locked{{opacity:.46;filter:saturate(.55)}} .title-card.secret.locked{{opacity:.58}} .title-card input{{margin-top:12px;accent-color:#34d17b}}
+      .title-card-main{{min-width:0;flex:1}} .title-badge{{width:100%;max-width:100%;min-height:42px;margin:0 0 8px;font-size:.9rem}}
+      .title-frame{{--frame:#b8734b;--frame-soft:rgba(184,115,75,.16);position:relative;display:inline-flex;align-items:center;justify-content:center;padding:8px 30px;border:1.5px solid var(--frame);border-radius:10px;background:linear-gradient(180deg,var(--frame-soft),rgba(7,11,17,.96));box-shadow:inset 0 0 0 1px rgba(255,255,255,.035),0 4px 15px rgba(0,0,0,.25);color:#f2f0ec;font-weight:950;letter-spacing:.025em;box-sizing:border-box}}
+      .title-frame::before,.title-frame::after{{content:'◆';position:absolute;top:50%;transform:translateY(-50%) rotate(45deg);font-size:.62rem;color:var(--frame)}} .title-frame::before{{left:9px}} .title-frame::after{{right:9px}}
+      .rarity-bronze{{--frame:#b8734b;--frame-soft:rgba(184,115,75,.18)}} .rarity-silver{{--frame:#c9d0da;--frame-soft:rgba(201,208,218,.13)}} .rarity-gold{{--frame:#e3b93f;--frame-soft:rgba(227,185,63,.18)}} .rarity-black{{--frame:#b8a77f;--frame-soft:rgba(184,167,127,.10)}}
+      .rarity-gold{{border-width:2px;box-shadow:inset 0 0 0 1px rgba(255,220,120,.14),0 0 13px rgba(227,185,63,.12),0 5px 18px rgba(0,0,0,.3)}} .rarity-gold::before,.rarity-gold::after{{content:'✦';font-size:.84rem}}
+      .rarity-black{{border-width:2px;background:linear-gradient(180deg,rgba(27,29,33,.99),rgba(4,6,9,.99));box-shadow:inset 0 0 0 1px rgba(210,195,154,.10),0 0 16px rgba(67,88,145,.13),0 6px 20px rgba(0,0,0,.38)}} .rarity-black::before,.rarity-black::after{{content:'❖';font-size:.8rem;color:#c3af7e}}
+      .title-cond{{font-size:.72rem;color:#93a1b3;margin-top:5px;padding:0 2px}}
+      .title-progress-text{{font-size:.65rem;color:#8290a2;text-align:right;margin-top:8px}} .title-progress{{height:7px;border-radius:99px;background:#263142;overflow:hidden;margin-top:3px}}
+      .title-progress i{{display:block;height:100%;background:#5865f2;border-radius:99px}} .title-special-detail{{font-size:.72rem;color:#c7b6e8;margin:4px 2px 0}}
+      .title-actions{{position:sticky;bottom:8px;margin-top:14px;padding:10px;border:1px solid #2b384a;border-radius:14px;background:rgba(10,16,25,.96);backdrop-filter:blur(8px)}}
+      .title-equip-btn{{width:100%;background:#20b66d!important}} .title-remove-btn{{display:block;width:100%;margin-top:7px;border:0;background:transparent;color:#7f8da0;font-size:.7rem;padding:7px;cursor:pointer}}
+    </style>
+    <a class='back-link' href='/profile/{esc(discord_id)}'>‹ プロフィールへ</a>
+    <div class='titles-wrap'><div class='titles-head'><h2>🏷️ 称号一覧</h2><div class='muted small'>解除済みの称号を選んで装備できます</div></div>
+      <form method='post' action='/profile/{esc(discord_id)}/title-equip'>
+        {csrf_field(request)}<div class='titles-grid'>{''.join(out)}</div>
+        <div class='title-actions'><button class='btn green title-equip-btn' type='submit' id='equipTitleBtn' disabled>称号を変更する</button>
+        <button class='title-remove-btn' type='submit' name='remove' value='1' formnovalidate>称号を外す</button></div>
+      </form>
+    </div>
+    <script>const eb=document.getElementById('equipTitleBtn');document.querySelectorAll("input[name='unlock_id']").forEach(r=>r.addEventListener('change',()=>eb.disabled=false));</script>
+    """
+    return page("称号一覧",body,request)
+
+
+@app.post("/profile/{discord_id}/title-equip")
+async def profile_title_equip(request: Request, discord_id: str, unlock_id: str = Form(""), remove: str = Form("")):
+    uid=require_login(request); await require_csrf(request)
+    if str(uid)!=str(discord_id): raise HTTPException(403,"自分の称号のみ変更できます")
+    if remove=="1":
+        set_equipped_title(uid,None,iso_now())
+    else:
+        if not unlock_id.isdigit() or not set_equipped_title(uid,int(unlock_id),iso_now()):
+            raise HTTPException(400,"装備できない称号です")
+    return RedirectResponse(f"/profile/{uid}",status_code=303)
 
 
 @app.get("/join", response_class=HTMLResponse)
