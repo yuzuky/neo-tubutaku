@@ -4718,6 +4718,7 @@ async def profile_page(request: Request, discord_id: str):
     tabs=''.join(f"<button type='button' class='profile-year-tab {'active' if y['term']==current_term else ''}' onclick='switchProfileYear({y['term']},this)'>{y['term']}年目</button>" for y in years)
     panels=''.join(
         f"<div class='profile-year-panel {'active' if y['term']==current_term else ''}' data-term='{y['term']}'>"
+        f"<div class='profile-total-wide'><span>卓数</span><b>{int(y['gm']) + int(y['pl'])}卓</b></div>"
         f"<div class='profile-grid'><div><span>GM</span><b>{y['gm']}卓</b></div><div><span>PL</span><b>{y['pl']}卓</b></div>"
         f"<div><span>TRPG</span><b>{y['trpg']}卓</b></div><div><span>マダミス</span><b>{y['madamis']}卓</b></div></div>"
         f"<div class='profile-year-range'>{y['year']}/6/1〜{y['year']+1}/5/31</div></div>" for y in years
@@ -4775,7 +4776,9 @@ async def profile_page(request: Request, discord_id: str):
       .profile-list-main{{min-width:0;display:flex;flex:1;flex-direction:column;align-items:flex-start;gap:4px}} .profile-list-main>b{{font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}}
       .profile-list-title{{font-size:.55rem;min-width:0;min-height:21px;padding:3px 18px;border-radius:6px;max-width:100%}} .profile-list-title::before{{left:5px;font-size:.32rem}} .profile-list-title::after{{right:5px;font-size:.32rem}}
       .profile-list-chevron{{color:#7f8da0;font-size:1.2rem;font-weight:900;margin-left:auto}}
-      .profile-section h3{{margin:0 0 12px;font-size:.92rem}} .profile-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
+      .profile-section h3{{margin:0 0 12px;font-size:.92rem}} .profile-total-wide{{width:100%;box-sizing:border-box;padding:14px 16px;margin-bottom:8px;border-radius:13px;background:#111b28;display:flex;flex-direction:column;gap:3px}}
+      .profile-total-wide span{{color:#8290a2;font-size:.72rem;font-weight:850}} .profile-total-wide b{{font-size:1.28rem;line-height:1.15}}
+      .profile-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
       .profile-grid>div{{padding:12px;border-radius:12px;background:#111b28;display:flex;flex-direction:column;gap:3px}} .profile-grid span{{color:#8290a2;font-size:.68rem;font-weight:800}}
       .profile-grid b{{font-size:1.05rem}} .profile-year-tabs{{display:flex;gap:7px;overflow:auto;margin-bottom:10px}}
       .profile-year-tab{{border:1px solid #334155;background:#111925;color:#aeb9c7;border-radius:10px;padding:7px 11px;font-weight:850;white-space:nowrap}}
@@ -4790,10 +4793,13 @@ async def profile_page(request: Request, discord_id: str):
         <div class='profile-name'>{esc(member.get("display_name") or member.get("username") or discord_id)}</div>
         {title_line}
       </div>
-      <section class='profile-section'><h3>累計</h3><div class='profile-grid'>
-        <div><span>GM</span><b>{total['gm']}卓</b></div><div><span>PL</span><b>{total['pl']}卓</b></div>
-        <div><span>TRPG</span><b>{total['trpg']}卓</b></div><div><span>マダミス</span><b>{total['madamis']}卓</b></div>
-      </div></section>
+      <section class='profile-section'><h3>累計</h3>
+        <div class='profile-total-wide'><span>累計卓数</span><b>{int(total['gm']) + int(total['pl'])}卓</b></div>
+        <div class='profile-grid'>
+          <div><span>GM</span><b>{total['gm']}卓</b></div><div><span>PL</span><b>{total['pl']}卓</b></div>
+          <div><span>TRPG</span><b>{total['trpg']}卓</b></div><div><span>マダミス</span><b>{total['madamis']}卓</b></div>
+        </div>
+      </section>
       <section class='profile-section'><h3>年度別</h3><div class='profile-year-tabs'>{tabs}</div>{panels}</section>
       <section class='profile-section'><h3>🤝 同卓した数TOP3</h3>{pair}</section>
       {own_btn}
