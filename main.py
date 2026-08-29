@@ -4718,9 +4718,9 @@ async def profile_page(request: Request, discord_id: str):
     tabs=''.join(f"<button type='button' class='profile-year-tab {'active' if y['term']==current_term else ''}' onclick='switchProfileYear({y['term']},this)'>{y['term']}年目</button>" for y in years)
     panels=''.join(
         f"<div class='profile-year-panel {'active' if y['term']==current_term else ''}' data-term='{y['term']}'>"
-        f"<div class='profile-total-wide'><span>卓数</span><b>{int(y['gm']) + int(y['pl'])}卓</b></div>"
-        f"<div class='profile-grid'><div><span>GM</span><b>{y['gm']}卓</b></div><div><span>PL</span><b>{y['pl']}卓</b></div>"
-        f"<div><span>TRPG</span><b>{y['trpg']}卓</b></div><div><span>マダミス</span><b>{y['madamis']}卓</b></div></div>"
+        f"<div class='profile-total-wide'><b>{int(y['gm']) + int(y['pl'])}</b><span>卓数</span></div>"
+        f"<div class='profile-grid'><div><b>{y['gm']}</b><span>GM回数</span></div><div><b>{y['pl']}</b><span>PL回数</span></div>"
+        f"<div><b>{y['trpg']}</b><span>TRPG卓数</span></div><div><b>{y['madamis']}</b><span>マダミス卓数</span></div></div>"
         f"<div class='profile-year-range'>{y['year']}/6/1〜{y['year']+1}/5/31</div></div>" for y in years
     ) or "<div class='muted small'>まだ年度データがありません</div>"
     medals=['🥇','🥈','🥉']
@@ -4776,11 +4776,15 @@ async def profile_page(request: Request, discord_id: str):
       .profile-list-main{{min-width:0;display:flex;flex:1;flex-direction:column;align-items:flex-start;gap:4px}} .profile-list-main>b{{font-size:.9rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}}
       .profile-list-title{{font-size:.55rem;min-width:0;min-height:21px;padding:3px 18px;border-radius:6px;max-width:100%}} .profile-list-title::before{{left:5px;font-size:.32rem}} .profile-list-title::after{{right:5px;font-size:.32rem}}
       .profile-list-chevron{{color:#7f8da0;font-size:1.2rem;font-weight:900;margin-left:auto}}
-      .profile-section h3{{margin:0 0 12px;font-size:.92rem}} .profile-total-wide{{width:100%;box-sizing:border-box;padding:14px 16px;margin-bottom:8px;border-radius:13px;background:#111b28;display:flex;flex-direction:column;gap:3px}}
-      .profile-total-wide span{{color:#8290a2;font-size:.72rem;font-weight:850}} .profile-total-wide b{{font-size:1.28rem;line-height:1.15}}
-      .profile-grid{{display:grid;grid-template-columns:1fr 1fr;gap:8px}}
-      .profile-grid>div{{padding:12px;border-radius:12px;background:#111b28;display:flex;flex-direction:column;gap:3px}} .profile-grid span{{color:#8290a2;font-size:.68rem;font-weight:800}}
-      .profile-grid b{{font-size:1.05rem}} .profile-year-tabs{{display:flex;gap:7px;overflow:auto;margin-bottom:10px}}
+      .profile-section h3{{margin:0 0 14px;font-size:.92rem}}
+      .profile-total-wide{{width:100%;box-sizing:border-box;min-height:142px;padding:24px 16px;margin-bottom:12px;border-radius:16px;background:#111b28;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;text-align:center}}
+      .profile-total-wide b{{font-size:2.25rem;line-height:1;font-weight:1000;color:#f2f5fa;font-variant-numeric:tabular-nums}}
+      .profile-total-wide span{{color:#8c99ab;font-size:.82rem;font-weight:800;line-height:1.2}}
+      .profile-grid{{display:grid;grid-template-columns:1fr 1fr;gap:10px}}
+      .profile-grid>div{{min-height:92px;padding:15px 10px;border-radius:14px;background:#111b28;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:7px;text-align:center}}
+      .profile-grid b{{font-size:1.7rem;line-height:1;font-weight:1000;color:#f2f5fa;font-variant-numeric:tabular-nums}}
+      .profile-grid span{{color:#8c99ab;font-size:.74rem;font-weight:800;line-height:1.25}}
+      .profile-year-tabs{{display:flex;gap:7px;overflow:auto;margin-bottom:12px}}
       .profile-year-tab{{border:1px solid #334155;background:#111925;color:#aeb9c7;border-radius:10px;padding:7px 11px;font-weight:850;white-space:nowrap}}
       .profile-year-tab.active{{background:#5865f2;color:white;border-color:#5865f2}} .profile-year-panel{{display:none}} .profile-year-panel.active{{display:block}}
       .profile-year-range{{text-align:right;color:#687689;font-size:.62rem;margin-top:7px}} .profile-pair-row{{display:flex;justify-content:space-between;align-items:center;text-decoration:none;color:#e8edf5;padding:11px 3px;border-bottom:1px solid #202b39}}
@@ -4794,10 +4798,10 @@ async def profile_page(request: Request, discord_id: str):
         {title_line}
       </div>
       <section class='profile-section'><h3>累計</h3>
-        <div class='profile-total-wide'><span>累計卓数</span><b>{int(total['gm']) + int(total['pl'])}卓</b></div>
+        <div class='profile-total-wide'><b>{int(total['gm']) + int(total['pl'])}</b><span>累計卓数</span></div>
         <div class='profile-grid'>
-          <div><span>GM</span><b>{total['gm']}卓</b></div><div><span>PL</span><b>{total['pl']}卓</b></div>
-          <div><span>TRPG</span><b>{total['trpg']}卓</b></div><div><span>マダミス</span><b>{total['madamis']}卓</b></div>
+          <div><b>{total['gm']}</b><span>GM回数</span></div><div><b>{total['pl']}</b><span>PL回数</span></div>
+          <div><b>{total['trpg']}</b><span>TRPG卓数</span></div><div><b>{total['madamis']}</b><span>マダミス卓数</span></div>
         </div>
       </section>
       <section class='profile-section'><h3>年度別</h3><div class='profile-year-tabs'>{tabs}</div>{panels}</section>
