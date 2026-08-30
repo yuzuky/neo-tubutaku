@@ -988,7 +988,8 @@ def session_reschedule_detail(reschedule_id: int):
         rs = c.execute(
             """SELECT sr.*,s.recruitment_id,s.round_no,s.event_date AS original_event_date,
                       s.start_time AS original_start_time,s.channel_id,s.cancelled_at,
-                      r.scenario_name,r.game_type,r.gm_discord_id,r.gm_name_override
+                      r.scenario_name,r.game_type,r.gm_discord_id,r.gm_name_override,
+                      r.min_players,r.max_players
                  FROM session_reschedules sr
                  JOIN sessions s ON s.id=sr.session_id
                  JOIN recruitments r ON r.id=s.recruitment_id
@@ -1028,41 +1029,73 @@ def save_session_reschedule_answers(reschedule_id: int, discord_id: str, answers
         return False
     allowed_dates = set(dates)
     with db() as c:
+        # 元の再日程調整と同じく「-」は未回答扱い。保存時に一度自分の回答を消してから○/△だけ入れ直す。
+        c.execute(
+            "DELETE FROM session_reschedule_answers WHERE reschedule_id=? AND discord_id=?",
+            (int(reschedule_id), str(discord_id)),
+        )
         for d, a in answers.items():
-            if d not in allowed_dates or a not in {"YES","MAYBE","NO"}:
+            if d not in allowed_dates or a not in {"YES","MAYBE"}:
                 continue
             c.execute(
                 """INSERT INTO session_reschedule_answers(reschedule_id,discord_id,event_date,answer,updated_at)
-                   VALUES(?,?,?,?,?)
-                   ON CONFLICT(reschedule_id,discord_id,event_date) DO UPDATE SET answer=excluded.answer,updated_at=excluded.updated_at""",
+                   VALUES(?,?,?,?,?)""",
                 (int(reschedule_id), str(discord_id), str(d), str(a), str(updated_at)),
             )
     return True
 
 
-def confirm_session_reschedule(reschedule_id: int, new_event_date: str, new_start_time: str):
-    """成立卓IDをキーに1卓だけ移動する。同日の別卓には一切触れない。"""
-    rs, dates, _, _ = session_reschedule_detail(reschedule_id)
+def confirm_session_reschedule(reschedule_id: int, new_event_date: str, new_start_time: str, selected_member_ids: list[str] | None = None):
+    """成立卓IDをキーに1卓だけ移動する。同日の別卓には一切触れない。参加者も選択内容へ同期する。"""
+    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
     if not rs or str(rs.get("status")) != "OPEN" or str(new_event_date) not in set(dates):
         return None
     session_id = int(rs["session_id"])
     old_date = str(rs["original_event_date"])
     old_time = str(rs["original_start_time"] or "")
+
+    allowed_member_ids = {str(m["discord_id"]) for m in members}
+    yes_member_ids = {uid for uid in allowed_member_ids if answers.get(uid, {}).get(str(new_event_date)) == "YES"}
+    if selected_member_ids is None:
+        selected = sorted(yes_member_ids)
+    else:
+        selected = list(dict.fromkeys(str(x) for x in selected_member_ids if str(x) in yes_member_ids))
+    if len(selected) < int(rs.get("min_players") or 1):
+        return None
+    if len(selected) > int(rs.get("max_players") or len(selected)):
+        return None
+
     with db() as c:
         c.execute(
             "UPDATE sessions SET event_date=?,start_time=?,reminder_sent=0 WHERE id=?",
             (str(new_event_date), str(new_start_time), session_id),
         )
-        # source_session_id が一致する1レコードだけ更新する。
+        # source_session_id が一致する1レコードだけ更新する。同日の別卓は触らない。
         c.execute(
             "UPDATE calendar_sessions SET event_date=?,start_time=? WHERE source_session_id=?",
             (str(new_event_date), str(new_start_time), session_id),
         )
+        # 再日程調整でGMが選んだPLへ、成立卓と永久カレンダーの参加者を同期。
+        c.execute("DELETE FROM session_members WHERE session_id=?", (session_id,))
+        if selected:
+            c.executemany(
+                "INSERT INTO session_members(session_id,discord_id) VALUES(?,?)",
+                [(session_id, uid) for uid in selected],
+            )
+        cs = c.execute("SELECT id FROM calendar_sessions WHERE source_session_id=?", (session_id,)).fetchone()
+        if cs:
+            calendar_session_id = int(cs["id"])
+            c.execute("DELETE FROM calendar_session_members WHERE calendar_session_id=?", (calendar_session_id,))
+            if selected:
+                c.executemany(
+                    "INSERT INTO calendar_session_members(calendar_session_id,discord_id) VALUES(?,?)",
+                    [(calendar_session_id, uid) for uid in selected],
+                )
         c.execute(
             "UPDATE session_reschedules SET status='CONFIRMED',confirmed_date=? WHERE id=?",
             (str(new_event_date), int(reschedule_id)),
         )
-    return {"session_id":session_id,"old_date":old_date,"old_time":old_time,"new_date":str(new_event_date),"new_time":str(new_start_time)}
+    return {"session_id":session_id,"old_date":old_date,"old_time":old_time,"new_date":str(new_event_date),"new_time":str(new_start_time),"member_ids":selected}
 
 
 def cancel_confirmed_session(session_id: int, cancelled_at: str):
