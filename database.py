@@ -1529,6 +1529,87 @@ def full_derived_rebuild_v75(as_of_date: str, updated_at: str):
         )
     return rebuilt_unlocks
 
+def cutoff_resync_v83_done() -> bool:
+    """v83: 未来卓を除外した一度きりの派生データ再同期が完了済みか。"""
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='cutoff_resync_v83_done' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def cutoff_resync_v83(as_of_date: str, updated_at: str):
+    """v83: as_of_date までの卓だけを正としてプロフィール・称号派生データを再同期する。
+
+    未来卓は profile_processed_tables にも入れないため、その開催日の20時に通常の
+    日次差分として一度だけ加算される。既存の装備称号は、再判定後も同じ称号が
+    有効なら復元する。
+    """
+    cutoff = str(as_of_date)
+
+    # 装備中称号があっても安全に移行できるよう、unlock_idではなく安定キーで退避。
+    with db() as c:
+        equipped = [dict(r) for r in c.execute(
+            """SELECT et.discord_id,au.achievement_key,au.context_key
+                 FROM equipped_titles et
+                 JOIN achievement_unlocks au ON au.id=et.unlock_id"""
+        ).fetchall()]
+
+        # 称号は現在の有効な履歴だけから再判定する。
+        c.execute("DELETE FROM equipped_titles")
+        c.execute("DELETE FROM achievement_unlocks")
+        c.execute("DELETE FROM achievement_scenario_gm_totals")
+        # cutoffより後の日付が処理済み扱いになっていた場合は解除する。
+        c.execute("DELETE FROM achievement_daily_runs WHERE run_date>?", (cutoff,))
+
+    # 表示キャッシュ + processed_tables / 同卓 / 活動日等を cutoff までで作り直す。
+    refresh_profile_caches(cutoff, str(updated_at))
+
+    # シナリオGM回数も cutoff までだけで再生成。
+    with db() as c:
+        records = _unique_table_records(c, cutoff)
+        counts = {}
+        for r in records:
+            gm = str(r.get("gm") or "")
+            scenario = str(r.get("scenario") or "").strip()
+            if gm and scenario:
+                counts[(gm, scenario)] = counts.get((gm, scenario), 0) + 1
+        if counts:
+            c.executemany(
+                "INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,?)",
+                [(uid, scenario, n) for (uid, scenario), n in counts.items()],
+            )
+
+    # cutoff時点で成立している称号だけ静かに再付与。
+    evaluate_achievements(cutoff, str(updated_at))
+
+    # 以前装備していた称号が現在も取得条件を満たすなら復元。
+    with db() as c:
+        for old in equipped:
+            row = c.execute(
+                """SELECT id FROM achievement_unlocks
+                    WHERE discord_id=? AND achievement_key=? AND context_key=?""",
+                (str(old["discord_id"]), str(old["achievement_key"]), str(old["context_key"] or "")),
+            ).fetchone()
+            if row:
+                c.execute(
+                    "INSERT OR REPLACE INTO equipped_titles(discord_id,unlock_id,updated_at) VALUES(?,?,?)",
+                    (str(old["discord_id"]), int(row["id"]), str(updated_at)),
+                )
+
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('cutoff_resync_v83_done','1')"
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('cutoff_resync_v83_as_of',?)",
+            (cutoff,),
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('cutoff_resync_v83_done_at',?)",
+            (str(updated_at),),
+        )
+    return True
+
+
 def profile_cache_v74_resynced() -> bool:
     """v74でプロフィール集計キャッシュをカレンダー履歴から再同期済みか。"""
     with db() as c:
