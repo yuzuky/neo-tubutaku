@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -837,6 +837,10 @@ button,input,textarea,select{font:inherit}
 .calendar-day.outside{
   opacity:.30;
   background:#0a0f16;
+}
+.calendar-day.today{
+  background:#171d26;
+  box-shadow:inset 0 0 0 1px #3a4350;
 }
 .calendar-date{
   font-size:.82rem;
@@ -3288,6 +3292,17 @@ async def bootstrap_achievements():
             mark_achievement_run(today.isoformat(), stamp)
         return
 
+    # v83初回だけ、未来卓を除外して現在時点の確定卓だけから派生データを再同期。
+    # 20時前なら昨日まで、20時以降なら今日までを含める。未来卓は処理済みにしないので、
+    # 開催日20時に通常の日次差分で一度だけ加算される。
+    if not cutoff_resync_v83_done():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        stamp = iso_now()
+        cutoff_resync_v83(as_of.isoformat(), stamp)
+        if now.time() >= time(20,0):
+            mark_achievement_run(today.isoformat(), stamp)
+        return
+
     # v74初回だけ、プロフィール集計キャッシュをカレンダー履歴から正しい値で作り直す。
     # TRPG / マダミスは GM + PL の両方を含む値で再構築し、その後は20時の当日差分だけ更新する。
     if not profile_cache_v74_resynced():
@@ -3626,7 +3641,7 @@ async def calendar_page(request: Request, month: str = ""):
     day_cells = []
     for week in weeks:
         for d in week:
-            cls = "calendar-day" + (" outside" if d.month != current.month else "")
+            cls = "calendar-day" + (" outside" if d.month != current.month else "") + (" today" if d == today else "")
             dow = d.weekday()
             dcls = "sat" if dow == 5 else "sun" if dow == 6 else ""
             blocks = []
@@ -4002,7 +4017,7 @@ async def calendar_page(request: Request, month: str = ""):
               <div class='stats-wide-card total-count'><b>{total_stats["total"]}</b><span>累計卓数</span></div>
               <div class='stats-type-row'><div><b>{total_stats["trpg"]}</b><span>TRPG卓数</span></div><div><b>{total_stats["madamis"]}</b><span>マダミス卓数</span></div></div>
               <div class='stats-wide-card'><b>{total_stats["scenario_count"]}</b><span>累計シナリオ種類</span></div>
-              <div class='stats-type-row'><div><b>{total_stats["trpg_scenarios"]}</b><span>TRPGシナリオ種類</span></div><div><b>{total_stats["madamis_scenarios"]}</b><span>マダミスシナリオ種類</span></div></div>
+              <div class='stats-type-row'><div><b>{total_stats["trpg_scenarios"]}</b><span>TRPGシナリオ</span></div><div><b>{total_stats["madamis_scenarios"]}</b><span>マダミスシナリオ</span></div></div>
               <div class='stats-ranking-title'>GM TOP3</div>{rank_html(total_stats["gm_top"])}
               <div class='stats-ranking-title'>PL TOP3</div>{rank_html(total_stats["pl_top"])}
             </div>
