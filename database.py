@@ -1851,6 +1851,95 @@ def calendar_resync_v90(as_of_date: str, updated_at: str):
     return True
 
 
+
+def temporary_v92_madamis_year_fix_done() -> bool:
+    """v92: テスト中に減った今年度1卓分の臨時補正を適用済みか。"""
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='temporary_v92_madamis_year_fix_done' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def apply_temporary_v92_madamis_year_fix(updated_at: str) -> dict:
+    """
+    v92限定の一度きり補正。
+    2026年度（2026-06-01〜2027-05-31）の年別プロフィールキャッシュだけを、
+    まげたん / すぅちぃ / ニック は PL+1・マダミス+1、
+    yuzuky は GM+1・マダミス+1 する。
+    累計値・カレンダー・processed tables・称号には触れない。
+    """
+    marker = 'temporary_v92_madamis_year_fix_done'
+    activity_year = 2026
+    term = activity_year - 2023
+    targets = [
+        ('まげたん', 'PL', None),
+        ('すぅちぃ', 'PL', None),
+        ('ニック', 'PL', None),
+        ('yuzuky', 'GM', '804350794371039272'),
+    ]
+    result = {}
+    with db() as c:
+        if c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key=? AND meta_value='1'",
+            (marker,),
+        ).fetchone():
+            return {'already_done': True}
+
+        # 4人全員を特定できた場合だけ補正する。途中まで加算される事故を防ぐ。
+        resolved = []
+        for name, role, fixed_uid in targets:
+            row = None
+            if fixed_uid:
+                row = c.execute(
+                    "SELECT discord_id,display_name,username FROM registered_members WHERE discord_id=?",
+                    (fixed_uid,),
+                ).fetchone()
+            if row is None:
+                row = c.execute(
+                    """SELECT discord_id,display_name,username
+                       FROM registered_members
+                       WHERE lower(trim(display_name))=lower(?) OR lower(trim(username))=lower(?)
+                       ORDER BY CASE WHEN trim(display_name)=? THEN 0 ELSE 1 END
+                       LIMIT 1""",
+                    (name, name, name),
+                ).fetchone()
+            if row is None:
+                raise RuntimeError(f'v92 temporary fix: registered member not found: {name}')
+            resolved.append((name, role, str(row['discord_id'])))
+
+        for name, role, uid in resolved:
+            c.execute(
+                """INSERT OR IGNORE INTO profile_year_stats_cache(
+                     discord_id,activity_year,term,gm_count,pl_count,trpg_count,madamis_count,trpg_pl_count,madamis_pl_count,updated_at
+                   ) VALUES(?,?,?,0,0,0,0,0,0,?)""",
+                (uid, activity_year, term, str(updated_at)),
+            )
+            if role == 'GM':
+                c.execute(
+                    """UPDATE profile_year_stats_cache
+                       SET gm_count=gm_count+1, madamis_count=madamis_count+1, updated_at=?
+                       WHERE discord_id=? AND activity_year=?""",
+                    (str(updated_at), uid, activity_year),
+                )
+            else:
+                c.execute(
+                    """UPDATE profile_year_stats_cache
+                       SET pl_count=pl_count+1, madamis_count=madamis_count+1, madamis_pl_count=madamis_pl_count+1, updated_at=?
+                       WHERE discord_id=? AND activity_year=?""",
+                    (str(updated_at), uid, activity_year),
+                )
+            result[name] = uid
+
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES(?, '1')",
+            (marker,),
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('temporary_v92_madamis_year_fix_done_at',?)",
+            (str(updated_at),),
+        )
+    return result
+
 def profile_cache_v74_resynced() -> bool:
     """v74でプロフィール集計キャッシュをカレンダー履歴から再同期済みか。"""
     with db() as c:
