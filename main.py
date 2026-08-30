@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -856,9 +856,9 @@ button,input,textarea,select{font:inherit}
   display:flex;
   align-items:center;
   justify-content:center;
-  width:25px;
-  height:25px;
-  margin:-2px 0 4px -2px;
+  width:21px;
+  height:21px;
+  margin:-1px 0 2px -1px;
   border-radius:50%;
   background:#7667e8;
   color:#fff;
@@ -3326,6 +3326,16 @@ async def bootstrap_achievements():
             mark_achievement_run(today.isoformat(), stamp)
         return
 
+    # v90: テスト中の変更で派生集計が乱れたため、一度だけカレンダーを正として再取得。
+    # 20時以降なら今日まで、20時前なら昨日まで。未来卓は含めない。
+    if not calendar_resync_v90_done():
+        as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
+        stamp = iso_now()
+        calendar_resync_v90(as_of.isoformat(), stamp)
+        if now.time() >= time(20,0):
+            mark_achievement_run(today.isoformat(), stamp)
+        return
+
     # v74初回だけ、プロフィール集計キャッシュをカレンダー履歴から正しい値で作り直す。
     # TRPG / マダミスは GM + PL の両方を含む値で再構築し、その後は20時の当日差分だけ更新する。
     if not profile_cache_v74_resynced():
@@ -3734,7 +3744,7 @@ async def calendar_page(request: Request, month: str = ""):
                             + (f"<span class='cal-person gm'>{esc(gm_text)}</span>" if gm_text else "")
                             + "".join(
                                 f"<span class='cal-person pl'>{esc(m['display_name'])}</span>"
-                                for m in members[:4]
+                                for m in members[:max(0, 5 - (1 if gm_text else 0))]
                             )
                             + "</div>"
                         )
