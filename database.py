@@ -791,7 +791,7 @@ def calendar_session_detail(calendar_session_id: int):
 def update_calendar_session_details(calendar_session_id: int, scenario_name: str, gm_discord_id: str,
                                     participant_ids: list[str], gm_guest_name: str = "",
                                     guest_participant_names: list[str] | None = None,
-                                    game_type: str | None = None):
+                                    game_type: str | None = None, event_date: str | None = None):
     guest_participant_names = guest_participant_names or []
     with db() as c:
         row = c.execute("SELECT game_type FROM calendar_sessions WHERE id=?", (calendar_session_id,)).fetchone()
@@ -799,8 +799,12 @@ def update_calendar_session_details(calendar_session_id: int, scenario_name: str
         normalized_game_type = game_type or str(row["game_type"] or "TRPG")
         if normalized_game_type == "マダミス": normalized_game_type = "MADMIS"
         if normalized_game_type not in {"TRPG", "MADMIS", "EVENT"}: return False
-        c.execute("UPDATE calendar_sessions SET game_type=?, scenario_name=?, gm_discord_id=?, gm_guest_name=? WHERE id=?",
-                  (normalized_game_type, scenario_name.strip(), str(gm_discord_id or ""), gm_guest_name.strip(), calendar_session_id))
+        if event_date is not None:
+            c.execute("UPDATE calendar_sessions SET game_type=?, scenario_name=?, gm_discord_id=?, gm_guest_name=?, event_date=? WHERE id=?",
+                      (normalized_game_type, scenario_name.strip(), str(gm_discord_id or ""), gm_guest_name.strip(), str(event_date), calendar_session_id))
+        else:
+            c.execute("UPDATE calendar_sessions SET game_type=?, scenario_name=?, gm_discord_id=?, gm_guest_name=? WHERE id=?",
+                      (normalized_game_type, scenario_name.strip(), str(gm_discord_id or ""), gm_guest_name.strip(), calendar_session_id))
         c.execute("DELETE FROM calendar_session_members WHERE calendar_session_id=?", (calendar_session_id,))
         c.execute("DELETE FROM calendar_guest_members WHERE calendar_session_id=?", (calendar_session_id,))
         cleaned=[str(uid) for uid in dict.fromkeys(participant_ids) if uid and str(uid)!=str(gm_discord_id)]
