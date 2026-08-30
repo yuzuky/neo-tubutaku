@@ -1825,6 +1825,32 @@ def cutoff_resync_v83(as_of_date: str, updated_at: str):
     return True
 
 
+def calendar_resync_v90_done() -> bool:
+    """v90: テスト後の一度きりのカレンダー再取得が完了済みか。"""
+    with db() as c:
+        return c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='calendar_resync_v90_done' AND meta_value='1'"
+        ).fetchone() is not None
+
+
+def calendar_resync_v90(as_of_date: str, updated_at: str):
+    """v90: カレンダーを正として as_of_date までの派生集計を一度だけ再構築する。"""
+    cutoff_resync_v83(str(as_of_date), str(updated_at))
+    with db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('calendar_resync_v90_done','1')"
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('calendar_resync_v90_as_of',?)",
+            (str(as_of_date),),
+        )
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('calendar_resync_v90_done_at',?)",
+            (str(updated_at),),
+        )
+    return True
+
+
 def profile_cache_v74_resynced() -> bool:
     """v74でプロフィール集計キャッシュをカレンダー履歴から再同期済みか。"""
     with db() as c:
