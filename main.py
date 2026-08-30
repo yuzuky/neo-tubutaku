@@ -851,6 +851,20 @@ button,input,textarea,select{font:inherit}
 }
 .calendar-date.sun{color:#ef6a71}
 .calendar-date.sat{color:#6b91ff}
+/* 今日の日付だけ、数字を紫の丸で強調する。カレンダー集計処理には影響しない表示専用CSS。 */
+.calendar-day.today .calendar-date{
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  width:25px;
+  height:25px;
+  margin:-2px 0 4px -2px;
+  border-radius:50%;
+  background:#7667e8;
+  color:#fff;
+  line-height:1;
+  box-shadow:0 0 0 1px rgba(255,255,255,.08), 0 2px 8px rgba(118,103,232,.24);
+}
 
 /* 1つの卓が他のマスの幅・高さを押し広げないようにする */
 .cal-session{
