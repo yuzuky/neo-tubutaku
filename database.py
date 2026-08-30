@@ -4,6 +4,7 @@ import os
 import sqlite3
 import hashlib
 import json
+import unicodedata
 from contextlib import contextmanager
 
 # ============================================================
@@ -1344,6 +1345,21 @@ def initialize_database():
     ensure_calendar_columns()
     ensure_profile_cache_columns()
     with db() as c:
+        # v97: 手動補正値を履歴再集計とは独立して保持する。
+        # 一度登録した補正はキャッシュ再構築でも消えない。
+        c.execute(
+            """CREATE TABLE IF NOT EXISTS profile_year_adjustments(
+                   discord_id TEXT NOT NULL,
+                   activity_year INTEGER NOT NULL,
+                   gm_delta INTEGER NOT NULL DEFAULT 0,
+                   pl_delta INTEGER NOT NULL DEFAULT 0,
+                   trpg_delta INTEGER NOT NULL DEFAULT 0,
+                   madamis_delta INTEGER NOT NULL DEFAULT 0,
+                   note TEXT,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY(discord_id, activity_year, note)
+               )"""
+        )
         c.execute(
             """INSERT OR IGNORE INTO registered_members(
                    discord_id,username,display_name,avatar_url,created_at,updated_at
@@ -2205,6 +2221,74 @@ def apply_temporary_v95_madamis_year_fix(updated_at: str) -> dict:
         )
     return result
 
+
+
+def _temporary_v96_norm_name(value: str) -> str:
+    """v96臨時補正用: Discord表示名の表記ゆれを吸収して比較する。"""
+    return unicodedata.normalize("NFKC", str(value or "")).strip().casefold().replace(" ", "").replace("　", "")
+
+
+def temporary_v96_madamis_year_fix_done() -> bool:
+    """v97: 今回の補正レコードが4人分DBへ永続登録済みか。"""
+    with db() as c:
+        row = c.execute(
+            """SELECT COUNT(*) AS n FROM profile_year_adjustments
+               WHERE activity_year=2026 AND note='testplay_madamis_minus1_restore_20260830'"""
+        ).fetchone()
+        return int(row['n'] or 0) >= 4
+
+
+def apply_temporary_v96_madamis_year_fix(updated_at: str) -> dict:
+    """
+    v97で使用する今回だけの補正登録。
+    キャッシュそのものではなく profile_year_adjustments に1卓分を記録するため、
+    後から再集計されても消えない。noteのUNIQUE性で二重登録もしない。
+    """
+    activity_year = 2026
+    note = 'testplay_madamis_minus1_restore_20260830'
+    targets = [
+        ('magetann', 'まげたん', 'PL', None),
+        ('suuchii', 'すぅちぃ', 'PL', None),
+        ('nick', 'ニック', 'PL', None),
+        ('yuzuky', 'yuzuky', 'GM', '804350794371039272'),
+    ]
+    result = {}
+    with db() as c:
+        rows = c.execute(
+            """SELECT discord_id, username, display_name FROM registered_members
+               UNION ALL
+               SELECT discord_id, username, display_name FROM users"""
+        ).fetchall()
+        by_norm = {}
+        for r in rows:
+            uid = str(r['discord_id'])
+            for raw in (r['display_name'], r['username']):
+                key = _temporary_v96_norm_name(raw)
+                if key and key not in by_norm:
+                    by_norm[key] = uid
+
+        for slug, name, role, fixed_uid in targets:
+            uid = str(fixed_uid) if fixed_uid else by_norm.get(_temporary_v96_norm_name(name))
+            if not uid:
+                result[name] = 'not_found'
+                continue
+            gm_delta = 1 if role == 'GM' else 0
+            pl_delta = 1 if role == 'PL' else 0
+            cur = c.execute(
+                """INSERT OR IGNORE INTO profile_year_adjustments(
+                       discord_id,activity_year,gm_delta,pl_delta,trpg_delta,madamis_delta,note,created_at
+                   ) VALUES(?,?,?,?,0,1,?,?)""",
+                (uid, activity_year, gm_delta, pl_delta, note, str(updated_at)),
+            )
+            result[name] = 'added' if cur.rowcount else 'already_done'
+
+            marker = f'temporary_v97_madamis_year_fix_{slug}'
+            c.execute(
+                "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES(?, '1')", (marker,)
+            )
+    return result
+
+
 def profile_cache_v74_resynced() -> bool:
     """v74でプロフィール集計キャッシュをカレンダー履歴から再同期済みか。"""
     with db() as c:
@@ -2567,6 +2651,28 @@ def profile_data(discord_id: str):
         } for r in c.execute(
             "SELECT * FROM profile_year_stats_cache WHERE discord_id=? ORDER BY activity_year", (uid,)
         ).fetchall()]
+
+        # v97: テスト等で必要になった明示的な年別補正を最後に重ねる。
+        # profile_year_stats_cache が将来再構築されても、この補正値は別テーブルなので消えない。
+        adjustments = c.execute(
+            """SELECT activity_year,
+                      SUM(gm_delta) AS gm_delta,SUM(pl_delta) AS pl_delta,
+                      SUM(trpg_delta) AS trpg_delta,SUM(madamis_delta) AS madamis_delta
+                 FROM profile_year_adjustments WHERE discord_id=? GROUP BY activity_year""",
+            (uid,),
+        ).fetchall()
+        year_map = {int(y["year"]): y for y in years}
+        for a in adjustments:
+            ay = int(a["activity_year"])
+            y = year_map.get(ay)
+            if y is None:
+                y = {"year":ay,"term":ay-2023,"gm":0,"pl":0,"trpg":0,"madamis":0}
+                years.append(y); year_map[ay] = y
+            y["gm"] += int(a["gm_delta"] or 0)
+            y["pl"] += int(a["pl_delta"] or 0)
+            y["trpg"] += int(a["trpg_delta"] or 0)
+            y["madamis"] += int(a["madamis_delta"] or 0)
+        years.sort(key=lambda y: y["year"])
 
         pair_rows = []
         for r in c.execute(
