@@ -144,6 +144,35 @@ def init_db():
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
 
+            -- v85: 成立後の日程変更・開催中止管理
+            CREATE TABLE IF NOT EXISTS session_reschedules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                start_time TEXT NOT NULL,
+                deadline TEXT,
+                status TEXT NOT NULL DEFAULT 'OPEN',
+                created_at TEXT NOT NULL,
+                confirmed_date TEXT,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_reschedule_dates (
+                reschedule_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                PRIMARY KEY(reschedule_id,event_date),
+                FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_reschedule_answers (
+                reschedule_id INTEGER NOT NULL,
+                discord_id TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                answer TEXT NOT NULL CHECK(answer IN ('YES','MAYBE','NO')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(reschedule_id,discord_id,event_date),
+                FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
+            );
+
 
             -- 成立卓の永久保存用。recruitments/sessionsが90日後に消えても残す。
             CREATE TABLE IF NOT EXISTS calendar_sessions (
@@ -371,6 +400,14 @@ def ensure_recruitment_columns():
                 "ALTER TABLE recruitments "
                 "ADD COLUMN calendar_visible INTEGER NOT NULL DEFAULT 0"
             )
+
+
+def ensure_session_columns():
+    """v85: 既存sessionsへ開催中止状態を安全に追加する。"""
+    with db() as c:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
+        if "cancelled_at" not in cols:
+            c.execute("ALTER TABLE sessions ADD COLUMN cancelled_at TEXT")
 
 
 def ensure_profile_cache_columns():
@@ -897,6 +934,150 @@ def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: st
 
 
 
+
+
+def session_management_detail(session_id: int):
+    """成立卓の管理画面用。元卓・GM・参加者・カレンダーIDをまとめて返す。"""
+    with db() as c:
+        row = c.execute(
+            """SELECT s.*,r.scenario_name,r.game_type,r.gm_discord_id,r.gm_name_override,
+                      cs.id AS calendar_session_id,cs.event_date AS calendar_event_date,
+                      cs.start_time AS calendar_start_time
+                 FROM sessions s
+                 JOIN recruitments r ON r.id=s.recruitment_id
+                 LEFT JOIN calendar_sessions cs ON cs.source_session_id=s.id
+                WHERE s.id=?""",
+            (int(session_id),),
+        ).fetchone()
+        if not row:
+            return None, []
+        members = c.execute(
+            """SELECT sm.discord_id,
+                      COALESCE(rm.display_name,rm.username,u.display_name,u.username,sm.discord_id) AS display_name
+                 FROM session_members sm
+                 LEFT JOIN registered_members rm ON rm.discord_id=sm.discord_id
+                 LEFT JOIN users u ON u.discord_id=sm.discord_id
+                WHERE sm.session_id=?
+                ORDER BY display_name COLLATE NOCASE""",
+            (int(session_id),),
+        ).fetchall()
+    return dict(row), [dict(x) for x in members]
+
+
+def create_session_reschedule(session_id: int, start_time: str, deadline: str, candidate_dates: list[str], created_at: str) -> int:
+    dates = list(dict.fromkeys(str(x).strip() for x in candidate_dates if str(x).strip()))
+    if not dates:
+        raise ValueError("候補日がありません")
+    with db() as c:
+        # 同じ成立卓で開いている古い再調整は閉じる。元の開催日は変更しない。
+        c.execute("UPDATE session_reschedules SET status='CLOSED' WHERE session_id=? AND status='OPEN'", (int(session_id),))
+        cur = c.execute(
+            "INSERT INTO session_reschedules(session_id,start_time,deadline,status,created_at) VALUES(?,?,?,'OPEN',?)",
+            (int(session_id), str(start_time), str(deadline or ''), str(created_at)),
+        )
+        reschedule_id = int(cur.lastrowid)
+        c.executemany(
+            "INSERT INTO session_reschedule_dates(reschedule_id,event_date) VALUES(?,?)",
+            [(reschedule_id, d) for d in dates],
+        )
+    return reschedule_id
+
+
+def session_reschedule_detail(reschedule_id: int):
+    with db() as c:
+        rs = c.execute(
+            """SELECT sr.*,s.recruitment_id,s.round_no,s.event_date AS original_event_date,
+                      s.start_time AS original_start_time,s.channel_id,s.cancelled_at,
+                      r.scenario_name,r.game_type,r.gm_discord_id,r.gm_name_override
+                 FROM session_reschedules sr
+                 JOIN sessions s ON s.id=sr.session_id
+                 JOIN recruitments r ON r.id=s.recruitment_id
+                WHERE sr.id=?""",
+            (int(reschedule_id),),
+        ).fetchone()
+        if not rs:
+            return None, [], [], {}
+        dates = [str(r["event_date"]) for r in c.execute(
+            "SELECT event_date FROM session_reschedule_dates WHERE reschedule_id=? ORDER BY event_date",
+            (int(reschedule_id),),
+        ).fetchall()]
+        members = [dict(r) for r in c.execute(
+            """SELECT sm.discord_id,
+                      COALESCE(rm.display_name,rm.username,u.display_name,u.username,sm.discord_id) AS display_name
+                 FROM session_members sm
+                 LEFT JOIN registered_members rm ON rm.discord_id=sm.discord_id
+                 LEFT JOIN users u ON u.discord_id=sm.discord_id
+                WHERE sm.session_id=? ORDER BY display_name COLLATE NOCASE""",
+            (int(rs["session_id"]),),
+        ).fetchall()]
+        answers = {}
+        for a in c.execute(
+            "SELECT discord_id,event_date,answer FROM session_reschedule_answers WHERE reschedule_id=?",
+            (int(reschedule_id),),
+        ).fetchall():
+            answers.setdefault(str(a["discord_id"]), {})[str(a["event_date"])] = str(a["answer"])
+    return dict(rs), dates, members, answers
+
+
+def save_session_reschedule_answers(reschedule_id: int, discord_id: str, answers: dict[str,str], updated_at: str):
+    rs, dates, members, _ = session_reschedule_detail(reschedule_id)
+    if not rs or str(rs.get("status")) != "OPEN":
+        return False
+    allowed_users = {str(m["discord_id"]) for m in members}
+    if str(discord_id) not in allowed_users:
+        return False
+    allowed_dates = set(dates)
+    with db() as c:
+        for d, a in answers.items():
+            if d not in allowed_dates or a not in {"YES","MAYBE","NO"}:
+                continue
+            c.execute(
+                """INSERT INTO session_reschedule_answers(reschedule_id,discord_id,event_date,answer,updated_at)
+                   VALUES(?,?,?,?,?)
+                   ON CONFLICT(reschedule_id,discord_id,event_date) DO UPDATE SET answer=excluded.answer,updated_at=excluded.updated_at""",
+                (int(reschedule_id), str(discord_id), str(d), str(a), str(updated_at)),
+            )
+    return True
+
+
+def confirm_session_reschedule(reschedule_id: int, new_event_date: str, new_start_time: str):
+    """成立卓IDをキーに1卓だけ移動する。同日の別卓には一切触れない。"""
+    rs, dates, _, _ = session_reschedule_detail(reschedule_id)
+    if not rs or str(rs.get("status")) != "OPEN" or str(new_event_date) not in set(dates):
+        return None
+    session_id = int(rs["session_id"])
+    old_date = str(rs["original_event_date"])
+    old_time = str(rs["original_start_time"] or "")
+    with db() as c:
+        c.execute(
+            "UPDATE sessions SET event_date=?,start_time=?,reminder_sent=0 WHERE id=?",
+            (str(new_event_date), str(new_start_time), session_id),
+        )
+        # source_session_id が一致する1レコードだけ更新する。
+        c.execute(
+            "UPDATE calendar_sessions SET event_date=?,start_time=? WHERE source_session_id=?",
+            (str(new_event_date), str(new_start_time), session_id),
+        )
+        c.execute(
+            "UPDATE session_reschedules SET status='CONFIRMED',confirmed_date=? WHERE id=?",
+            (str(new_event_date), int(reschedule_id)),
+        )
+    return {"session_id":session_id,"old_date":old_date,"old_time":old_time,"new_date":str(new_event_date),"new_time":str(new_start_time)}
+
+
+def cancel_confirmed_session(session_id: int, cancelled_at: str):
+    """成立卓を開催中止にする。Discordチャンネルは削除せず、カレンダーだけ完全削除する。"""
+    detail, _ = session_management_detail(session_id)
+    if not detail:
+        return None
+    calendar_session_id = detail.get("calendar_session_id")
+    with db() as c:
+        c.execute("UPDATE sessions SET cancelled_at=? WHERE id=?", (str(cancelled_at), int(session_id)))
+        c.execute("UPDATE session_reschedules SET status='CANCELLED' WHERE session_id=? AND status='OPEN'", (int(session_id),))
+    if calendar_session_id:
+        permanently_delete_calendar_session(int(calendar_session_id), str(cancelled_at))
+    return detail
+
 def normalize_progress_game_type(game_type: str) -> str:
     gt = str(game_type or "").strip()
     return "MADMIS" if gt in {"MADMIS", "マダミス"} else gt
@@ -1126,6 +1307,7 @@ def initialize_database():
     """既存DBを保持したまま、必要なテーブル・列だけ追加する。"""
     init_db()
     ensure_recruitment_columns()
+    ensure_session_columns()
     ensure_calendar_columns()
     ensure_profile_cache_columns()
     with db() as c:
