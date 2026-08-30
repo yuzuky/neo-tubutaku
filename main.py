@@ -6834,7 +6834,7 @@ async def session_reschedule_new(session_id: int, request: Request):
           </div>
         </div>
 
-        <p class='muted' style='margin:-8px 2px 24px'>元の開催日は、新しい日程が確定するまで変更されません。</p>
+
 
         <div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div>
         <input type='hidden' id='session_gm_dates' name='gm_dates'>
@@ -6903,91 +6903,231 @@ async def session_reschedule_new_submit(session_id: int, request: Request):
 
 @app.get("/session-reschedule/{reschedule_id}", response_class=HTMLResponse)
 async def session_reschedule_answer(reschedule_id: int, request: Request):
+    """成立後の再日程調整も、従来の再日程調整と同じ回答UIを使う。"""
     uid = request.session.get("user_id")
     if not uid:
         return RedirectResponse(f"/login?next=/session-reschedule/{reschedule_id}")
+    uid = str(uid)
     rs, dates, members, answers = session_reschedule_detail(reschedule_id)
     if not rs:
         raise HTTPException(404)
-    member_ids={str(x['discord_id']) for x in members}
-    is_gm=str(uid)==str(rs['gm_discord_id'])
-    if str(uid) not in member_ids and not is_gm:
-        raise HTTPException(403,"この日程調整の参加者ではありません")
-    own=answers.get(str(uid),{})
-    rows=[]
-    mark={"YES":"○","MAYBE":"△","NO":"×"}
-    for d in dates:
-        if str(uid) in member_ids:
-            opts="".join(
-                f"<label style='margin-right:10px'><input type='radio' name='ans_{d}' value='{val}' {'checked' if own.get(d)==val else ''}> {lab}</label>"
-                for val,lab in (("YES","○"),("MAYBE","△"),("NO","×"))
-            )
-        else:
-            opts=""
-        summary=[]
+
+    member_ids = {str(x["discord_id"]) for x in members}
+    is_gm = uid == str(rs["gm_discord_id"])
+    if uid not in member_ids and not is_gm:
+        raise HTTPException(403, "この日程調整の参加者ではありません")
+
+    own = answers.get(uid, {})
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    pl_uids = [str(x["discord_id"]) for x in members]
+    user_conflicts = calendar_conflicts_for_users(list(dict.fromkeys([*pl_uids, uid])), dates)
+
+    cards = []
+    for ds in dates:
+        d = date.fromisoformat(ds)
+        day_label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+        current = own.get(ds, "") if uid in member_ids else ""
+        cls = "yes" if current == "YES" else "maybe" if current == "MAYBE" else ""
+        symbol = "○" if current == "YES" else "△" if current == "MAYBE" else "-"
+
+        member_lines = []
         for m in members:
-            a=answers.get(str(m['discord_id']),{}).get(d)
-            summary.append(f"{esc(m['display_name'])} {mark.get(a,'－')}")
-        rows.append(f"<div style='padding:11px 0;border-bottom:1px solid #263244'><b>{esc(d)}</b><div style='margin:8px 0'>{opts}</div><div class='muted' style='font-size:.72rem'>{' / '.join(summary)}</div></div>")
-    gm_actions=""
-    if is_gm and rs['status']=='OPEN':
-        buttons="".join(f"<button class='btn alt' name='event_date' value='{esc(d)}' type='submit'>{esc(d)}で開催</button>" for d in dates)
-        gm_actions=f"<form method='post' action='/session-reschedule/{reschedule_id}/confirm' style='display:grid;gap:8px;margin-top:16px'>{csrf_field(request)}{buttons}</form>"
-    answer_form_start=f"<form method='post'>{csrf_field(request)}" if str(uid) in member_ids and rs['status']=='OPEN' else ""
-    answer_form_end="<button class='btn' type='submit' style='margin-top:14px'>回答を保存</button></form>" if answer_form_start else ""
+            puid = str(m["discord_id"])
+            a = answers.get(puid, {}).get(ds, "")
+            mark = "○" if a == "YES" else "△" if a == "MAYBE" else "-"
+            mcls = "yes" if a == "YES" else "maybe" if a == "MAYBE" else "no"
+            conflict_mark = (
+                "<span class='calendar-conflict-badge' title='この日は別の開催予定があります'>!</span>"
+                if (puid, ds) in user_conflicts else ""
+            )
+            member_lines.append(
+                f"<div class='answer-member'>"
+                f"<span class='answer-member-name'>{esc(m['display_name'])}</span>"
+                f"<span class='answer-member-result'>{conflict_mark}"
+                f"<span class='answer-member-symbol {mcls}'>{mark}</span></span></div>"
+            )
+
+        onclick = " onclick='togglePL(this)'" if uid in member_ids and rs["status"] == "OPEN" else ""
+        clickable = " clickable" if onclick else ""
+        cards.append(
+            f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
+            f"<div class='answer-day-head'>{day_label}</div>"
+            f"<div class='answer-day-state'>{symbol}</div>"
+            f"<div class='answer-members'>{''.join(member_lines)}</div></div>"
+        )
+
+    js_obj = json.dumps(own, ensure_ascii=False)
+    answer_block = ""
+    if uid in member_ids and rs["status"] == "OPEN":
+        answer_block = f"""
+        <div class='answer-title'>日程回答</div>
+        <div class='answer-legend'>
+          <span><b class='yes-mark'>○</b>：参加可能</span>
+          <span><b class='maybe-mark'>△</b>：未定</span>
+          <span><b class='no-mark'>-</b>：無理</span>
+          <span><b class='conflict-legend-mark'>!</b>：すでに開催予定あり</span>
+        </div>
+        <form method='post' action='/session-reschedule/{reschedule_id}'>
+          {csrf_field(request)}
+          <input type='hidden' name='answers' id='answers'>
+          <div class='answer-grid status-grid'>{''.join(cards)}</div>
+          <button class='save-answer' type='submit'>回答を保存</button>
+        </form>
+        <script>
+        let ans={js_obj};
+        function refreshHidden(){{
+          document.getElementById('answers').value=JSON.stringify(ans);
+        }}
+        function togglePL(el){{
+          const d=el.dataset.date;
+          let s=ans[d]||'';
+          s = s==='' ? 'YES' : (s==='YES' ? 'MAYBE' : '');
+          if(s) ans[d]=s; else delete ans[d];
+          el.classList.remove('yes','maybe');
+          if(s==='YES') el.classList.add('yes');
+          if(s==='MAYBE') el.classList.add('maybe');
+          el.querySelector('.answer-day-state').textContent = s==='YES' ? '○' : (s==='MAYBE' ? '△' : '-');
+          refreshHidden();
+        }}
+        refreshHidden();
+        </script>
+        """
+    else:
+        answer_block = f"<div class='answer-grid status-grid'>{''.join(cards)}</div>"
+
+    yes_candidates = [d for d in dates if sum(1 for m in members if answers.get(str(m['discord_id']), {}).get(d) == 'YES') >= int(rs.get('min_players') or 1)]
+    gm_action = ""
+    if is_gm and rs["status"] == "OPEN" and yes_candidates:
+        gm_action = f"""
+        <div style='margin-top:18px'>
+          <a class='btn green' style='display:flex;justify-content:center;text-align:center' href='/session-reschedule/{reschedule_id}/decide'>開催日を決定</a>
+        </div>"""
+
     return page("再日程調整", f"""
+      <a class='back-link' href='/session/{int(rs['session_id'])}/manage'>‹ 戻る</a>
+      <div class='section-title'>再日程調整</div>
       <div class='card'>
         <h2>『{esc(rs['scenario_name'])}』{int(rs['round_no'])}陣</h2>
         <p class='muted'>開催時間：{esc(rs['start_time'])}〜</p>
-        {answer_form_start}{''.join(rows)}{answer_form_end}
-        {gm_actions}
+        {answer_block}
+        {gm_action}
       </div>
     """, request)
 
 
 @app.post("/session-reschedule/{reschedule_id}")
 async def session_reschedule_answer_submit(reschedule_id: int, request: Request):
-    uid=require_login(request)
+    uid = str(require_login(request))
     await require_csrf(request)
     rs, dates, members, _ = session_reschedule_detail(reschedule_id)
-    if not rs:
-        raise HTTPException(404)
-    if str(uid) not in {str(x['discord_id']) for x in members}:
+    if not rs or uid not in {str(x['discord_id']) for x in members}:
         raise HTTPException(403)
-    form=await request.form()
-    data={}
+    form = await request.form()
+    try:
+        raw = json.loads(str(form.get("answers") or "{}"))
+    except Exception:
+        raw = {}
+    data = {str(d): str(v) for d, v in raw.items() if str(d) in set(dates) and str(v) in {"YES", "MAYBE"}}
+    save_session_reschedule_answers(reschedule_id, uid, data, iso_now())
+    return RedirectResponse(f"/session-reschedule/{reschedule_id}", 303)
+
+
+@app.get("/session-reschedule/{reschedule_id}/decide", response_class=HTMLResponse)
+async def session_reschedule_decide(reschedule_id: int, request: Request):
+    """従来の『開催日を決定』と同じ、日付＋PL選択UI。"""
+    uid = str(request.session.get("user_id") or "")
+    if not uid:
+        return RedirectResponse(f"/login?next=/session-reschedule/{reschedule_id}/decide")
+    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
+    if not rs or uid != str(rs["gm_discord_id"]):
+        raise HTTPException(403)
+
+    min_players = int(rs.get("min_players") or 1)
+    max_players = int(rs.get("max_players") or len(members) or 1)
+    candidates = []
     for d in dates:
-        val=str(form.get(f"ans_{d}") or '')
-        if val in {"YES","MAYBE","NO"}: data[d]=val
-    save_session_reschedule_answers(reschedule_id,str(uid),data,iso_now())
-    return RedirectResponse(f"/session-reschedule/{reschedule_id}",303)
+        yes = [m for m in members if answers.get(str(m["discord_id"]), {}).get(d) == "YES"]
+        maybe = [m for m in members if answers.get(str(m["discord_id"]), {}).get(d) == "MAYBE"]
+        if len(yes) >= min_players:
+            candidates.append((d, yes, maybe))
+
+    if not candidates:
+        return page("開催日決定", f"""
+          <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
+          <div class='card'><p>現在、最小人数{min_players}人を満たす日がありません。</p></div>
+        """, request)
+
+    cards = []
+    for d, yes, maybe in candidates:
+        checks = "".join(
+            f"<label><input style='width:auto' type='checkbox' name='member_{d}' value='{esc(str(m['discord_id']))}' checked> {esc(m['display_name'])}</label>"
+            for m in yes
+        )
+        maybe_names = ", ".join(esc(m["display_name"]) for m in maybe) or "なし"
+        over = len(yes) > max_players
+        random_btn = (
+            f"<button type='button' class='btn alt' onclick=\"randomPick('{d}',{max_players})\">この日からランダムで{max_players}人選ぶ</button>"
+            if over else ""
+        )
+        cards.append(f"""
+          <div class='candidate {'good' if not over else ''}'>
+            <label><input style='width:auto' type='radio' name='event_date' value='{d}' required> <b>{d}</b>
+              <div style='margin-top:6px'>○{len(yes)}人 {'⚠ 最大人数超過' if over else ''}</div>
+            </label>
+            <div class='members'>{checks}</div>
+            <p class='small muted'>△：{maybe_names}</p>
+            {random_btn}
+          </div>
+        """)
+
+    return page("開催日決定", f"""
+      <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
+      <form class='card' method='post' action='/session-reschedule/{reschedule_id}/confirm'>
+        {csrf_field(request)}
+        <h2>開催日を決定</h2>
+        {''.join(cards)}
+        <div style='margin-top:26px;display:flex;justify-content:center'>
+          <button style='width:auto;min-width:280px;text-align:center'>この内容で卓を成立させる</button>
+        </div>
+      </form>
+      <script>
+      function shuffle(xs){{ return [...xs].sort(()=>Math.random()-.5); }}
+      function randomPick(d,max){{
+        let xs=[...document.querySelectorAll(`[name="member_${{d}}"]`)];
+        xs.forEach(x=>x.checked=false);
+        shuffle(xs).slice(0,Math.min(max,xs.length)).forEach(x=>x.checked=true);
+      }}
+      </script>
+    """, request)
 
 
 @app.post("/session-reschedule/{reschedule_id}/confirm")
-async def session_reschedule_confirm(reschedule_id: int, request: Request, event_date: str = Form(...)):
-    uid=require_login(request)
+async def session_reschedule_confirm(reschedule_id: int, request: Request):
+    uid = str(require_login(request))
     await require_csrf(request)
     rs, dates, members, answers = session_reschedule_detail(reschedule_id)
-    if not rs or str(uid)!=str(rs['gm_discord_id']):
+    if not rs or uid != str(rs["gm_discord_id"]):
         raise HTTPException(403)
+    form = await request.form()
+    event_date = str(form.get("event_date") or "")
     if event_date not in dates:
         raise HTTPException(400)
-    result=confirm_session_reschedule(reschedule_id,event_date,str(rs['start_time']))
+    selected = [str(x) for x in form.getlist(f"member_{event_date}")]
+    result = confirm_session_reschedule(reschedule_id, event_date, str(rs["start_time"]), selected)
     if not result:
-        raise HTTPException(400,"この再日程調整は確定できません")
-    # 20時以降に既に集計された卓の移動だけ、その場で現在日までの派生データを再整合。
+        raise HTTPException(400, "参加人数または選択内容を確認してください")
     try:
-        _session_change_reconcile_if_needed(result['old_date'])
+        _session_change_reconcile_if_needed(result["old_date"])
     except Exception as e:
-        log_error(f"session_reschedule_reconcile id={reschedule_id}",e)
-    ch=await _session_channel(int(rs['session_id']))
+        log_error(f"session_reschedule_reconcile id={reschedule_id}", e)
+    ch = await _session_channel(int(rs["session_id"]))
     if ch:
         await ch.send(
             f"開催日が変更されました！\n\n変更前：{result['old_date']} {result['old_time']}〜\n変更後：{result['new_date']} {result['new_time']}〜",
             silent=_session_feature_silent(),
         )
-    schedule_session_reminder(int(rs['session_id']))
-    return RedirectResponse(f"/session/{int(rs['session_id'])}/manage",303)
+    schedule_session_reminder(int(rs["session_id"]))
+    return RedirectResponse(f"/session/{int(rs['session_id'])}/manage", 303)
 
 
 @app.get("/session/{session_id}/cancel", response_class=HTMLResponse)
