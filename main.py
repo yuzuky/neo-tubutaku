@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -6614,8 +6614,18 @@ async def decide_submit(
                 overwrites=overwrites,
                 topic=f"つぶ卓 成立 ID:{sid}"
             )
-            mentions="\n".join(f"・<@{x}>" for x in selected); gm_label=r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else f"<@{uid}>"; time_text="未定" if r["start_time"]=="未定" else f'{r["start_time"]}〜'; heading=f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**'
-            await send_long(ch,f'{heading}\n\n開催日：**{event_date}**\n開催時間：**{time_text}**\n\n主催：{gm_label}\n参加者：\n{mentions}')
+            mentions="\n".join(f"・<@{x}>" for x in selected)
+            gm_label=r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else f"<@{uid}>"
+            time_text="未定" if r["start_time"]=="未定" else f'{r["start_time"]}〜'
+            heading=f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**'
+            role_label = "主催" if r["game_type"] == "EVENT" else "GM"
+            manage_text = "" if is_simple_schedule(r) else (
+                f"\n\n日程変更・開催中止は以下のリンクよりお願いします！（GM専用）\n{BASE_URL}/session/{sid}/manage"
+            )
+            await send_long(
+                ch,
+                f'{heading}\n\n開催日：**{event_date}**\n開催時間：**{time_text}**\n\n{role_label}：{gm_label}\n参加者：\n{mentions}{manage_text}'
+            )
 
         # 日程調整チャンネルにも簡易通知（常にsilent）
         waiting_ch = None
@@ -6697,6 +6707,274 @@ async def decide_submit(
         return page("日程決定",f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} の開催日が決定しました！</h2><p>{event_date}{tt}</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>",request)
     return page("卓成立", f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} {round_no}陣が成立しました！</h2><p>{event_date} {esc(r['start_time'])}〜</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>", request)
 
+
+
+
+
+def _session_change_needs_reconcile(old_event_date: str) -> bool:
+    """20時差分に既に入った可能性がある卓だけ、変更時に一度整合性を取り直す。"""
+    try:
+        old_day = date.fromisoformat(str(old_event_date))
+    except Exception:
+        return False
+    now = now_jst()
+    return old_day < now.date() or (old_day == now.date() and now.hour >= 20)
+
+
+def _session_change_reconcile_if_needed(old_event_date: str):
+    if not _session_change_needs_reconcile(old_event_date):
+        return
+    # 開催後変更は例外処理。普段は20時当日差分だけで、ここでは現在日までを一度だけ再同期する。
+    cutoff_resync_v83(now_jst().date().isoformat(), iso_now())
+
+
+def _session_feature_silent() -> bool:
+    # 成立後の変更通知だけは指定どおり 0:00〜9:00 をサイレントにする。
+    return now_jst().hour < 9
+
+
+async def _session_channel(session_id: int):
+    detail, _ = session_management_detail(session_id)
+    if not detail or not detail.get("channel_id"):
+        return None
+    try:
+        channel_id = int(detail["channel_id"])
+    except Exception:
+        return None
+    ch = bot.get_channel(channel_id)
+    if ch:
+        return ch
+    try:
+        return await bot.fetch_channel(channel_id)
+    except Exception:
+        return None
+
+
+@app.get("/session/{session_id}/manage", response_class=HTMLResponse)
+async def session_manage(session_id: int, request: Request):
+    uid = request.session.get("user_id")
+    if not uid:
+        return RedirectResponse(f"/login?next=/session/{session_id}/manage")
+    detail, members = session_management_detail(session_id)
+    if not detail:
+        raise HTTPException(404)
+    if str(uid) != str(detail["gm_discord_id"]):
+        raise HTTPException(403, "GM専用ページです")
+    if detail.get("cancelled_at"):
+        return page("開催管理", "<div class='card'><h2>開催中止済みです</h2></div>", request)
+    member_html = "".join(f"<li>{esc(x['display_name'])}</li>" for x in members)
+    body=f"""
+    <div class='card'>
+      <h2>『{esc(detail['scenario_name'])}』{int(detail['round_no'])}陣</h2>
+      <p class='muted'>現在：{esc(detail['event_date'])} {esc(detail['start_time'])}〜</p>
+      <ul>{member_html}</ul>
+      <div style='display:grid;gap:10px;margin-top:16px'>
+        <a class='btn' href='/session/{session_id}/reschedule/new'>再日程調整</a>
+        <a class='btn danger' href='/session/{session_id}/cancel'>開催中止</a>
+      </div>
+    </div>
+    """
+    return page("開催管理", body, request)
+
+
+@app.get("/session/{session_id}/reschedule/new", response_class=HTMLResponse)
+async def session_reschedule_new(session_id: int, request: Request):
+    uid = request.session.get("user_id")
+    if not uid:
+        return RedirectResponse(f"/login?next=/session/{session_id}/reschedule/new")
+    detail, _ = session_management_detail(session_id)
+    if not detail:
+        raise HTTPException(404)
+    if str(uid) != str(detail["gm_discord_id"]):
+        raise HTTPException(403)
+    default_deadline=(now_jst().date()+timedelta(days=7)).isoformat()
+    date_inputs="".join("<input type='date' name='candidate_date' style='margin-bottom:8px'>" for _ in range(8))
+    return page("再日程調整", f"""
+    <div class='card'>
+      <h2>再日程調整</h2>
+      <p class='muted'>元の開催日は、新しい日程が確定するまで変更されません。</p>
+      <form method='post'>
+        {csrf_field(request)}
+        <label>開催時間</label>
+        <input type='time' name='start_time' value='{esc(detail['start_time'] if detail['start_time']!='未定' else '21:00')}' required>
+        <label>回答期限</label>
+        <input type='date' name='deadline' value='{default_deadline}' required>
+        <label>候補日</label>
+        {date_inputs}
+        <button class='btn' type='submit'>日程調整を開始する</button>
+      </form>
+    </div>
+    """, request)
+
+
+@app.post("/session/{session_id}/reschedule/new")
+async def session_reschedule_new_submit(session_id: int, request: Request):
+    uid=require_login(request)
+    await require_csrf(request)
+    detail, _ = session_management_detail(session_id)
+    if not detail or str(uid)!=str(detail["gm_discord_id"]):
+        raise HTTPException(403)
+    form=await request.form()
+    dates=[]
+    for raw in form.getlist("candidate_date"):
+        raw=str(raw or '').strip()
+        if raw:
+            try: date.fromisoformat(raw)
+            except Exception: continue
+            dates.append(raw)
+    if not dates:
+        raise HTTPException(400,"候補日を1つ以上選択してください")
+    start_time=str(form.get("start_time") or detail["start_time"] or "21:00")
+    deadline=str(form.get("deadline") or "")
+    reschedule_id=create_session_reschedule(session_id,start_time,deadline,dates,iso_now())
+    ch=await _session_channel(session_id)
+    if ch:
+        await ch.send(
+            f"開催日の再調整を開始しました。\n以下から回答してください。\n{BASE_URL}/session-reschedule/{reschedule_id}",
+            silent=_session_feature_silent(),
+        )
+    return RedirectResponse(f"/session-reschedule/{reschedule_id}",303)
+
+
+@app.get("/session-reschedule/{reschedule_id}", response_class=HTMLResponse)
+async def session_reschedule_answer(reschedule_id: int, request: Request):
+    uid = request.session.get("user_id")
+    if not uid:
+        return RedirectResponse(f"/login?next=/session-reschedule/{reschedule_id}")
+    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
+    if not rs:
+        raise HTTPException(404)
+    member_ids={str(x['discord_id']) for x in members}
+    is_gm=str(uid)==str(rs['gm_discord_id'])
+    if str(uid) not in member_ids and not is_gm:
+        raise HTTPException(403,"この日程調整の参加者ではありません")
+    own=answers.get(str(uid),{})
+    rows=[]
+    mark={"YES":"○","MAYBE":"△","NO":"×"}
+    for d in dates:
+        if str(uid) in member_ids:
+            opts="".join(
+                f"<label style='margin-right:10px'><input type='radio' name='ans_{d}' value='{val}' {'checked' if own.get(d)==val else ''}> {lab}</label>"
+                for val,lab in (("YES","○"),("MAYBE","△"),("NO","×"))
+            )
+        else:
+            opts=""
+        summary=[]
+        for m in members:
+            a=answers.get(str(m['discord_id']),{}).get(d)
+            summary.append(f"{esc(m['display_name'])} {mark.get(a,'－')}")
+        rows.append(f"<div style='padding:11px 0;border-bottom:1px solid #263244'><b>{esc(d)}</b><div style='margin:8px 0'>{opts}</div><div class='muted' style='font-size:.72rem'>{' / '.join(summary)}</div></div>")
+    gm_actions=""
+    if is_gm and rs['status']=='OPEN':
+        buttons="".join(f"<button class='btn alt' name='event_date' value='{esc(d)}' type='submit'>{esc(d)}で開催</button>" for d in dates)
+        gm_actions=f"<form method='post' action='/session-reschedule/{reschedule_id}/confirm' style='display:grid;gap:8px;margin-top:16px'>{csrf_field(request)}{buttons}</form>"
+    answer_form_start=f"<form method='post'>{csrf_field(request)}" if str(uid) in member_ids and rs['status']=='OPEN' else ""
+    answer_form_end="<button class='btn' type='submit' style='margin-top:14px'>回答を保存</button></form>" if answer_form_start else ""
+    return page("再日程調整", f"""
+      <div class='card'>
+        <h2>『{esc(rs['scenario_name'])}』{int(rs['round_no'])}陣</h2>
+        <p class='muted'>開催時間：{esc(rs['start_time'])}〜</p>
+        {answer_form_start}{''.join(rows)}{answer_form_end}
+        {gm_actions}
+      </div>
+    """, request)
+
+
+@app.post("/session-reschedule/{reschedule_id}")
+async def session_reschedule_answer_submit(reschedule_id: int, request: Request):
+    uid=require_login(request)
+    await require_csrf(request)
+    rs, dates, members, _ = session_reschedule_detail(reschedule_id)
+    if not rs:
+        raise HTTPException(404)
+    if str(uid) not in {str(x['discord_id']) for x in members}:
+        raise HTTPException(403)
+    form=await request.form()
+    data={}
+    for d in dates:
+        val=str(form.get(f"ans_{d}") or '')
+        if val in {"YES","MAYBE","NO"}: data[d]=val
+    save_session_reschedule_answers(reschedule_id,str(uid),data,iso_now())
+    return RedirectResponse(f"/session-reschedule/{reschedule_id}",303)
+
+
+@app.post("/session-reschedule/{reschedule_id}/confirm")
+async def session_reschedule_confirm(reschedule_id: int, request: Request, event_date: str = Form(...)):
+    uid=require_login(request)
+    await require_csrf(request)
+    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
+    if not rs or str(uid)!=str(rs['gm_discord_id']):
+        raise HTTPException(403)
+    if event_date not in dates:
+        raise HTTPException(400)
+    result=confirm_session_reschedule(reschedule_id,event_date,str(rs['start_time']))
+    if not result:
+        raise HTTPException(400,"この再日程調整は確定できません")
+    # 20時以降に既に集計された卓の移動だけ、その場で現在日までの派生データを再整合。
+    try:
+        _session_change_reconcile_if_needed(result['old_date'])
+    except Exception as e:
+        log_error(f"session_reschedule_reconcile id={reschedule_id}",e)
+    ch=await _session_channel(int(rs['session_id']))
+    if ch:
+        await ch.send(
+            f"開催日が変更されました！\n\n変更前：{result['old_date']} {result['old_time']}〜\n変更後：{result['new_date']} {result['new_time']}〜",
+            silent=_session_feature_silent(),
+        )
+    schedule_session_reminder(int(rs['session_id']))
+    return RedirectResponse(f"/session/{int(rs['session_id'])}/manage",303)
+
+
+@app.get("/session/{session_id}/cancel", response_class=HTMLResponse)
+async def session_cancel_form(session_id: int, request: Request):
+    uid=request.session.get("user_id")
+    if not uid:
+        return RedirectResponse(f"/login?next=/session/{session_id}/cancel")
+    detail,_=session_management_detail(session_id)
+    if not detail:
+        raise HTTPException(404)
+    if str(uid)!=str(detail['gm_discord_id']):
+        raise HTTPException(403)
+    return page("開催中止",f"""
+      <div class='card'>
+        <h2>本当に開催中止にしますか？</h2>
+        <form method='post'>
+          {csrf_field(request)}
+          <label style='display:flex;gap:9px;align-items:center;margin:18px 0'>
+            <input id='cancel-confirm' type='checkbox' name='confirmed' value='1' onchange="document.getElementById('cancel-submit').disabled=!this.checked">
+            確認しました
+          </label>
+          <button id='cancel-submit' class='btn danger' type='submit' disabled>開催中止</button>
+        </form>
+      </div>
+    """,request)
+
+
+@app.post("/session/{session_id}/cancel")
+async def session_cancel_submit(session_id: int, request: Request):
+    uid=require_login(request)
+    await require_csrf(request)
+    detail,_=session_management_detail(session_id)
+    if not detail or str(uid)!=str(detail['gm_discord_id']):
+        raise HTTPException(403)
+    form=await request.form()
+    if str(form.get('confirmed') or '')!='1':
+        raise HTTPException(400,"確認チェックが必要です")
+    old_date=str(detail['event_date'])
+    cancelled=cancel_confirmed_session(session_id,iso_now())
+    if not cancelled:
+        raise HTTPException(404)
+    try:
+        _session_change_reconcile_if_needed(old_date)
+    except Exception as e:
+        log_error(f"session_cancel_reconcile id={session_id}",e)
+    ch=await _session_channel(session_id)
+    if ch:
+        await ch.send(
+            f"『{detail['scenario_name']}』{int(detail['round_no'])}陣は開催中止となりました。\nGMはチャンネルの削除をお願いします。",
+            silent=_session_feature_silent(),
+        )
+    return page("開催中止", "<div class='card'><h2>開催中止にしました。</h2><p class='muted'>チャンネルは削除していません。</p></div>", request)
 
 
 @app.get("/r/{rid}/schedule/start", response_class=HTMLResponse)
