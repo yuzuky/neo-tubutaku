@@ -1132,19 +1132,9 @@ button,input,textarea,select{font:inherit}
   border-top:1px solid #2c394c;
 }
 .calendar-edit-panel.open{display:block}
-.calendar-detail-date-edit{
-  display:none;
-  margin:0 0 14px;
-}
-.calendar-detail-date-edit.open{display:block}
-.calendar-detail-date-edit .field-box{
-  width:100%;
-  box-sizing:border-box;
-}
-.calendar-detail-date-edit input[type='date']{
-  width:100%;
-  box-sizing:border-box;
-}
+.calendar-edit-date-field{margin-top:0!important;margin-bottom:14px!important}
+.calendar-edit-date-field .field-box{width:100%;box-sizing:border-box}
+.calendar-edit-date-field input[type='date']{width:100%;box-sizing:border-box}
 .calendar-danger-block{
   margin-top:16px;
   padding:13px;
@@ -4109,15 +4099,6 @@ async def calendar_page(request: Request, month: str = ""):
                 <span class='calendar-modal-label'>開催日</span>
                 <span id='calendarDetailDate'></span>
               </div>
-              <label class='field calendar-detail-date-edit' id='calendarDetailDateEditRow'>
-                <div class='field-box no-icon'>
-                  <div class='field-stack'>
-                    <span class='field-label'>開催日</span>
-                    <input id='calendarEditDate' name='event_date' type='date'
-                           form='calendarMembersEditForm' required>
-                  </div>
-                </div>
-              </label>
               <div class='calendar-modal-row'>
                 <span class='calendar-modal-label'>開催時間</span>
                 <span id='calendarDetailTime'></span>
@@ -4141,6 +4122,15 @@ async def calendar_page(request: Request, month: str = ""):
               <form method='post' id='calendarMembersEditForm'>
                 {csrf_field(request)}
                 <input type='hidden' id='calendarEditSessionId' name='calendar_session_id'>
+
+                <label class='field manual-field-spaced calendar-edit-date-field'>
+                  <div class='field-box no-icon'>
+                    <div class='field-stack'>
+                      <span class='field-label'>開催日</span>
+                      <input id='calendarEditDate' name='event_date' type='date' required>
+                    </div>
+                  </div>
+                </label>
 
                 <div class='manual-type-toggle calendar-edit-type-toggle'>
                   <label><input type='radio' name='game_type' value='TRPG'><span>TRPG</span></label>
@@ -4480,9 +4470,7 @@ async def calendar_page(request: Request, month: str = ""):
 
           document.getElementById('calendarEditPanel').classList.remove('open');
           const detailDateRow=document.getElementById('calendarDetailDateRow');
-          const detailDateEditRow=document.getElementById('calendarDetailDateEditRow');
           if(detailDateRow) detailDateRow.style.display='block';
-          if(detailDateEditRow) detailDateEditRow.classList.remove('open');
           document.getElementById('hideDangerConfirm').classList.remove('open');
           document.getElementById('deleteDangerConfirm').classList.remove('open');
           document.getElementById('hideConfirmCheck').checked=false;
@@ -4617,9 +4605,7 @@ async def calendar_page(request: Request, month: str = ""):
           const panel=document.getElementById('calendarEditPanel');
           const btn=document.getElementById('calendarEditOpenBtn');
           const detailDateRow=document.getElementById('calendarDetailDateRow');
-          const detailDateEditRow=document.getElementById('calendarDetailDateEditRow');
           if(detailDateRow) detailDateRow.style.display='none';
-          if(detailDateEditRow) detailDateEditRow.classList.add('open');
           if(panel){{
             panel.classList.add('open');
             if(btn) btn.style.display='none';
