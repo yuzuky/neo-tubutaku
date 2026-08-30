@@ -4105,14 +4105,10 @@ async def calendar_page(request: Request, month: str = ""):
           <div class='calendar-modal-card' onclick='event.stopPropagation()'>
             <h3 class='calendar-modal-title' id='calendarDetailTitle'></h3>
             <div class='calendar-modal-meta'>
-              <label class='field calendar-detail-date-edit' id='calendarDetailDateEdit'>
-                <div class='field-box no-icon'>
-                  <div class='field-stack'>
-                    <span class='field-label'>開催日</span>
-                    <input id='calendarEditDate' name='event_date' type='date' required form='calendarMembersEditForm'>
-                  </div>
-                </div>
-              </label>
+              <div class='calendar-modal-row' id='calendarDetailDateRow'>
+                <span class='calendar-modal-label'>開催日</span>
+                <span id='calendarDetailDate'></span>
+              </div>
               <div class='calendar-modal-row'>
                 <span class='calendar-modal-label'>開催時間</span>
                 <span id='calendarDetailTime'></span>
@@ -4136,6 +4132,15 @@ async def calendar_page(request: Request, month: str = ""):
               <form method='post' id='calendarMembersEditForm'>
                 {csrf_field(request)}
                 <input type='hidden' id='calendarEditSessionId' name='calendar_session_id'>
+
+                <label class='field manual-field-spaced'>
+                  <div class='field-box no-icon'>
+                    <div class='field-stack'>
+                      <span class='field-label'>開催日</span>
+                      <input id='calendarEditDate' name='event_date' type='date' required>
+                    </div>
+                  </div>
+                </label>
 
                 <div class='manual-type-toggle calendar-edit-type-toggle'>
                   <label><input type='radio' name='game_type' value='TRPG'><span>TRPG</span></label>
@@ -4474,7 +4479,6 @@ async def calendar_page(request: Request, month: str = ""):
           );
 
           document.getElementById('calendarEditPanel').classList.remove('open');
-          document.getElementById('calendarDetailDateEdit').classList.remove('open');
           document.getElementById('hideDangerConfirm').classList.remove('open');
           document.getElementById('deleteDangerConfirm').classList.remove('open');
           document.getElementById('hideConfirmCheck').checked=false;
@@ -4486,6 +4490,9 @@ async def calendar_page(request: Request, month: str = ""):
 
           document.getElementById('calendarDetailTitle').textContent=
             el.dataset.title||'';
+          const detailDate=el.dataset.date||'';
+          document.getElementById('calendarDetailDate').textContent=
+            detailDate ? detailDate.replaceAll('-', '/') : '未定';
           document.getElementById('calendarDetailTime').textContent=
             (el.dataset.time && el.dataset.time!=='未定')
               ? el.dataset.time : '未定';
@@ -4607,8 +4614,6 @@ async def calendar_page(request: Request, month: str = ""):
           const btn=document.getElementById('calendarEditOpenBtn');
           if(panel){{
             panel.classList.add('open');
-            const dateEdit=document.getElementById('calendarDetailDateEdit');
-            if(dateEdit) dateEdit.classList.add('open');
             if(btn) btn.style.display='none';
           }}
         }}
