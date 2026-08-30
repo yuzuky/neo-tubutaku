@@ -1550,6 +1550,15 @@ input[type=file]{font-size:.85rem}
 .submit-btn{width:100%;font-size:1.1rem;min-height:62px}
 .btn.alt{background:#18202c;box-shadow:none;border:1px solid #2b3749}
 .btn.green{background:linear-gradient(135deg,#12b76a,#039855)}
+.btn.danger{
+  background:#3a171b;
+  color:#ff7777;
+  border:1px solid #6b2a31;
+  box-shadow:none;
+}
+.btn.danger:hover{background:#461b20;border-color:#87343d}
+.btn.danger:disabled{opacity:.42;cursor:not-allowed}
+
 .scroll{overflow:auto;border:1px solid var(--line);border-radius:15px}
 table{width:100%;border-collapse:collapse}
 th,td{padding:12px;border-bottom:1px solid var(--line);text-align:center}
@@ -6769,8 +6778,8 @@ async def session_manage(session_id: int, request: Request):
       <p class='muted'>現在：{esc(detail['event_date'])} {esc(detail['start_time'])}〜</p>
       <ul>{member_html}</ul>
       <div style='display:grid;gap:10px;margin-top:16px'>
-        <a class='btn' href='/session/{session_id}/reschedule/new'>再日程調整</a>
-        <a class='btn danger' href='/session/{session_id}/cancel'>開催中止</a>
+        <a class='btn' style='display:flex;align-items:center;justify-content:center;text-align:center' href='/session/{session_id}/reschedule/new'>再日程調整</a>
+        <a class='btn danger' style='display:flex;align-items:center;justify-content:center;text-align:center' href='/session/{session_id}/cancel'>開催中止</a>
       </div>
     </div>
     """
@@ -6788,22 +6797,77 @@ async def session_reschedule_new(session_id: int, request: Request):
     if str(uid) != str(detail["gm_discord_id"]):
         raise HTTPException(403)
     default_deadline=(now_jst().date()+timedelta(days=7)).isoformat()
-    date_inputs="".join("<input type='date' name='candidate_date' style='margin-bottom:8px'>" for _ in range(8))
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    cards=[]
+    for ds in month_dates():
+        d=date.fromisoformat(ds)
+        label=f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
+        cards.append(
+            f'<div class="day" data-date="{ds}" onclick="toggleSessionGM(this)">'
+            f'<span>{label}</span><span class="state">-</span></div>'
+        )
     return page("再日程調整", f"""
-    <div class='card'>
-      <h2>再日程調整</h2>
-      <p class='muted'>元の開催日は、新しい日程が確定するまで変更されません。</p>
-      <form method='post'>
+      <a class='back-link' href='/session/{session_id}/manage'>‹ 戻る</a>
+      <div class='section-title'>再日程調整</div>
+
+      <form class='form-shell' method='post'>
         {csrf_field(request)}
-        <label>開催時間</label>
-        <input type='time' name='start_time' value='{esc(detail['start_time'] if detail['start_time']!='未定' else '21:00')}' required>
-        <label>回答期限</label>
-        <input type='date' name='deadline' value='{default_deadline}' required>
-        <label>候補日</label>
-        {date_inputs}
-        <button class='btn' type='submit'>日程調整を開始する</button>
+
+        <div class='form-section compact'>
+          <div class='field-row'>
+            <label>
+              <div class='field-box no-icon'>
+                <div class='field-stack'>
+                  <span class='field-label'>開始時間</span>
+                  <input type='time' name='start_time' value='{esc(detail['start_time'] if detail['start_time']!='未定' else '21:00')}' required>
+                </div>
+              </div>
+            </label>
+            <label>
+              <div class='field-box no-icon'>
+                <div class='field-stack'>
+                  <span class='field-label'>回答期限</span>
+                  <input type='date' name='deadline' value='{default_deadline}' required>
+                </div>
+              </div>
+            </label>
+          </div>
+        </div>
+
+        <p class='muted' style='margin:-8px 2px 24px'>元の開催日は、新しい日程が確定するまで変更されません。</p>
+
+        <div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div>
+        <input type='hidden' id='session_gm_dates' name='gm_dates'>
+
+        <div class='date-scroll'>
+          <div class='grid'>{''.join(cards)}</div>
+        </div>
+
+        <div class='legend'>
+          <span><b style='color:#22c55e'>○</b> 開催できる</span>
+          <span><b>-</b> 開催できない</span>
+        </div>
+
+        <button class='submit-btn' type='submit'>再日程調整を開始する</button>
       </form>
-    </div>
+
+      <script>
+      let sessionSelected=[];
+      function toggleSessionGM(el){{
+        const d=el.dataset.date;
+        const state=el.querySelector('.state');
+        if(sessionSelected.includes(d)){{
+          sessionSelected=sessionSelected.filter(x=>x!==d);
+          el.classList.remove('yes');
+          state.textContent='-';
+        }}else{{
+          sessionSelected.push(d);
+          el.classList.add('yes');
+          state.textContent='○';
+        }}
+        document.getElementById('session_gm_dates').value=sessionSelected.join(',');
+      }}
+      </script>
     """, request)
 
 
@@ -6816,12 +6880,13 @@ async def session_reschedule_new_submit(session_id: int, request: Request):
         raise HTTPException(403)
     form=await request.form()
     dates=[]
-    for raw in form.getlist("candidate_date"):
+    for raw in str(form.get("gm_dates") or "").split(","):
         raw=str(raw or '').strip()
         if raw:
             try: date.fromisoformat(raw)
             except Exception: continue
-            dates.append(raw)
+            if raw not in dates:
+                dates.append(raw)
     if not dates:
         raise HTTPException(400,"候補日を1つ以上選択してください")
     start_time=str(form.get("start_time") or detail["start_time"] or "21:00")
@@ -6936,15 +7001,15 @@ async def session_cancel_form(session_id: int, request: Request):
     if str(uid)!=str(detail['gm_discord_id']):
         raise HTTPException(403)
     return page("開催中止",f"""
-      <div class='card'>
-        <h2>本当に開催中止にしますか？</h2>
-        <form method='post'>
+      <div class='card' style='text-align:center'>
+        <h2 style='text-align:center'>本当に開催中止にしますか？</h2>
+        <form method='post' style='text-align:center'>
           {csrf_field(request)}
-          <label style='display:flex;gap:9px;align-items:center;margin:18px 0'>
+          <label style='display:flex;gap:9px;align-items:center;justify-content:center;margin:22px 0'>
             <input id='cancel-confirm' type='checkbox' name='confirmed' value='1' onchange="document.getElementById('cancel-submit').disabled=!this.checked">
-            確認しました
+            <span>確認しました</span>
           </label>
-          <button id='cancel-submit' class='btn danger' type='submit' disabled>開催中止</button>
+          <button id='cancel-submit' class='btn danger' style='display:flex;width:100%;min-height:58px;align-items:center;justify-content:center;text-align:center' type='submit' disabled>開催中止</button>
         </form>
       </div>
     """,request)
