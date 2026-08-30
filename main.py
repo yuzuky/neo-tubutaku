@@ -1132,6 +1132,19 @@ button,input,textarea,select{font:inherit}
   border-top:1px solid #2c394c;
 }
 .calendar-edit-panel.open{display:block}
+.calendar-detail-date-edit{
+  display:none;
+  margin:0 0 14px;
+}
+.calendar-detail-date-edit.open{display:block}
+.calendar-detail-date-edit .field-box{
+  width:100%;
+  box-sizing:border-box;
+}
+.calendar-detail-date-edit input[type='date']{
+  width:100%;
+  box-sizing:border-box;
+}
 .calendar-danger-block{
   margin-top:16px;
   padding:13px;
@@ -3731,7 +3744,7 @@ async def calendar_page(request: Request, month: str = ""):
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
                             f"data-title='{esc(title_text)}' "
-                            f"data-time='{esc(time_text)}' "
+                            f"data-time='{esc(time_text)}' data-date='{esc(str(row['event_date'] or ''))}' "
                             f"data-gm='{esc(gm_text)}' data-gmid='{esc(str(row['gm_discord_id'] or ''))}' data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
                             f"data-members='{esc(member_text)}' data-memberids='{esc(member_ids)}' data-memberdetail='{esc(json.dumps(member_detail, ensure_ascii=False))}' data-guestmembers='{esc(guest_members)}' data-game-type='EVENT' data-event='1' "
                             "onclick='event.stopPropagation();openCalendarDetail(this)'>"
@@ -3757,7 +3770,7 @@ async def calendar_page(request: Request, month: str = ""):
                             "<div class='cal-session' "
                             f"data-id='{int(row['id'])}' "
                             f"data-title='{esc(title_text)}' "
-                            f"data-time='{esc(time_text)}' "
+                            f"data-time='{esc(time_text)}' data-date='{esc(str(row['event_date'] or ''))}' "
                             f"data-gm='{esc(gm_text)}' "
                             f"data-gmid='{esc(str(row['gm_discord_id'] or ''))}' "
                             f"data-gmguest='{esc(str(row['gm_guest_name'] or ''))}' "
@@ -4092,6 +4105,14 @@ async def calendar_page(request: Request, month: str = ""):
           <div class='calendar-modal-card' onclick='event.stopPropagation()'>
             <h3 class='calendar-modal-title' id='calendarDetailTitle'></h3>
             <div class='calendar-modal-meta'>
+              <label class='field calendar-detail-date-edit' id='calendarDetailDateEdit'>
+                <div class='field-box no-icon'>
+                  <div class='field-stack'>
+                    <span class='field-label'>開催日</span>
+                    <input id='calendarEditDate' name='event_date' type='date' required form='calendarMembersEditForm'>
+                  </div>
+                </div>
+              </label>
               <div class='calendar-modal-row'>
                 <span class='calendar-modal-label'>開催時間</span>
                 <span id='calendarDetailTime'></span>
@@ -4453,6 +4474,7 @@ async def calendar_page(request: Request, month: str = ""):
           );
 
           document.getElementById('calendarEditPanel').classList.remove('open');
+          document.getElementById('calendarDetailDateEdit').classList.remove('open');
           document.getElementById('hideDangerConfirm').classList.remove('open');
           document.getElementById('deleteDangerConfirm').classList.remove('open');
           document.getElementById('hideConfirmCheck').checked=false;
@@ -4526,6 +4548,7 @@ async def calendar_page(request: Request, month: str = ""):
           }}
 
           document.getElementById('calendarEditScenario').value=el.dataset.title||'';
+          document.getElementById('calendarEditDate').value=el.dataset.date||'';
           const editGameType=el.dataset.gameType || (isEvent ? 'EVENT' : 'TRPG');
           document.querySelectorAll("#calendarMembersEditForm input[name='game_type']").forEach(r=>{{
             r.checked=(r.value===editGameType);
@@ -4584,6 +4607,8 @@ async def calendar_page(request: Request, month: str = ""):
           const btn=document.getElementById('calendarEditOpenBtn');
           if(panel){{
             panel.classList.add('open');
+            const dateEdit=document.getElementById('calendarDetailDateEdit');
+            if(dateEdit) dateEdit.classList.add('open');
             if(btn) btn.style.display='none';
           }}
         }}
@@ -4686,24 +4711,23 @@ async def calendar_manual_add(
 @app.post("/calendar/edit-details")
 async def calendar_edit_details(
     request: Request, calendar_session_id: int = Form(...), scenario_name: str = Form(...),
-    game_type: str = Form(...), gm_discord_id: str = Form(""), gm_guest_name: str = Form(""),
+    event_date: str = Form(...), game_type: str = Form(...), gm_discord_id: str = Form(""), gm_guest_name: str = Form(""),
     participant_ids: list[str] = Form(default=[]), guest_participant_names: str = Form(""),
 ):
     require_login(request); await require_csrf(request)
     detail_before, _ = calendar_session_detail(calendar_session_id)
     if not scenario_name.strip(): raise HTTPException(400, "シナリオ名 / イベント名を入力してください")
     if game_type not in {"TRPG", "MADMIS", "EVENT"}: raise HTTPException(400, "種別が不正です")
+    try:
+        edited_day = date.fromisoformat(event_date)
+    except ValueError:
+        raise HTTPException(400, "開催日が不正です")
     if not update_calendar_session_details(calendar_session_id, scenario_name, gm_discord_id,
         [str(x) for x in participant_ids], gm_guest_name,
-        [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type):
+        [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type,
+        event_date=event_date):
         raise HTTPException(404, "予定が見つかりません")
-    if detail_before and detail_before["event_date"]:
-        try:
-            d = date.fromisoformat(str(detail_before["event_date"]))
-            return RedirectResponse(f"/calendar?month={d.strftime('%Y-%m')}", status_code=303)
-        except ValueError:
-            pass
-    return RedirectResponse("/calendar", status_code=303)
+    return RedirectResponse(f"/calendar?month={edited_day.strftime('%Y-%m')}", status_code=303)
 
 @app.post("/calendar/hide")
 async def calendar_hide(
