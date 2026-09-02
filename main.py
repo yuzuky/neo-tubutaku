@@ -4858,7 +4858,15 @@ async def profile_page(request: Request, discord_id: str):
                 f"<span class='profile-list-chevron'>›</span></a>"
             )
         if people_rows:
-            people_markup = "<section class='profile-section profile-people'><h3>みんなのプロフィール</h3>" + "".join(people_rows) + "</section>"
+            people_markup = "<section id='profile-list' class='profile-section profile-people'><h3>みんなのプロフィール</h3>" + "".join(people_rows) + "</section>"
+
+    viewer_id = str(request.session.get("user_id") or "")
+    if own:
+        profile_back = "<a class='back-link' href='/calendar'>‹ カレンダーへ</a>"
+    elif viewer_id and registered_member(viewer_id):
+        profile_back = f"<a class='back-link' href='/profile/{esc(viewer_id)}#profile-list'>‹ プロフィール一覧へ戻る</a>"
+    else:
+        profile_back = "<a class='back-link' href='/calendar'>‹ カレンダーへ</a>"
 
     body=f"""
     <style>
@@ -4896,7 +4904,7 @@ async def profile_page(request: Request, discord_id: str):
       .profile-year-range{{text-align:right;color:#687689;font-size:.62rem;margin-top:7px}} .profile-pair-row{{display:flex;justify-content:space-between;align-items:center;text-decoration:none;color:#e8edf5;padding:11px 3px;border-bottom:1px solid #202b39}}
       .profile-pair-row:last-child{{border-bottom:0}} .profile-pair-row b{{font-size:.75rem;color:#95a4b6}} .profile-title-list-btn{{margin-top:16px;width:100%;box-sizing:border-box;text-align:center}}
     </style>
-    <a class='back-link' href='/calendar'>‹ カレンダーへ</a>
+    {profile_back}
     <div class='profile-wrap'>
       <div class='profile-hero'>
         <img class='profile-avatar' src='{esc(member.get("avatar_url") or "")}' alt=''>
