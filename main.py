@@ -947,9 +947,10 @@ button,input,textarea,select{font:inherit}
   display:flex;
   align-items:center;
   justify-content:center;
-  width:21px;
-  height:21px;
-  margin:-1px 0 2px -1px;
+  width:18px;
+  height:18px;
+  margin:0 0 5px 0;
+  font-size:.72rem;
   border-radius:50%;
   background:#7667e8;
   color:#fff;
@@ -6832,6 +6833,7 @@ async def decide_form(rid: int, request: Request):
         <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div>
         <p id='commonMemberNote' class='muted small' style='margin:8px 0 0'></p></div>
       </div>
+      <div id='multiDayMemberInputs' style='display:none'></div>
       {("<label class='checkbox-row'><input type='checkbox' name='create_session_channel' value='1'> 参加メンバーだけのDiscordチャンネルを作成する</label>" if is_simple_schedule(r) else "")}
       <div style='margin-top:26px;display:flex;justify-content:center'>
         <button style='width:auto;min-width:280px;text-align:center'>{"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}</button>
@@ -6875,9 +6877,19 @@ async def decide_form(rid: int, request: Request):
       if(!keys.length){{box.style.display='none';list.innerHTML='';return;}}
       let common=null;
       keys.forEach(k=>{{ const row=candidateData.find(x=>x.key===k); const ys=new Set(row?row.yes:[]); common=common===null?ys:new Set([...common].filter(x=>ys.has(x))); }});
-      const ids=[...(common||new Set())]; box.style.display='block';
-      list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;align-items:center;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('') || '<div class="warn">共通して○の参加者がいません。</div>';
-      document.getElementById('commonMemberNote').textContent=`選択中の全日程に○の共通参加者：${{ids.length}}人`;
+      const ids=[...(common||new Set())];
+      const multi=document.getElementById('multiDay').checked;
+      const hidden=document.getElementById('multiDayMemberInputs');
+      if(multi){{
+        box.style.display='none';
+        list.innerHTML='';
+        hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
+      }}else{{
+        hidden.innerHTML='';
+        box.style.display='block';
+        list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;align-items:center;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('') || '<div class="warn">○の参加者がいません。</div>';
+        document.getElementById('commonMemberNote').textContent=`○の参加者：${{ids.length}}人`;
+      }}
     }}
     function validateDecision(){{
       const n=choices().length; const multi=document.getElementById('multiDay').checked;
@@ -7204,6 +7216,7 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
         <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'>
           <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div><p id='commonMemberNote' class='muted small'></p></div>
         </div>
+        <div id='multiDayMemberInputs' style='display:none'></div>
         <div style='margin-top:26px;display:flex;justify-content:center'><button style='width:auto;min-width:280px'>この内容で卓を成立させる</button></div>
       </form>
       <script>
@@ -7234,9 +7247,18 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
         let common=null;
         keys.forEach(k=>{{const row=candidateData.find(x=>x.key===k),ys=new Set(row?row.yes:[]);common=common===null?ys:new Set([...common].filter(x=>ys.has(x)));}});
         const ids=[...(common||new Set())];
-        box.style.display='block';
-        list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('');
-        document.getElementById('commonMemberNote').textContent=`選択中の全日程に○：${{ids.length}}人`;
+        const multi=document.getElementById('multiDay').checked;
+        const hidden=document.getElementById('multiDayMemberInputs');
+        if(multi){{
+          box.style.display='none';
+          list.innerHTML='';
+          hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
+        }}else{{
+          hidden.innerHTML='';
+          box.style.display='block';
+          list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('');
+          document.getElementById('commonMemberNote').textContent=`○の参加者：${{ids.length}}人`;
+        }}
       }}
       function validateDecision(){{
         const n=choices().length,multi=document.getElementById('multiDay').checked,m=document.querySelectorAll('[name="member_id"]:checked').length;
