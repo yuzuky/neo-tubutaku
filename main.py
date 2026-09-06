@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, temporary_v92_madamis_year_fix_done, apply_temporary_v92_madamis_year_fix, temporary_v93_madamis_year_fix_done, apply_temporary_v93_madamis_year_fix, temporary_v94_madamis_year_fix_done, apply_temporary_v94_madamis_year_fix, temporary_v95_madamis_year_fix_done, apply_temporary_v95_madamis_year_fix, temporary_v96_madamis_year_fix_done, apply_temporary_v96_madamis_year_fix, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, temporary_v92_madamis_year_fix_done, apply_temporary_v92_madamis_year_fix, temporary_v93_madamis_year_fix_done, apply_temporary_v93_madamis_year_fix, temporary_v94_madamis_year_fix_done, apply_temporary_v94_madamis_year_fix, temporary_v95_madamis_year_fix_done, apply_temporary_v95_madamis_year_fix, temporary_v96_madamis_year_fix_done, apply_temporary_v96_madamis_year_fix, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -664,7 +664,6 @@ def advanced_schedule_controls_html() -> str:
         <input type='checkbox' id='perDayTime' name='per_day_time' value='1' onchange='refreshAdvancedSlots()'>
         開催時間を日別に設定する
       </label>
-      <p class='muted small' style='margin-top:6px'>ONにすると、選択した各日には最初に開始時間が1つ入り、必要な日だけ時間帯を追加できます。</p>
       <input type='hidden' id='schedule_slots_json' name='schedule_slots_json' value='{}'>
       <div id='advancedTimePanel' style='display:none;margin-top:12px'></div>
       <script>
@@ -1224,6 +1223,9 @@ button,input,textarea,select{font:inherit}
   border-top:1px solid #2c394c;
 }
 .calendar-edit-panel.open{display:block}
+/* v107: カレンダー編集のGMラベルと選択欄が重ならないよう、シナリオ名欄と同じ縦配置に揃える */
+.calendar-edit-gm-field .field-label{margin:2px 0 0 4px}
+.calendar-edit-gm-field select{background:transparent;padding:8px 4px 10px}
 .calendar-edit-date-field{margin-top:0!important;margin-bottom:14px!important}
 .calendar-edit-date-field .field-box{width:100%;box-sizing:border-box}
 .calendar-edit-date-field input[type='date']{width:100%;box-sizing:border-box}
@@ -3208,6 +3210,90 @@ async def on_raw_reaction_remove(payload):
     await handle_reaction(payload, False)
 
 
+async def predeadline_unanswered_check():
+    """v109: 回答期限の前日20:00に、未回答操作の参加者だけメンション通知する。
+
+    通常の日程調整/募集と、成立後の再日程調整の両方が対象。
+    全て「-」で保存済みの人は回答済みとして扱う。
+    """
+    target_day = now_jst().date() + timedelta(days=1)
+    guild=bot.get_guild(GUILD_ID)
+
+    # 通常の募集・ホーム日程調整・再募集
+    with db() as c:
+        rows=c.execute(
+            """SELECT * FROM recruitments
+               WHERE COALESCE(predeadline_notified,0)=0
+                 AND status IN ('RECRUITING','WAITING_GM_DECISION','FAILED')"""
+        ).fetchall()
+    for r in rows:
+        try: deadline=datetime.fromisoformat(r['deadline']).astimezone(JST)
+        except Exception: continue
+        if deadline.date()!=target_day: continue
+        rid=int(r['id'])
+        with db() as c:
+            targets={str(x['discord_id']) for x in c.execute(
+                "SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1",(rid,)
+            ).fetchall()}
+            submitted={str(x['discord_id']) for x in c.execute(
+                "SELECT discord_id FROM answer_submissions WHERE recruitment_id=?",(rid,)
+            ).fetchall()}
+        targets.discard(str(r['gm_discord_id']))
+        unanswered=sorted(targets-submitted)
+        if not unanswered:
+            with db() as c: c.execute("UPDATE recruitments SET predeadline_notified=1 WHERE id=?",(rid,))
+            continue
+        ch=None
+        if guild and r['waiting_channel_id']:
+            ch=guild.get_channel(int(r['waiting_channel_id']))
+            if ch is None:
+                try: ch=await guild.fetch_channel(int(r['waiting_channel_id']))
+                except Exception: ch=None
+        if ch is None: continue
+        mentions=' '.join(f'<@{uid}>' for uid in unanswered)
+        await ch.send('📅 **日程回答のお願い**\n'+mentions+'\n\n回答期限が明日です！まだ回答していない方は日程入力をお願いします。')
+        with db() as c: c.execute("UPDATE recruitments SET predeadline_notified=1 WHERE id=?",(rid,))
+        print(f"[PREDEADLINE] recruitment rid={rid} count={len(unanswered)}",flush=True)
+
+    # 成立後のGM専用URLから開始した再日程調整
+    with db() as c:
+        reschedules=c.execute(
+            """SELECT sr.*,s.channel_id,r.gm_discord_id
+                 FROM session_reschedules sr
+                 JOIN sessions s ON s.id=sr.session_id
+                 JOIN recruitments r ON r.id=s.recruitment_id
+                WHERE sr.status='OPEN' AND sr.deadline IS NOT NULL
+                  AND COALESCE(sr.predeadline_notified,0)=0"""
+        ).fetchall()
+    for rs in reschedules:
+        try:
+            raw=str(rs['deadline'])
+            deadline=datetime.fromisoformat(raw if 'T' in raw else raw+'T21:00:00').replace(tzinfo=JST) if '+' not in raw else datetime.fromisoformat(raw).astimezone(JST)
+        except Exception:
+            continue
+        if deadline.date()!=target_day: continue
+        rsid=int(rs['id']); session_id=int(rs['session_id'])
+        with db() as c:
+            targets={str(x['discord_id']) for x in c.execute("SELECT discord_id FROM session_members WHERE session_id=?",(session_id,)).fetchall()}
+            submitted={str(x['discord_id']) for x in c.execute("SELECT discord_id FROM session_reschedule_submissions WHERE reschedule_id=?",(rsid,)).fetchall()}
+        targets.discard(str(rs['gm_discord_id']))
+        unanswered=sorted(targets-submitted)
+        if not unanswered:
+            with db() as c: c.execute("UPDATE session_reschedules SET predeadline_notified=1 WHERE id=?",(rsid,))
+            continue
+        ch=None
+        if guild and rs['channel_id']:
+            ch=guild.get_channel(int(rs['channel_id']))
+            if ch is None:
+                try: ch=await guild.fetch_channel(int(rs['channel_id']))
+                except Exception: ch=None
+        if ch is None: continue
+        mentions=' '.join(f'<@{uid}>' for uid in unanswered)
+        await ch.send('📅 **日程回答のお願い**\n'+mentions+'\n\n回答期限が明日です！まだ回答していない方は日程入力をお願いします。')
+        with db() as c: c.execute("UPDATE session_reschedules SET predeadline_notified=1 WHERE id=?",(rsid,))
+        print(f"[PREDEADLINE] session-reschedule id={rsid} count={len(unanswered)}",flush=True)
+
+
 async def deadline_check():
     """
     募集期限日の20:00に、その日が期限の卓だけ1回通知する。
@@ -3466,6 +3552,10 @@ async def bootstrap_achievements():
 @tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def deadline_scheduler():
     try:
+        await predeadline_unanswered_check()
+    except Exception as e:
+        log_error("predeadline_unanswered_scheduler", e)
+    try:
         await deadline_check()
     except Exception as e:
         log_error("deadline_scheduler", e)
@@ -3518,6 +3608,12 @@ async def on_ready():
         await bootstrap_achievements()
     except Exception as e:
         log_error("achievement_bootstrap", e)
+    # v109: 20時以降にBotが再起動した場合も、同日の「期限前日」未回答通知だけ追いつく。
+    try:
+        if now_jst().time() >= time(20,0):
+            await predeadline_unanswered_check()
+    except Exception as e:
+        log_error("predeadline_unanswered_catchup", e)
     # v94: bootstrap_achievements() 内の移行処理が return しても必ず最後に到達する臨時補正。
     # v93が既に成功済みなら何もしない。未適用の場合だけ今回の1卓分を年別キャッシュへ戻す。
     try:
@@ -4228,6 +4324,8 @@ async def calendar_page(request: Request, month: str = ""):
               <form method='post' id='calendarMembersEditForm'>
                 {csrf_field(request)}
                 <input type='hidden' id='calendarEditSessionId' name='calendar_session_id'>
+                <input type='hidden' id='calendarEditOriginalDate' name='original_event_date'>
+                <input type='hidden' id='calendarEditOriginalTime' name='original_start_time'>
 
                 <div class='manual-type-toggle calendar-edit-type-toggle'>
                   <label><input type='radio' name='game_type' value='TRPG'><span>TRPG</span></label>
@@ -4236,7 +4334,7 @@ async def calendar_page(request: Request, month: str = ""):
                 </div>
 
                 <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>シナリオ名 / イベント名</span><input id='calendarEditScenario' name='scenario_name' required></div></div></label>
-                <label class='field manual-field-spaced'><div class='field-box no-icon'><div class='field-stack'><span class='field-label' id='calendarEditGmLabel'>GM</span><select id='calendarEditGm' name='gm_discord_id'>{user_opts}<option value=''>GMなし</option></select></div></div></label>
+                <label class='field manual-field-spaced calendar-edit-gm-field'><div class='field-box no-icon'><div class='field-stack'><span class='field-label' id='calendarEditGmLabel'>GM</span><select id='calendarEditGm' name='gm_discord_id'>{user_opts}<option value=''>GMなし</option></select></div></div></label>
                 <div class='calendar-modal-row'>
                   <span class='calendar-modal-label' id='calendarEditPlLabel'>PLを編集</span>
                   <div class='manual-user-list' id='calendarEditPlList'>
@@ -4645,6 +4743,8 @@ async def calendar_page(request: Request, month: str = ""):
 
           document.getElementById('calendarEditScenario').value=el.dataset.title||'';
           document.getElementById('calendarEditDate').value=el.dataset.date||'';
+          document.getElementById('calendarEditOriginalDate').value=el.dataset.date||'';
+          document.getElementById('calendarEditOriginalTime').value=el.dataset.time||'';
           const editGameType=el.dataset.gameType || (isEvent ? 'EVENT' : 'TRPG');
           document.querySelectorAll("#calendarMembersEditForm input[name='game_type']").forEach(r=>{{
             r.checked=(r.value===editGameType);
@@ -4813,6 +4913,7 @@ async def calendar_edit_details(
     request: Request, calendar_session_id: int = Form(...), scenario_name: str = Form(...),
     event_date: str = Form(...), game_type: str = Form(...), gm_discord_id: str = Form(""), gm_guest_name: str = Form(""),
     participant_ids: list[str] = Form(default=[]), guest_participant_names: str = Form(""),
+    original_event_date: str = Form(""), original_start_time: str = Form(""),
 ):
     require_login(request); await require_csrf(request)
     detail_before, _ = calendar_session_detail(calendar_session_id)
@@ -4822,11 +4923,25 @@ async def calendar_edit_details(
         edited_day = date.fromisoformat(event_date)
     except ValueError:
         raise HTTPException(400, "開催日が不正です")
+    sync_result=sync_linked_session_from_calendar_edit(
+        calendar_session_id, original_event_date or str(detail_before['event_date'] if detail_before else ''),
+        original_start_time or str(detail_before['start_time'] if detail_before else ''),
+        event_date, scenario_name, gm_discord_id, [str(x) for x in participant_ids], game_type=game_type
+    )
+    if sync_result and sync_result.get('error')=='duplicate_slot':
+        raise HTTPException(400, "同じ卓に同一の開催日時がすでに登録されています")
     if not update_calendar_session_details(calendar_session_id, scenario_name, gm_discord_id,
         [str(x) for x in participant_ids], gm_guest_name,
         [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type,
         event_date=event_date):
         raise HTTPException(404, "予定が見つかりません")
+    # 複数日卓ではcalendar_sessionsの代表日時を最初のslotへ揃える。
+    with db() as c:
+        first=c.execute("SELECT event_date,start_time FROM calendar_session_slots WHERE calendar_session_id=? ORDER BY event_date,start_time LIMIT 1",(int(calendar_session_id),)).fetchone()
+        if first:
+            c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",(str(first['event_date']),str(first['start_time']),int(calendar_session_id)))
+    if sync_result and sync_result.get('session_id'):
+        schedule_session_reminder(int(sync_result['session_id']))
     return RedirectResponse(f"/calendar?month={edited_day.strftime('%Y-%m')}", status_code=303)
 
 @app.post("/calendar/hide")
@@ -6681,13 +6796,15 @@ async def decide_form(rid: int, request: Request):
         key=str(x['key']); d=str(x['date']); t=str(x['time'])
         yes=[str(u) for u in x['yes']]; maybe=[str(u) for u in x['maybe']]
         data.append({'key':key,'date':d,'time':t,'yes':yes})
+        yes_names=', '.join(esc(user_display(u)) for u in yes) or 'なし'
         maybe_names=', '.join(esc(user_display(u)) for u in maybe) or 'なし'
         cards.append(f"""
         <label class='candidate' style='display:block'>
           <div style='display:flex;align-items:flex-start;gap:10px'>
             <input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'>
             <div style='flex:1'><b>{esc(d)} {esc(t)}〜</b><div style='margin-top:6px'>○{len(yes)}人</div>
-            <p class='small muted' style='margin-bottom:0'>△：{maybe_names}</p></div>
+            <p class='small' style='margin:8px 0 0'>○：{yes_names}</p>
+            <p class='small muted' style='margin:4px 0 0'>△：{maybe_names}</p></div>
           </div>
         </label>""")
     data_json=json.dumps(data,ensure_ascii=False)
@@ -6701,12 +6818,15 @@ async def decide_form(rid: int, request: Request):
       <h2>開催日を決定</h2>
       <label class='round-number-row'><input type='number' min='1' name='round_no' value='1' required><span>陣目</span></label>
 
-      <label class='checkbox-row' style='margin:16px 0 6px'>
+      <label class='checkbox-row' style='margin:16px 0 4px'>
         <input type='checkbox' id='multiDay' name='multi_day' value='1' onchange='toggleMultiDay()'>
         複数日に分けて開催する
       </label>
-      <p class='muted small' style='margin-top:0'>一つの卓を複数日に分けて開催する場合に使用します。選択したすべての日程を1つの卓・1つのチャンネルとして扱います。</p>
-
+      <p class='small muted' style='margin:0 0 12px 4px'>1つの卓を複数日に分けて開催する</p>
+      <div id='multiDayMismatch' style='display:none;margin:0 0 14px;padding:12px 14px;border:1px solid #6b2a31;border-radius:12px;background:#2a1519'>
+        <div style='font-weight:800;color:#ff8b82'>選択した日程の参加者が一致していません</div>
+        <div class='small' style='margin-top:4px;color:#c9a8a8'>1卓を複数日に分けて開催するため、同じ参加者となるように選択してください</div>
+      </div>
       <div id='candidateList'>{''.join(cards)}</div>
       <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'>
         <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div>
@@ -6735,9 +6855,23 @@ async def decide_form(rid: int, request: Request):
       }}
       updateCommon();
     }}
+    function sameMembers(a,b){{
+      if(a.size!==b.size)return false;
+      for(const x of a)if(!b.has(x))return false;
+      return true;
+    }}
+    function hasMultiDayMismatch(){{
+      const keys=choices().map(x=>x.value);
+      if(!document.getElementById('multiDay').checked||keys.length<2)return false;
+      const sets=keys.map(k=>{{const row=candidateData.find(x=>x.key===k);return new Set(row?row.yes:[]);}});
+      return sets.slice(1).some(s=>!sameMembers(sets[0],s));
+    }}
     function updateCommon(){{
       const keys=choices().map(x=>x.value);
       const box=document.getElementById('commonMembers'); const list=document.getElementById('commonMemberList');
+      const mismatch=document.getElementById('multiDayMismatch');
+      const isMismatch=hasMultiDayMismatch();
+      mismatch.style.display=isMismatch?'block':'none';
       if(!keys.length){{box.style.display='none';list.innerHTML='';return;}}
       let common=null;
       keys.forEach(k=>{{ const row=candidateData.find(x=>x.key===k); const ys=new Set(row?row.yes:[]); common=common===null?ys:new Set([...common].filter(x=>ys.has(x))); }});
@@ -6748,6 +6882,9 @@ async def decide_form(rid: int, request: Request):
     function validateDecision(){{
       const n=choices().length; const multi=document.getElementById('multiDay').checked;
       if((!multi&&n!==1)||(multi&&n<2)){{alert(multi?'開催日を2つ以上選択してください。':'開催日を1つ選択してください。');return false;}}
+      if(multi&&hasMultiDayMismatch()){{
+        const e=document.getElementById('multiDayMismatch');e.style.display='block';e.scrollIntoView({{behavior:'smooth',block:'center'}});return false;
+      }}
       const m=document.querySelectorAll('[name="member_id"]:checked').length;
       if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください。`);return false;}}
       return true;
@@ -6777,6 +6914,10 @@ async def decide_submit(request: Request, rid: int):
     selected_keys=list(dict.fromkeys(k for k in selected_keys if k in cmap))
     if (not multi_day and len(selected_keys)!=1) or (multi_day and len(selected_keys)<2):
         raise HTTPException(400,'開催日の選択を確認してください')
+    if multi_day:
+        member_sets=[set(str(u) for u in cmap[k]['yes']) for k in selected_keys]
+        if any(x != member_sets[0] for x in member_sets[1:]):
+            raise HTTPException(400,'選択した日程の参加者が一致していません。1卓を複数日に分けて開催するため、同じ参加者となるように選択してください')
     common=None
     for k in selected_keys:
         ys=set(str(u) for u in cmap[k]['yes'])
@@ -7043,16 +7184,68 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
         d,t=str(sl['event_date']),str(sl['start_time']); key=f'{d}|{t}'; yes=[str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='YES']
         if len(yes)<minp: continue
         data.append({'key':key,'date':d,'time':t,'yes':yes})
-        cards.append(f"<label class='candidate' style='display:block'><div style='display:flex;gap:10px'><input class='slot-choice' style='width:auto' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div><b>{d} {t}〜</b><div>○{len(yes)}人</div></div></div></label>")
+        yes_names=', '.join(esc(names.get(u,u)) for u in yes) or 'なし'
+        cards.append(f"<label class='candidate' style='display:block'><div style='display:flex;gap:10px;align-items:flex-start'><input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div style='flex:1'><b>{d} {t}〜</b><div style='margin-top:6px'>○{len(yes)}人</div><p class='small' style='margin:8px 0 0'>○：{yes_names}</p></div></div></label>")
     if not data:return page('開催日決定',f"<a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a><div class='card'><p>現在、最小人数{minp}人を満たす候補がありません。</p></div>",request)
     return page('開催日決定',f"""
       <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
-      <form class='card' method='post' action='/session-reschedule/{reschedule_id}/confirm' onsubmit='return validateDecision()'>{csrf_field(request)}<h2>開催日を決定</h2>
-      <label class='checkbox-row'><input type='checkbox' id='multiDay' name='multi_day' value='1' onchange='toggleMultiDay()'> 複数日に分けて開催する</label>
-      <p class='muted small'>選択したすべての日程を同じ参加者・同じ○陣で開催します。</p>{''.join(cards)}
-      <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'><div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div><p id='commonMemberNote' class='muted small'></p></div></div>
-      <div style='margin-top:26px;display:flex;justify-content:center'><button style='width:auto;min-width:280px'>この内容で卓を成立させる</button></div></form>
-      <script>const candidateData={json.dumps(data,ensure_ascii=False)};const memberNames={json.dumps(names,ensure_ascii=False)};const minPlayers={minp},maxPlayers={maxp};function choices(){{return [...document.querySelectorAll('.slot-choice:checked')];}}function onSlotChoice(el){{if(!document.getElementById('multiDay').checked&&el.checked)document.querySelectorAll('.slot-choice').forEach(x=>{{if(x!==el)x.checked=false;}});updateCommon();}}function toggleMultiDay(){{if(!document.getElementById('multiDay').checked)choices().slice(1).forEach(x=>x.checked=false);updateCommon();}}function updateCommon(){{const keys=choices().map(x=>x.value),box=document.getElementById('commonMembers'),list=document.getElementById('commonMemberList');if(!keys.length){{box.style.display='none';return;}}let common=null;keys.forEach(k=>{{const row=candidateData.find(x=>x.key===k),ys=new Set(row?row.yes:[]);common=common===null?ys:new Set([...common].filter(x=>ys.has(x)));}});const ids=[...(common||new Set())];box.style.display='block';list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('');document.getElementById('commonMemberNote').textContent=`選択中の全日程に○：${{ids.length}}人`;}}function validateDecision(){{const n=choices().length,multi=document.getElementById('multiDay').checked,m=document.querySelectorAll('[name="member_id"]:checked').length;if((!multi&&n!==1)||(multi&&n<2)){{alert(multi?'2日程以上選択してください':'1日程選択してください');return false;}}if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください`);return false;}}return true;}}</script>
+      <form class='card' method='post' action='/session-reschedule/{reschedule_id}/confirm' onsubmit='return validateDecision()'>
+        {csrf_field(request)}
+        <h2>開催日を決定</h2>
+        <label class='checkbox-row' style='margin-bottom:4px'>
+          <input type='checkbox' id='multiDay' name='multi_day' value='1' onchange='toggleMultiDay()'> 複数日に分けて開催する
+        </label>
+        <p class='small muted' style='margin:0 0 12px 4px'>1つの卓を複数日に分けて開催する</p>
+        <div id='multiDayMismatch' style='display:none;margin:0 0 14px;padding:12px 14px;border:1px solid #6b2a31;border-radius:12px;background:#2a1519'>
+          <div style='font-weight:800;color:#ff8b82'>選択した日程の参加者が一致していません</div>
+          <div class='small' style='margin-top:4px;color:#c9a8a8'>1卓を複数日に分けて開催するため、同じ参加者となるように選択してください</div>
+        </div>
+        {''.join(cards)}
+        <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'>
+          <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div><p id='commonMemberNote' class='muted small'></p></div>
+        </div>
+        <div style='margin-top:26px;display:flex;justify-content:center'><button style='width:auto;min-width:280px'>この内容で卓を成立させる</button></div>
+      </form>
+      <script>
+      const candidateData={json.dumps(data,ensure_ascii=False)};
+      const memberNames={json.dumps(names,ensure_ascii=False)};
+      const minPlayers={minp},maxPlayers={maxp};
+      function choices(){{return [...document.querySelectorAll('.slot-choice:checked')];}}
+      function sameMembers(a,b){{if(a.size!==b.size)return false;for(const x of a)if(!b.has(x))return false;return true;}}
+      function hasMultiDayMismatch(){{
+        const keys=choices().map(x=>x.value);
+        if(!document.getElementById('multiDay').checked||keys.length<2)return false;
+        const sets=keys.map(k=>{{const row=candidateData.find(x=>x.key===k);return new Set(row?row.yes:[]);}});
+        return sets.slice(1).some(s=>!sameMembers(sets[0],s));
+      }}
+      function onSlotChoice(el){{
+        if(!document.getElementById('multiDay').checked&&el.checked)document.querySelectorAll('.slot-choice').forEach(x=>{{if(x!==el)x.checked=false;}});
+        updateCommon();
+      }}
+      function toggleMultiDay(){{
+        if(!document.getElementById('multiDay').checked)choices().slice(1).forEach(x=>x.checked=false);
+        updateCommon();
+      }}
+      function updateCommon(){{
+        const keys=choices().map(x=>x.value),box=document.getElementById('commonMembers'),list=document.getElementById('commonMemberList');
+        const mismatch=document.getElementById('multiDayMismatch');
+        mismatch.style.display=hasMultiDayMismatch()?'block':'none';
+        if(!keys.length){{box.style.display='none';list.innerHTML='';return;}}
+        let common=null;
+        keys.forEach(k=>{{const row=candidateData.find(x=>x.key===k),ys=new Set(row?row.yes:[]);common=common===null?ys:new Set([...common].filter(x=>ys.has(x)));}});
+        const ids=[...(common||new Set())];
+        box.style.display='block';
+        list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('');
+        document.getElementById('commonMemberNote').textContent=`選択中の全日程に○：${{ids.length}}人`;
+      }}
+      function validateDecision(){{
+        const n=choices().length,multi=document.getElementById('multiDay').checked,m=document.querySelectorAll('[name="member_id"]:checked').length;
+        if((!multi&&n!==1)||(multi&&n<2)){{alert(multi?'2日程以上選択してください':'1日程選択してください');return false;}}
+        if(multi&&hasMultiDayMismatch()){{const e=document.getElementById('multiDayMismatch');e.style.display='block';e.scrollIntoView({{behavior:'smooth',block:'center'}});return false;}}
+        if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください`);return false;}}
+        return true;
+      }}
+      </script>
     """,request)
 
 
@@ -7065,6 +7258,12 @@ async def session_reschedule_confirm(reschedule_id:int,request:Request):
     smap={f"{x['event_date']}|{x['start_time']}":(str(x['event_date']),str(x['start_time'])) for x in slots}
     chosen=[smap[k] for k in dict.fromkeys(keys) if k in smap]
     if (not multi and len(chosen)!=1) or (multi and len(chosen)<2): raise HTTPException(400,'開催日時の選択を確認してください')
+    if multi:
+        answer_sets=[]
+        for d,t in chosen:
+            answer_sets.append({str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='YES'})
+        if any(x != answer_sets[0] for x in answer_sets[1:]):
+            raise HTTPException(400,'選択した日程の参加者が一致していません。1卓を複数日に分けて開催するため、同じ参加者となるように選択してください')
     selected=[str(x) for x in form.getlist('member_id')]
     result=confirm_session_reschedule_slots(reschedule_id,chosen,selected)
     if not result: raise HTTPException(400,'参加人数または選択内容を確認してください')
@@ -7360,6 +7559,7 @@ async def schedule_start_submit(
                    status='RECRUITING',
                    schedule_pending=0,
                    deadline_notified=0,
+                   predeadline_notified=0,
                    availability_notified=0
                WHERE id=?""",
             (
