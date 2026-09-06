@@ -35,7 +35,7 @@ class CachedStaticFiles(StaticFiles):
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, temporary_v92_madamis_year_fix_done, apply_temporary_v92_madamis_year_fix, temporary_v93_madamis_year_fix_done, apply_temporary_v93_madamis_year_fix, temporary_v94_madamis_year_fix_done, apply_temporary_v94_madamis_year_fix, temporary_v95_madamis_year_fix_done, apply_temporary_v95_madamis_year_fix, temporary_v96_madamis_year_fix_done, apply_temporary_v96_madamis_year_fix, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3533,10 +3533,6 @@ async def bootstrap_achievements():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         stamp = iso_now()
         calendar_resync_v90(as_of.isoformat(), stamp)
-        # v92: 今回だけ、テスト中に減った2026年度のマダミス1卓分を4人へ戻す。
-        # achievement_meta の専用マーカーで二重加算を防ぐ。
-        if not temporary_v92_madamis_year_fix_done():
-            apply_temporary_v92_madamis_year_fix(stamp)
         if now.time() >= time(20,0):
             mark_achievement_run(today.isoformat(), stamp)
         return
@@ -3628,27 +3624,6 @@ async def on_ready():
             await predeadline_unanswered_check()
     except Exception as e:
         log_error("predeadline_unanswered_catchup", e)
-    # v94: bootstrap_achievements() 内の移行処理が return しても必ず最後に到達する臨時補正。
-    # v93が既に成功済みなら何もしない。未適用の場合だけ今回の1卓分を年別キャッシュへ戻す。
-    try:
-        if not temporary_v94_madamis_year_fix_done():
-            apply_temporary_v94_madamis_year_fix(iso_now())
-    except Exception as e:
-        log_error("temporary_v94_madamis_year_fix", e)
-    # v95: 過去版の補正マーカーは無視し、今回の誤減算1卓分を新しい専用マーカーで一度だけ戻す。
-    try:
-        if not temporary_v95_madamis_year_fix_done():
-            result = apply_temporary_v95_madamis_year_fix(iso_now())
-            print(f"[V95 FIX] applied annual madamis +1: {result}", flush=True)
-    except Exception as e:
-        log_error("temporary_v95_madamis_year_fix", e)
-    # v96: 今回だけの誤減算補正。対象者ごとの専用マーカーで一度だけ実行。
-    try:
-        if not temporary_v96_madamis_year_fix_done():
-            result = apply_temporary_v96_madamis_year_fix(iso_now())
-            print(f"[V96 FIX] annual madamis +1: {result}", flush=True)
-    except Exception as e:
-        log_error("temporary_v96_madamis_year_fix", e)
     try:
         deleted_images = cleanup_posted_recruitment_images()
         if deleted_images:
@@ -3782,6 +3757,19 @@ async def admin_database_backup(request: Request):
         finally:
             destination.close()
             source.close()
+
+        # v114: ダウンロード前にバックアップ側のSQLite整合性を自動検証する。
+        # 正常時は PRAGMA integrity_check が1行だけ "ok" を返す。
+        check_db = sqlite3.connect(f"file:{tmp_path}?mode=ro", uri=True, timeout=30)
+        try:
+            integrity_rows = [str(row[0]) for row in check_db.execute("PRAGMA integrity_check").fetchall()]
+        finally:
+            check_db.close()
+        if integrity_rows != ["ok"]:
+            raise HTTPException(
+                status_code=500,
+                detail="バックアップの整合性チェックに失敗しました。ダウンロードを中止しました。",
+            )
 
         stamp = now_jst().strftime("%Y-%m-%d_%H%M")
         filename = f"tsubutaku_backup_{stamp}.db"
@@ -5079,13 +5067,6 @@ async def calendar_progress_set(
 
 @app.get("/profile/{discord_id}", response_class=HTMLResponse)
 async def profile_page(request: Request, discord_id: str):
-    # v97永続補正: 起動イベントに依存せず、表示値を読む直前に今回の+1を保証する。
-    try:
-        if not temporary_v96_madamis_year_fix_done():
-            result = apply_temporary_v96_madamis_year_fix(iso_now())
-            print(f"[V97 FIX/profile] annual madamis +1: {result}", flush=True)
-    except Exception as e:
-        log_error("temporary_v96_madamis_year_fix_profile", e)
     data = profile_data(discord_id)
     if not data:
         raise HTTPException(404, "プロフィールが見つかりません")
