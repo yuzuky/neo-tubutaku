@@ -164,6 +164,31 @@ def init_db():
                 FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS session_reschedule_options (
+                reschedule_id INTEGER PRIMARY KEY,
+                per_day_time INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_reschedule_slots (
+                reschedule_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                PRIMARY KEY(reschedule_id,event_date,start_time),
+                FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_reschedule_slot_answers (
+                reschedule_id INTEGER NOT NULL,
+                discord_id TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                answer TEXT NOT NULL CHECK(answer IN ('YES','MAYBE')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(reschedule_id,discord_id,event_date,start_time),
+                FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS session_reschedule_answers (
                 reschedule_id INTEGER NOT NULL,
                 discord_id TEXT NOT NULL,
@@ -174,6 +199,45 @@ def init_db():
                 FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
             );
 
+            -- v106: 高度な日程調整。通常卓も内部的には1つ以上の開催slotとして扱う。
+            CREATE TABLE IF NOT EXISTS recruitment_schedule_options (
+                recruitment_id INTEGER PRIMARY KEY,
+                per_day_time INTEGER NOT NULL DEFAULT 0,
+                FOREIGN KEY(recruitment_id) REFERENCES recruitments(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS recruitment_slots (
+                recruitment_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                PRIMARY KEY(recruitment_id,event_date,start_time),
+                FOREIGN KEY(recruitment_id) REFERENCES recruitments(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS slot_answers (
+                recruitment_id INTEGER NOT NULL,
+                discord_id TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                answer TEXT NOT NULL CHECK(answer IN ('yes','maybe')),
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(recruitment_id,discord_id,event_date,start_time),
+                FOREIGN KEY(recruitment_id) REFERENCES recruitments(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_slots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                reminder_sent INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                UNIQUE(session_id,event_date,start_time),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_session_slots_next
+                ON session_slots(reminder_sent,event_date,start_time);
 
             -- 成立卓の永久保存用。recruitments/sessionsが90日後に消えても残す。
             CREATE TABLE IF NOT EXISTS calendar_sessions (
@@ -195,6 +259,17 @@ def init_db():
                 PRIMARY KEY(calendar_session_id, discord_id),
                 FOREIGN KEY(calendar_session_id) REFERENCES calendar_sessions(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS calendar_session_slots (
+                calendar_session_id INTEGER NOT NULL,
+                event_date TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                PRIMARY KEY(calendar_session_id,event_date,start_time),
+                FOREIGN KEY(calendar_session_id) REFERENCES calendar_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_calendar_session_slots_date
+                ON calendar_session_slots(event_date);
 
             -- カレンダー表示専用の一時メンバー。users/registered_membersには追加しない。
             CREATE TABLE IF NOT EXISTS calendar_guest_members (
@@ -524,6 +599,7 @@ def archive_confirmed_session(
     participant_ids: list[str],
     created_at: str,
     calendar_visible: bool | None = None,
+    slots: list[tuple[str,str]] | None = None,
 ) -> int:
     """成立卓をカレンダー/履歴用DBへ永久保存する。"""
     with db() as c:
@@ -570,6 +646,14 @@ def archive_confirmed_session(
             [(calendar_session_id, str(uid)) for uid in dict.fromkeys(participant_ids)],
         )
 
+        clean_slots = [(str(d), str(t)) for d,t in (slots or [(event_date,start_time)])]
+        c.execute("DELETE FROM calendar_session_slots WHERE calendar_session_id=?", (calendar_session_id,))
+        if clean_slots:
+            c.executemany(
+                "INSERT OR IGNORE INTO calendar_session_slots(calendar_session_id,event_date,start_time) VALUES(?,?,?)",
+                [(calendar_session_id,d,t) for d,t in clean_slots],
+            )
+
         gt = normalize_progress_game_type(game_type)
         if gt in {"TRPG", "MADMIS"} and str(scenario_name or "").strip():
             for participant_id in dict.fromkeys(participant_ids):
@@ -591,18 +675,20 @@ def archive_confirmed_session(
 
 
 def calendar_entries(start_date: str, end_date: str):
-    """指定期間の公開カレンダー用成立卓を取得する。"""
+    """指定期間の公開カレンダー用成立卓を取得。複数日卓は各slotを同じ卓として展開表示する。"""
     with db() as c:
         rows = c.execute(
-            """SELECT cs.*,
+            """SELECT DISTINCT cs.*,
                       CASE WHEN COALESCE(cs.gm_guest_name,'')<>'' THEN cs.gm_guest_name
                            ELSE COALESCE(u.display_name,u.username,cs.gm_discord_id,'') END AS gm_name
                FROM calendar_sessions cs
                LEFT JOIN users u ON u.discord_id=cs.gm_discord_id
+               LEFT JOIN calendar_session_slots css ON css.calendar_session_id=cs.id
                WHERE cs.calendar_visible=1
-                 AND cs.event_date>=? AND cs.event_date<?
-               ORDER BY cs.event_date, cs.id""",
-            (start_date, end_date),
+                 AND ((css.event_date>=? AND css.event_date<?)
+                      OR (css.calendar_session_id IS NULL AND cs.event_date>=? AND cs.event_date<?))
+               ORDER BY cs.id""",
+            (start_date, end_date, start_date, end_date),
         ).fetchall()
         out = []
         for row in rows:
@@ -618,59 +704,66 @@ def calendar_entries(start_date: str, end_date: str):
                 "SELECT display_name FROM calendar_guest_members WHERE calendar_session_id=? ORDER BY id",
                 (row["id"],)).fetchall()
             members.extend({"discord_id":"", "display_name":str(g["display_name"]), "is_guest":1} for g in guests)
-            out.append((row, members))
+            slots=c.execute(
+                "SELECT event_date,start_time FROM calendar_session_slots WHERE calendar_session_id=? AND event_date>=? AND event_date<? ORDER BY event_date,start_time",
+                (int(row['id']),start_date,end_date),
+            ).fetchall()
+            if not slots:
+                slots=[{'event_date':str(row['event_date']),'start_time':str(row['start_time'] or '')}]
+            for sl in slots:
+                rd=dict(row)
+                rd['event_date']=str(sl['event_date'])
+                rd['start_time']=str(sl['start_time'] or '')
+                out.append((rd, members))
+        out.sort(key=lambda x:(str(x[0]['event_date']),int(x[0]['id'])))
         return out
 
 def calendar_conflicts_for_users(discord_ids: list[str], event_dates: list[str]) -> set[tuple[str, str]]:
-    """複数ユーザーについて、(discord_id, 日付) の重複予定セットを返す。"""
-    users = [str(x) for x in dict.fromkeys(discord_ids) if x]
-    dates = [str(x) for x in dict.fromkeys(event_dates) if x]
-    if not users or not dates:
-        return set()
-
-    user_ph = ",".join("?" for _ in users)
-    date_ph = ",".join("?" for _ in dates)
-
+    users=[str(x) for x in dict.fromkeys(discord_ids) if x]
+    dates=[str(x) for x in dict.fromkeys(event_dates) if x]
+    if not users or not dates:return set()
+    uph=','.join('?' for _ in users); dph=','.join('?' for _ in dates)
     with db() as c:
-        rows = c.execute(
-            f"""SELECT DISTINCT cs.gm_discord_id AS discord_id, cs.event_date
-                FROM calendar_sessions cs
-                WHERE cs.gm_discord_id IN ({user_ph})
-                  AND cs.event_date IN ({date_ph})
-                UNION
-                SELECT DISTINCT csm.discord_id AS discord_id, cs.event_date
-                FROM calendar_sessions cs
-                JOIN calendar_session_members csm
-                  ON csm.calendar_session_id=cs.id
-                WHERE csm.discord_id IN ({user_ph})
-                  AND cs.event_date IN ({date_ph})""",
-            [*users, *dates, *users, *dates],
+        rows=c.execute(
+            f"""WITH effective_dates AS (
+                   SELECT cs.id,cs.gm_discord_id,css.event_date
+                     FROM calendar_sessions cs JOIN calendar_session_slots css ON css.calendar_session_id=cs.id
+                   UNION ALL
+                   SELECT cs.id,cs.gm_discord_id,cs.event_date
+                     FROM calendar_sessions cs
+                    WHERE NOT EXISTS(SELECT 1 FROM calendar_session_slots css WHERE css.calendar_session_id=cs.id)
+                 )
+                 SELECT DISTINCT ed.gm_discord_id AS discord_id,ed.event_date
+                   FROM effective_dates ed
+                  WHERE ed.gm_discord_id IN ({uph}) AND ed.event_date IN ({dph})
+                 UNION
+                 SELECT DISTINCT csm.discord_id AS discord_id,ed.event_date
+                   FROM effective_dates ed JOIN calendar_session_members csm ON csm.calendar_session_id=ed.id
+                  WHERE csm.discord_id IN ({uph}) AND ed.event_date IN ({dph})""",
+            [*users,*dates,*users,*dates],
         ).fetchall()
-
-    return {(str(x["discord_id"]), str(x["event_date"])) for x in rows}
-
+    return {(str(x['discord_id']),str(x['event_date'])) for x in rows}
 
 def calendar_conflict_dates(discord_id: str, event_dates: list[str]) -> set[str]:
-    """ユーザーがGMまたはPLとして既に成立卓を持つ日付を返す。"""
-    clean_dates = [str(x) for x in dict.fromkeys(event_dates) if x]
-    if not clean_dates:
-        return set()
-
-    placeholders = ",".join("?" for _ in clean_dates)
-    params = [str(discord_id), str(discord_id), *clean_dates]
-
+    clean=[str(x) for x in dict.fromkeys(event_dates) if x]
+    if not clean:return set()
+    ph=','.join('?' for _ in clean)
     with db() as c:
-        rows = c.execute(
-            f"""SELECT DISTINCT cs.event_date
-                FROM calendar_sessions cs
-                LEFT JOIN calendar_session_members csm
-                  ON csm.calendar_session_id=cs.id
-                WHERE (cs.gm_discord_id=? OR csm.discord_id=?)
-                  AND cs.event_date IN ({placeholders})""",
-            params,
+        rows=c.execute(
+            f"""WITH effective_dates AS (
+                   SELECT cs.id,cs.gm_discord_id,css.event_date
+                     FROM calendar_sessions cs JOIN calendar_session_slots css ON css.calendar_session_id=cs.id
+                   UNION ALL
+                   SELECT cs.id,cs.gm_discord_id,cs.event_date
+                     FROM calendar_sessions cs
+                    WHERE NOT EXISTS(SELECT 1 FROM calendar_session_slots css WHERE css.calendar_session_id=cs.id)
+                 )
+                 SELECT DISTINCT ed.event_date FROM effective_dates ed
+                 LEFT JOIN calendar_session_members csm ON csm.calendar_session_id=ed.id
+                 WHERE (ed.gm_discord_id=? OR csm.discord_id=?) AND ed.event_date IN ({ph})""",
+            [str(discord_id),str(discord_id),*clean],
         ).fetchall()
-
-    return {str(x["event_date"]) for x in rows}
+    return {str(x['event_date']) for x in rows}
 
 
 
@@ -941,6 +1034,146 @@ def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: st
 
 
 
+
+def set_recruitment_schedule_slots(recruitment_id: int, slots: list[tuple[str,str]], per_day_time: bool = False):
+    """候補日＋時間を保存。通常モードでも各候補日に1slotを持たせる。"""
+    clean=[]
+    seen=set()
+    for d,t in slots:
+        d=str(d or '').strip(); t=str(t or '').strip()
+        if not d or not t: continue
+        key=(d,t)
+        if key not in seen:
+            seen.add(key); clean.append(key)
+    with db() as c:
+        c.execute("DELETE FROM recruitment_slots WHERE recruitment_id=?", (int(recruitment_id),))
+        c.execute(
+            "INSERT INTO recruitment_schedule_options(recruitment_id,per_day_time) VALUES(?,?) "
+            "ON CONFLICT(recruitment_id) DO UPDATE SET per_day_time=excluded.per_day_time",
+            (int(recruitment_id), 1 if per_day_time else 0),
+        )
+        if clean:
+            c.executemany(
+                "INSERT INTO recruitment_slots(recruitment_id,event_date,start_time) VALUES(?,?,?)",
+                [(int(recruitment_id),d,t) for d,t in clean],
+            )
+
+
+def recruitment_schedule_slots(recruitment_id: int):
+    """(per_day_time, slots) を返す。旧データはgm_dates+start_timeから互換生成。"""
+    with db() as c:
+        opt=c.execute("SELECT per_day_time FROM recruitment_schedule_options WHERE recruitment_id=?",(int(recruitment_id),)).fetchone()
+        rows=c.execute(
+            "SELECT event_date,start_time FROM recruitment_slots WHERE recruitment_id=? ORDER BY event_date,start_time",
+            (int(recruitment_id),),
+        ).fetchall()
+        if rows:
+            return bool(int(opt['per_day_time'] if opt else 0)), [dict(x) for x in rows]
+        r=c.execute("SELECT start_time FROM recruitments WHERE id=?",(int(recruitment_id),)).fetchone()
+        ds=c.execute("SELECT event_date FROM gm_dates WHERE recruitment_id=? ORDER BY event_date",(int(recruitment_id),)).fetchall()
+        default_time=str((r['start_time'] if r else '21:00') or '21:00')
+        if default_time=='未定': default_time='21:00'
+        return False,[{'event_date':str(x['event_date']),'start_time':default_time} for x in ds]
+
+
+def save_slot_answers(recruitment_id: int, discord_id: str, answers: dict[str,str], updated_at: str):
+    per_day,slots=recruitment_schedule_slots(recruitment_id)
+    allowed={(str(x['event_date']),str(x['start_time'])) for x in slots}
+    with db() as c:
+        c.execute("DELETE FROM slot_answers WHERE recruitment_id=? AND discord_id=?",(int(recruitment_id),str(discord_id)))
+        for key,a in answers.items():
+            try:d,t=str(key).split('|',1)
+            except ValueError:continue
+            if (d,t) in allowed and a in {'yes','maybe'}:
+                c.execute(
+                    "INSERT INTO slot_answers(recruitment_id,discord_id,event_date,start_time,answer,updated_at) VALUES(?,?,?,?,?,?)",
+                    (int(recruitment_id),str(discord_id),d,t,a,str(updated_at)),
+                )
+
+
+def recruitment_slot_answer_map(recruitment_id: int):
+    with db() as c:
+        rows=c.execute("SELECT discord_id,event_date,start_time,answer FROM slot_answers WHERE recruitment_id=?",(int(recruitment_id),)).fetchall()
+    return {(str(x['discord_id']),str(x['event_date']),str(x['start_time'])):str(x['answer']) for x in rows}
+
+
+def candidate_slot_rows(recruitment_id: int):
+    per_day,slots=recruitment_schedule_slots(recruitment_id)
+    with db() as c:
+        r=c.execute("SELECT gm_discord_id FROM recruitments WHERE id=?",(int(recruitment_id),)).fetchone()
+        if not r:return []
+        gm=str(r['gm_discord_id'])
+        out=[]
+        for sl in slots:
+            d,t=str(sl['event_date']),str(sl['start_time'])
+            yes=c.execute(
+                """SELECT DISTINCT a.discord_id FROM slot_answers a JOIN members m
+                   ON m.recruitment_id=a.recruitment_id AND m.discord_id=a.discord_id
+                   WHERE a.recruitment_id=? AND a.event_date=? AND a.start_time=? AND a.answer='yes'
+                     AND m.member_type='participant' AND m.active=1 AND a.discord_id<>?""",
+                (int(recruitment_id),d,t,gm),
+            ).fetchall()
+            maybe=c.execute(
+                """SELECT DISTINCT a.discord_id FROM slot_answers a JOIN members m
+                   ON m.recruitment_id=a.recruitment_id AND m.discord_id=a.discord_id
+                   WHERE a.recruitment_id=? AND a.event_date=? AND a.start_time=? AND a.answer='maybe'
+                     AND m.member_type='participant' AND m.active=1 AND a.discord_id<>?""",
+                (int(recruitment_id),d,t,gm),
+            ).fetchall()
+            out.append({'date':d,'time':t,'key':f'{d}|{t}','yes':[str(x[0]) for x in yes],'maybe':[str(x[0]) for x in maybe]})
+    return out
+
+
+def set_session_slots(session_id: int, slots: list[tuple[str,str]], created_at: str):
+    clean=[]; seen=set()
+    for d,t in slots:
+        k=(str(d),str(t))
+        if k not in seen:
+            seen.add(k); clean.append(k)
+    with db() as c:
+        c.execute("DELETE FROM session_slots WHERE session_id=?",(int(session_id),))
+        if clean:
+            c.executemany(
+                "INSERT INTO session_slots(session_id,event_date,start_time,reminder_sent,created_at) VALUES(?,?,?,0,?)",
+                [(int(session_id),d,t,str(created_at)) for d,t in clean],
+            )
+        if clean:
+            c.execute("UPDATE sessions SET event_date=?,start_time=?,reminder_sent=0 WHERE id=?",(clean[0][0],clean[0][1],int(session_id)))
+
+
+def get_session_slots(session_id: int):
+    with db() as c:
+        rows=c.execute("SELECT * FROM session_slots WHERE session_id=? ORDER BY event_date,start_time,id",(int(session_id),)).fetchall()
+        if rows:return [dict(x) for x in rows]
+        s=c.execute("SELECT id,event_date,start_time,reminder_sent,created_at FROM sessions WHERE id=?",(int(session_id),)).fetchone()
+        if not s:return []
+        c.execute("INSERT OR IGNORE INTO session_slots(session_id,event_date,start_time,reminder_sent,created_at) VALUES(?,?,?,?,?)",
+                  (int(session_id),str(s['event_date']),str(s['start_time']),int(s['reminder_sent'] or 0),str(s['created_at'])))
+        row=c.execute("SELECT * FROM session_slots WHERE session_id=? ORDER BY id",(int(session_id),)).fetchone()
+    return [dict(row)] if row else []
+
+
+def sync_calendar_session_slots(calendar_session_id: int, slots: list[tuple[str,str]]):
+    with db() as c:
+        c.execute("DELETE FROM calendar_session_slots WHERE calendar_session_id=?",(int(calendar_session_id),))
+        if slots:
+            c.executemany("INSERT OR IGNORE INTO calendar_session_slots(calendar_session_id,event_date,start_time) VALUES(?,?,?)",
+                          [(int(calendar_session_id),str(d),str(t)) for d,t in slots])
+            c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",(str(slots[0][0]),str(slots[0][1]),int(calendar_session_id)))
+
+
+def backfill_session_slots_v106():
+    """既存卓を1slotとして安全に移行。カレンダー側も1slotを補完。"""
+    with db() as c:
+        rows=c.execute("SELECT id,event_date,start_time,reminder_sent,created_at FROM sessions").fetchall()
+        for x in rows:
+            c.execute("INSERT OR IGNORE INTO session_slots(session_id,event_date,start_time,reminder_sent,created_at) VALUES(?,?,?,?,?)",
+                      (int(x['id']),str(x['event_date']),str(x['start_time']),int(x['reminder_sent'] or 0),str(x['created_at'])))
+        cals=c.execute("SELECT id,event_date,start_time FROM calendar_sessions").fetchall()
+        for x in cals:
+            c.execute("INSERT OR IGNORE INTO calendar_session_slots(calendar_session_id,event_date,start_time) VALUES(?,?,?)",
+                      (int(x['id']),str(x['event_date']),str(x['start_time'] or '21:00')))
+
 def session_management_detail(session_id: int):
     """成立卓の管理画面用。元卓・GM・参加者・カレンダーIDをまとめて返す。"""
     with db() as c:
@@ -969,7 +1202,7 @@ def session_management_detail(session_id: int):
     return dict(row), [dict(x) for x in members]
 
 
-def create_session_reschedule(session_id: int, start_time: str, deadline: str, candidate_dates: list[str], created_at: str) -> int:
+def create_session_reschedule(session_id: int, start_time: str, deadline: str, candidate_dates: list[str], created_at: str, candidate_slots: list[tuple[str,str]] | None = None, per_day_time: bool = False) -> int:
     dates = list(dict.fromkeys(str(x).strip() for x in candidate_dates if str(x).strip()))
     if not dates:
         raise ValueError("候補日がありません")
@@ -985,6 +1218,15 @@ def create_session_reschedule(session_id: int, start_time: str, deadline: str, c
             "INSERT INTO session_reschedule_dates(reschedule_id,event_date) VALUES(?,?)",
             [(reschedule_id, d) for d in dates],
         )
+        slots = candidate_slots or [(d, str(start_time)) for d in dates]
+        clean=[]; seen=set()
+        for d,t in slots:
+            k=(str(d),str(t))
+            if k[0] in dates and k not in seen:
+                seen.add(k); clean.append(k)
+        c.execute("INSERT INTO session_reschedule_options(reschedule_id,per_day_time) VALUES(?,?)",(reschedule_id,1 if per_day_time else 0))
+        if clean:
+            c.executemany("INSERT INTO session_reschedule_slots(reschedule_id,event_date,start_time) VALUES(?,?,?)",[(reschedule_id,d,t) for d,t in clean])
     return reschedule_id
 
 
@@ -1049,6 +1291,76 @@ def save_session_reschedule_answers(reschedule_id: int, discord_id: str, answers
             )
     return True
 
+
+
+def session_reschedule_slot_detail(reschedule_id: int):
+    rs, dates, members, _legacy_answers = session_reschedule_detail(reschedule_id)
+    if not rs:
+        return None, [], [], {}, False
+    with db() as c:
+        opt=c.execute("SELECT per_day_time FROM session_reschedule_options WHERE reschedule_id=?",(int(reschedule_id),)).fetchone()
+        slots=c.execute("SELECT event_date,start_time FROM session_reschedule_slots WHERE reschedule_id=? ORDER BY event_date,start_time",(int(reschedule_id),)).fetchall()
+        if not slots:
+            slots=[{'event_date':d,'start_time':str(rs['start_time'])} for d in dates]
+        rows=c.execute("SELECT discord_id,event_date,start_time,answer FROM session_reschedule_slot_answers WHERE reschedule_id=?",(int(reschedule_id),)).fetchall()
+    amap={(str(x['discord_id']),str(x['event_date']),str(x['start_time'])):str(x['answer']) for x in rows}
+    return rs,[dict(x) for x in slots],members,amap,bool(int(opt['per_day_time'] if opt else 0))
+
+
+def save_session_reschedule_slot_answers(reschedule_id: int, discord_id: str, answers: dict[str,str], updated_at: str):
+    rs,slots,members,_amap,_per=session_reschedule_slot_detail(reschedule_id)
+    if not rs or str(discord_id) not in {str(x['discord_id']) for x in members}:
+        return False
+    allowed={(str(x['event_date']),str(x['start_time'])) for x in slots}
+    with db() as c:
+        c.execute("DELETE FROM session_reschedule_slot_answers WHERE reschedule_id=? AND discord_id=?",(int(reschedule_id),str(discord_id)))
+        for key,a in answers.items():
+            try:d,t=str(key).split('|',1)
+            except ValueError: continue
+            val=str(a).upper()
+            if (d,t) in allowed and val in {'YES','MAYBE'}:
+                c.execute("INSERT INTO session_reschedule_slot_answers(reschedule_id,discord_id,event_date,start_time,answer,updated_at) VALUES(?,?,?,?,?,?)",
+                          (int(reschedule_id),str(discord_id),d,t,val,str(updated_at)))
+    return True
+
+
+def confirm_session_reschedule_slots(reschedule_id: int, chosen_slots: list[tuple[str,str]], selected_member_ids: list[str]):
+    rs,slots,members,answers,_per=session_reschedule_slot_detail(reschedule_id)
+    if not rs or str(rs['status'])!='OPEN': return None
+    allowed={(str(x['event_date']),str(x['start_time'])) for x in slots}
+    clean=[]; seen=set()
+    for d,t in chosen_slots:
+        k=(str(d),str(t))
+        if k in allowed and k not in seen: seen.add(k); clean.append(k)
+    if not clean:return None
+    member_ids={str(x['discord_id']) for x in members}
+    common=None
+    for d,t in clean:
+        ys={uid for uid in member_ids if answers.get((uid,d,t))=='YES'}
+        common=ys if common is None else common & ys
+    selected=list(dict.fromkeys(str(x) for x in selected_member_ids if str(x) in (common or set())))
+    mn=int(rs.get('min_players') or 1); mx=int(rs.get('max_players') or max(1,len(members)))
+    if not (mn<=len(selected)<=mx):return None
+    session_id=int(rs['session_id'])
+    with db() as c:
+        old_rows=c.execute("SELECT event_date,start_time FROM session_slots WHERE session_id=? ORDER BY event_date,start_time",(session_id,)).fetchall()
+        old_slots=[(str(x['event_date']),str(x['start_time'])) for x in old_rows] or [(str(rs['original_event_date']),str(rs['original_start_time']))]
+        c.execute("DELETE FROM session_slots WHERE session_id=?",(session_id,))
+        c.executemany("INSERT INTO session_slots(session_id,event_date,start_time,reminder_sent,created_at) VALUES(?,?,?,0,?)",
+                      [(session_id,d,t,str(rs['created_at'])) for d,t in clean])
+        c.execute("UPDATE sessions SET event_date=?,start_time=?,reminder_sent=0 WHERE id=?",(clean[0][0],clean[0][1],session_id))
+        c.execute("DELETE FROM session_members WHERE session_id=?",(session_id,))
+        c.executemany("INSERT INTO session_members(session_id,discord_id) VALUES(?,?)",[(session_id,u) for u in selected])
+        cal=c.execute("SELECT id FROM calendar_sessions WHERE source_session_id=?",(session_id,)).fetchone()
+        if cal:
+            cal_id=int(cal['id'])
+            c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",(clean[0][0],clean[0][1],cal_id))
+            c.execute("DELETE FROM calendar_session_slots WHERE calendar_session_id=?",(cal_id,))
+            c.executemany("INSERT INTO calendar_session_slots(calendar_session_id,event_date,start_time) VALUES(?,?,?)",[(cal_id,d,t) for d,t in clean])
+            c.execute("DELETE FROM calendar_session_members WHERE calendar_session_id=?",(cal_id,))
+            c.executemany("INSERT INTO calendar_session_members(calendar_session_id,discord_id) VALUES(?,?)",[(cal_id,u) for u in selected])
+        c.execute("UPDATE session_reschedules SET status='CONFIRMED',confirmed_date=? WHERE id=?",(clean[0][0],int(reschedule_id)))
+    return {'session_id':session_id,'old_slots':old_slots,'new_slots':clean,'selected':selected}
 
 def confirm_session_reschedule(reschedule_id: int, new_event_date: str, new_start_time: str, selected_member_ids: list[str] | None = None):
     """成立卓IDをキーに1卓だけ移動する。同日の別卓には一切触れない。参加者も選択内容へ同期する。"""
@@ -1388,6 +1700,7 @@ def initialize_database():
                 (migration_key,),
             )
     backfill_calendar_history()
+    backfill_session_slots_v106()
     backfill_scenario_progress()
 
 
