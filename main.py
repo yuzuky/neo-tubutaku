@@ -8,6 +8,8 @@ import os
 import random
 import re
 import secrets
+import sqlite3
+import tempfile
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta, time
@@ -21,7 +23,7 @@ import httpx
 import uvicorn
 from discord.ext import commands, tasks
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -30,6 +32,7 @@ class CachedStaticFiles(StaticFiles):
         response = await super().get_response(path, scope)
         response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
         return response
+from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, temporary_v92_madamis_year_fix_done, apply_temporary_v92_madamis_year_fix, temporary_v93_madamis_year_fix_done, apply_temporary_v93_madamis_year_fix, temporary_v94_madamis_year_fix_done, apply_temporary_v94_madamis_year_fix, temporary_v95_madamis_year_fix_done, apply_temporary_v95_madamis_year_fix, temporary_v96_madamis_year_fix_done, apply_temporary_v96_madamis_year_fix, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
@@ -2474,8 +2477,9 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 }}
 
 
-.admin-gear-wrap{{display:flex;justify-content:center;margin:26px 0 4px}}
+.admin-gear-wrap{{display:flex;justify-content:center;align-items:center;gap:10px;margin:26px 0 4px}}
 .admin-gear{{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;text-decoration:none;background:#111925;border:1px solid #2b3748;color:#8e9bad;font-size:18px}}
+.admin-gear svg{{width:19px;height:19px;display:block;fill:none;stroke:currentColor;stroke-width:2.1;stroke-linecap:round;stroke-linejoin:round}}
 .admin-card{{max-width:620px;margin:0 auto}} .admin-title{{text-align:center}}
 .admin-sub{{text-align:center;color:#7f8b9d;font-size:.75rem}}
 .admin-id-form{{display:flex;gap:8px;margin:14px 0}} .admin-id-form input{{flex:1;min-width:0}}
@@ -3741,9 +3745,56 @@ async def home(request: Request):
           <a class='menu-card home-mini-card schedule' href='{schedule_href}'><div><div class='menu-title'>日程調整</div><div class='menu-sub'>日程調整のみ作成</div></div><div class='chev'>›</div></a>
         </div>
       </div>
-      {("<div class='admin-gear-wrap'><a class='admin-gear' href='/admin' aria-label='管理画面'>⚙</a></div>" if str(uid or "") == YUZUKY_SPECIAL_USER_ID else "")}
+      {("<div class='admin-gear-wrap'>"
+         "<a class='admin-gear' href='/admin' aria-label='管理画面' title='管理画面'>⚙</a>"
+         "<a class='admin-gear' href='/admin/database-backup' aria-label='データベースをバックアップ' title='DBバックアップ'>"
+         "<svg viewBox='0 0 24 24' aria-hidden='true'><path d='M12 3v11'/><path d='m7.5 10 4.5 4.5 4.5-4.5'/><path d='M5 15.5V20h14v-4.5'/></svg>"
+         "</a></div>" if str(uid or "") == YUZUKY_SPECIAL_USER_ID else "")}
       """,request)
 
+
+
+def _remove_backup_file(path: str) -> None:
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        pass
+
+
+@app.get("/admin/database-backup")
+async def admin_database_backup(request: Request):
+    # ボタンを隠すだけではなく、URLへ直接アクセスされた場合もyuzuky本人だけ許可する。
+    require_yuzuky_admin(request)
+
+    source_path = Path(DATABASE_PATH)
+    if not source_path.exists():
+        raise HTTPException(status_code=500, detail="データベースファイルが見つかりません。")
+
+    # 稼働中DBファイルを直接配信せず、SQLite公式backup APIで一貫したスナップショットを作る。
+    fd, tmp_path = tempfile.mkstemp(prefix="tsubutaku_backup_", suffix=".db")
+    os.close(fd)
+    try:
+        source = sqlite3.connect(str(source_path), timeout=30)
+        destination = sqlite3.connect(tmp_path, timeout=30)
+        try:
+            with destination:
+                source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+
+        stamp = now_jst().strftime("%Y-%m-%d_%H%M")
+        filename = f"tsubutaku_backup_{stamp}.db"
+        return FileResponse(
+            tmp_path,
+            media_type="application/vnd.sqlite3",
+            filename=filename,
+            background=BackgroundTask(_remove_backup_file, tmp_path),
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception:
+        _remove_backup_file(tmp_path)
+        raise
 
 
 @app.get("/admin", response_class=HTMLResponse)
