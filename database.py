@@ -189,6 +189,14 @@ def init_db():
                 FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS session_reschedule_submissions (
+                reschedule_id INTEGER NOT NULL,
+                discord_id TEXT NOT NULL,
+                submitted_at TEXT NOT NULL,
+                PRIMARY KEY(reschedule_id,discord_id),
+                FOREIGN KEY(reschedule_id) REFERENCES session_reschedules(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS session_reschedule_answers (
                 reschedule_id INTEGER NOT NULL,
                 discord_id TEXT NOT NULL,
@@ -476,14 +484,22 @@ def ensure_recruitment_columns():
                 "ALTER TABLE recruitments "
                 "ADD COLUMN calendar_visible INTEGER NOT NULL DEFAULT 0"
             )
+        if "predeadline_notified" not in cols:
+            c.execute(
+                "ALTER TABLE recruitments "
+                "ADD COLUMN predeadline_notified INTEGER NOT NULL DEFAULT 0"
+            )
 
 
 def ensure_session_columns():
-    """v85: 既存sessionsへ開催中止状態を安全に追加する。"""
+    """既存sessions / session_reschedulesへ追加列を安全に追加する。"""
     with db() as c:
         cols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
         if "cancelled_at" not in cols:
             c.execute("ALTER TABLE sessions ADD COLUMN cancelled_at TEXT")
+        rcols = {r["name"] for r in c.execute("PRAGMA table_info(session_reschedules)").fetchall()}
+        if "predeadline_notified" not in rcols:
+            c.execute("ALTER TABLE session_reschedules ADD COLUMN predeadline_notified INTEGER NOT NULL DEFAULT 0")
 
 
 def ensure_profile_cache_columns():
@@ -930,6 +946,70 @@ def update_calendar_session_members(calendar_session_id: int, participant_ids: l
         str(row["gm_discord_id"] or ""), participant_ids, str(row["gm_guest_name"] or ""),
         [str(m["display_name"]) for m in members if m.get("is_guest")])
 
+def sync_linked_session_from_calendar_edit(calendar_session_id: int, original_event_date: str, original_start_time: str,
+                                           new_event_date: str, scenario_name: str, gm_discord_id: str,
+                                           participant_ids: list[str], game_type: str | None = None):
+    """v109: カレンダーの1開催枠を更新し、成立卓由来なら成立卓側へも同期する。
+
+    複数日・同日複数時間に対応するため、編集前の日付+時間でslotを1件だけ特定する。
+    手動カレンダー予定はcalendar側だけ更新し、source_session_idがある場合だけsessionへ同期する。
+    """
+    clean_members=list(dict.fromkeys(str(x) for x in participant_ids if str(x) and str(x)!=str(gm_discord_id)))
+    with db() as c:
+        cal=c.execute("SELECT source_session_id,start_time FROM calendar_sessions WHERE id=?",(int(calendar_session_id),)).fetchone()
+        if not cal:
+            return None
+        old_date=str(original_event_date or '')
+        old_time=str(original_start_time or cal['start_time'] or '')
+        # 同じ卓内に移動先と同一日時が既にある場合は重複させない。
+        dup=c.execute("SELECT 1 FROM calendar_session_slots WHERE calendar_session_id=? AND event_date=? AND start_time=?",
+                      (int(calendar_session_id),str(new_event_date),old_time)).fetchone()
+        if dup and str(new_event_date)!=old_date:
+            return {'error':'duplicate_slot'}
+        c.execute("UPDATE calendar_session_slots SET event_date=? WHERE calendar_session_id=? AND event_date=? AND start_time=?",
+                  (str(new_event_date),int(calendar_session_id),old_date,old_time))
+        first_cal=c.execute("SELECT event_date,start_time FROM calendar_session_slots WHERE calendar_session_id=? ORDER BY event_date,start_time LIMIT 1",
+                            (int(calendar_session_id),)).fetchone()
+        if first_cal:
+            c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",
+                      (str(first_cal['event_date']),str(first_cal['start_time']),int(calendar_session_id)))
+
+        if cal['source_session_id'] is None:
+            return {'session_id':None,'old_date':old_date,'old_time':old_time,'new_date':str(new_event_date),'new_time':old_time}
+        session_id=int(cal['source_session_id'])
+        sess=c.execute("SELECT recruitment_id FROM sessions WHERE id=?",(session_id,)).fetchone()
+        if not sess:
+            return {'session_id':None,'old_date':old_date,'old_time':old_time,'new_date':str(new_event_date),'new_time':old_time}
+        recruitment_id=int(sess['recruitment_id'])
+        sdup=c.execute("SELECT 1 FROM session_slots WHERE session_id=? AND event_date=? AND start_time=?",
+                       (session_id,str(new_event_date),old_time)).fetchone()
+        if sdup and str(new_event_date)!=old_date:
+            return {'error':'duplicate_slot'}
+        slot=c.execute("SELECT id FROM session_slots WHERE session_id=? AND event_date=? AND start_time=?",
+                       (session_id,old_date,old_time)).fetchone()
+        if slot:
+            c.execute("UPDATE session_slots SET event_date=?,reminder_sent=0 WHERE id=?",
+                      (str(new_event_date),int(slot['id'])))
+        else:
+            base=c.execute("SELECT event_date,start_time FROM sessions WHERE id=?",(session_id,)).fetchone()
+            if base and str(base['event_date'])==old_date and str(base['start_time'] or '')==old_time:
+                c.execute("UPDATE sessions SET event_date=?,reminder_sent=0 WHERE id=?",(str(new_event_date),session_id))
+        c.execute("DELETE FROM session_members WHERE session_id=?",(session_id,))
+        if clean_members:
+            c.executemany("INSERT OR IGNORE INTO session_members(session_id,discord_id) VALUES(?,?)",[(session_id,u) for u in clean_members])
+        if game_type in {'TRPG','MADMIS','EVENT'}:
+            c.execute("UPDATE recruitments SET scenario_name=?,gm_discord_id=?,game_type=? WHERE id=?",
+                      (str(scenario_name).strip(),str(gm_discord_id or ''),str(game_type),recruitment_id))
+        else:
+            c.execute("UPDATE recruitments SET scenario_name=?,gm_discord_id=? WHERE id=?",
+                      (str(scenario_name).strip(),str(gm_discord_id or ''),recruitment_id))
+        first=c.execute("SELECT event_date,start_time FROM session_slots WHERE session_id=? ORDER BY event_date,start_time,id LIMIT 1",(session_id,)).fetchone()
+        if first:
+            c.execute("UPDATE sessions SET event_date=?,start_time=?,reminder_sent=0 WHERE id=?",
+                      (str(first['event_date']),str(first['start_time']),session_id))
+        return {'session_id':session_id,'old_date':old_date,'old_time':old_time,'new_date':str(new_event_date),'new_time':old_time}
+
+
 def hide_calendar_session(calendar_session_id: int):
     with db() as c:
         cur = c.execute(
@@ -1321,6 +1401,10 @@ def save_session_reschedule_slot_answers(reschedule_id: int, discord_id: str, an
             if (d,t) in allowed and val in {'YES','MAYBE'}:
                 c.execute("INSERT INTO session_reschedule_slot_answers(reschedule_id,discord_id,event_date,start_time,answer,updated_at) VALUES(?,?,?,?,?,?)",
                           (int(reschedule_id),str(discord_id),d,t,val,str(updated_at)))
+        # 全て「-」でも、回答操作を完了したこと自体を記録する。
+        c.execute("INSERT INTO session_reschedule_submissions(reschedule_id,discord_id,submitted_at) VALUES(?,?,?) "
+                  "ON CONFLICT(reschedule_id,discord_id) DO UPDATE SET submitted_at=excluded.submitted_at",
+                  (int(reschedule_id),str(discord_id),str(updated_at)))
     return True
 
 
