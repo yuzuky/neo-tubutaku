@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, temporary_v92_madamis_year_fix_done, apply_temporary_v92_madamis_year_fix, temporary_v93_madamis_year_fix_done, apply_temporary_v93_madamis_year_fix, temporary_v94_madamis_year_fix_done, apply_temporary_v94_madamis_year_fix, temporary_v95_madamis_year_fix_done, apply_temporary_v95_madamis_year_fix, temporary_v96_madamis_year_fix_done, apply_temporary_v96_madamis_year_fix, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, temporary_v92_madamis_year_fix_done, apply_temporary_v92_madamis_year_fix, temporary_v93_madamis_year_fix_done, apply_temporary_v93_madamis_year_fix, temporary_v94_madamis_year_fix_done, apply_temporary_v94_madamis_year_fix, temporary_v95_madamis_year_fix_done, apply_temporary_v95_madamis_year_fix, temporary_v96_madamis_year_fix_done, apply_temporary_v96_madamis_year_fix, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -627,6 +627,98 @@ def month_dates() -> list[str]:
         d += timedelta(days=1)
     return days
 
+
+
+def parse_schedule_slots(dates: list[str], default_time: str, per_day_time: bool, raw_json: str = "") -> list[tuple[str,str]]:
+    """高度な時間設定を開催slotへ正規化。通常モードは各日1slotだけ。"""
+    clean_dates=[str(d) for d in dict.fromkeys(dates) if re.fullmatch(r"\d{4}-\d{2}-\d{2}",str(d))]
+    raw_base=str(default_time or '').strip()
+    if not per_day_time:
+        base=raw_base if re.fullmatch(r"\d{2}:\d{2}",raw_base) else '未定'
+        return [(d,base) for d in clean_dates]
+    base=raw_base if re.fullmatch(r"\d{2}:\d{2}",raw_base) else '21:00'
+    try:
+        obj=json.loads(raw_json or '{}')
+    except Exception:
+        obj={}
+    out=[]
+    for d in clean_dates:
+        vals=obj.get(d,[]) if isinstance(obj,dict) else []
+        times=[]
+        if isinstance(vals,list):
+            for t in vals:
+                t=str(t or '').strip()
+                if re.fullmatch(r"\d{2}:\d{2}",t) and t not in times:
+                    times.append(t)
+        if not times:
+            times=[base]
+        for t in sorted(times):
+            out.append((d,t))
+    return out
+
+
+def advanced_schedule_controls_html() -> str:
+    """通常UIを保ち、ON時だけ日別の時間slot編集を展開する共通UI。"""
+    return r"""
+      <label class='checkbox-row' style='margin-top:14px'>
+        <input type='checkbox' id='perDayTime' name='per_day_time' value='1' onchange='refreshAdvancedSlots()'>
+        開催時間を日別に設定する
+      </label>
+      <p class='muted small' style='margin-top:6px'>ONにすると、選択した各日には最初に開始時間が1つ入り、必要な日だけ時間帯を追加できます。</p>
+      <input type='hidden' id='schedule_slots_json' name='schedule_slots_json' value='{}'>
+      <div id='advancedTimePanel' style='display:none;margin-top:12px'></div>
+      <script>
+      let advancedSlotMap={};
+      function advBaseTime(){
+        const x=document.querySelector('input[name="start_time"]');
+        return (x && x.value) ? x.value : '21:00';
+      }
+      function advDateLabel(ds){
+        const d=new Date(ds+'T00:00:00');
+        const w=['日','月','火','水','木','金','土'][d.getDay()];
+        return `${d.getMonth()+1}/${d.getDate()}(${w})`;
+      }
+      function syncAdvancedHidden(){
+        const h=document.getElementById('schedule_slots_json');
+        if(h) h.value=JSON.stringify(advancedSlotMap);
+      }
+      function refreshAdvancedSlots(){
+        const enabled=document.getElementById('perDayTime')?.checked;
+        const panel=document.getElementById('advancedTimePanel');
+        if(!panel) return;
+        const dates=(typeof selected!=='undefined' ? selected : []);
+        const keep={};
+        dates.forEach(d=>{
+          let xs=Array.isArray(advancedSlotMap[d]) ? advancedSlotMap[d].filter(Boolean) : [];
+          if(!xs.length) xs=[advBaseTime()];
+          keep[d]=[...new Set(xs)].sort();
+        });
+        advancedSlotMap=keep;
+        syncAdvancedHidden();
+        if(!enabled){ panel.style.display='none'; panel.innerHTML=''; return; }
+        panel.style.display='block';
+        if(!dates.length){ panel.innerHTML="<div class='muted small'>先に開催候補日を選択してください。</div>"; return; }
+        panel.innerHTML=dates.slice().sort().map(d=>{
+          const times=advancedSlotMap[d]||[advBaseTime()];
+          const rows=times.map(t=>`<div style="display:flex;align-items:center;gap:8px;padding:7px 0"><span style="font-weight:700">${t}〜</span>${times.length>1?`<button type="button" class="btn alt" style="width:auto;padding:5px 9px" onclick="removeAdvTime('${d}','${t}')">削除</button>`:''}</div>`).join('');
+          return `<div class="field-box no-icon" style="margin-bottom:10px"><div class="field-stack"><span class="field-label">${advDateLabel(d)}</span>${rows}<div id="addrow-${d}" style="display:none;gap:8px;align-items:center;margin-top:6px"><input type="time" id="addtime-${d}" value="${advBaseTime()}" style="flex:1"><button type="button" class="btn green" style="width:auto" onclick="commitAdvTime('${d}')">追加</button></div><button type="button" class="btn alt" style="margin-top:8px;width:100%" onclick="showAdvAdd('${d}')">＋ 時間を追加</button></div></div>`;
+        }).join('');
+      }
+      function showAdvAdd(d){ const r=document.getElementById('addrow-'+d); if(r) r.style.display='flex'; }
+      function commitAdvTime(d){
+        const i=document.getElementById('addtime-'+d); const t=i?.value;
+        if(!t) return;
+        advancedSlotMap[d]=[...new Set([...(advancedSlotMap[d]||[]),t])].sort();
+        refreshAdvancedSlots();
+      }
+      function removeAdvTime(d,t){
+        const xs=(advancedSlotMap[d]||[]).filter(x=>x!==t);
+        advancedSlotMap[d]=xs.length?xs:[advBaseTime()];
+        refreshAdvancedSlots();
+      }
+      document.addEventListener('change',e=>{ if(e.target && e.target.name==='start_time' && document.getElementById('perDayTime')?.checked){ refreshAdvancedSlots(); }});
+      </script>
+    """
 
 def require_login(request: Request) -> str:
     uid = request.session.get("user_id")
@@ -2688,8 +2780,10 @@ async def notify_availability_if_needed(rid: int):
     if is_simple_schedule(r) and not r["target_players"]:
         return
 
+    per_day_time, _ = recruitment_schedule_slots(rid)
+    source_candidates = candidate_slot_rows(rid) if per_day_time else candidate_rows(rid)
     candidates = [
-        x for x in candidate_rows(rid)
+        x for x in source_candidates
         if len(x["yes"]) >= int(r["min_players"])
     ]
     if not candidates:
@@ -2709,7 +2803,7 @@ async def notify_availability_if_needed(rid: int):
         return
 
     lines = [
-        f'・{x["date"]}：○ {len(x["yes"])}人'
+        (f'・{x["date"]} {x.get("time", "")}〜：○ {len(x["yes"])}人' if per_day_time else f'・{x["date"]}：○ {len(x["yes"])}人')
         for x in candidates
     ]
 
@@ -3191,60 +3285,64 @@ _reminders_restored = False
 
 
 async def session_reminder_task(session_id: int):
+    """v106: 1卓につき1task。未通知slotのうち次の1件だけ待ち、送信後に次へ進む。"""
     try:
-        with db() as c:
-            s = c.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not s or s["reminder_sent"]:
-            return
-
-        start = datetime.fromisoformat(f'{s["event_date"]}T{s["start_time"]}:00').replace(tzinfo=JST)
-        remind_at = start - timedelta(hours=1)
-        now = now_jst()
-
-        if now < remind_at:
-            await asyncio.sleep((remind_at - now).total_seconds())
-
-        with db() as c:
-            s = c.execute("SELECT * FROM sessions WHERE id=?", (session_id,)).fetchone()
-        if not s or s["reminder_sent"]:
-            return
-
-        now = now_jst()
-        start = datetime.fromisoformat(f'{s["event_date"]}T{s["start_time"]}:00').replace(tzinfo=JST)
-        if now >= start:
+        while True:
+            slots=get_session_slots(session_id)
+            pending=[x for x in slots if not int(x.get('reminder_sent') or 0)]
+            if not pending:
+                return
+            now=now_jst()
+            candidates=[]
+            for sl in pending:
+                try:
+                    start=datetime.fromisoformat(f"{sl['event_date']}T{sl['start_time']}:00").replace(tzinfo=JST)
+                except Exception:
+                    with db() as c:
+                        c.execute('UPDATE session_slots SET reminder_sent=1 WHERE id=?',(int(sl['id']),))
+                    continue
+                candidates.append((start,sl))
+            if not candidates:
+                return
+            candidates.sort(key=lambda x:x[0])
+            start,sl=candidates[0]
+            remind_at=start-timedelta(hours=1)
+            if now < remind_at:
+                await asyncio.sleep((remind_at-now).total_seconds())
+                continue
+            now=now_jst()
+            if now>=start:
+                with db() as c:
+                    c.execute('UPDATE session_slots SET reminder_sent=1 WHERE id=?',(int(sl['id']),))
+                continue
             with db() as c:
-                c.execute("UPDATE sessions SET reminder_sent=1 WHERE id=?", (session_id,))
-            return
-
-        with db() as c:
-            r = c.execute("SELECT * FROM recruitments WHERE id=?", (s["recruitment_id"],)).fetchone()
-        guild = bot.get_guild(GUILD_ID)
-        ch = guild.get_channel(int(s["channel_id"])) if guild and s["channel_id"] else None
-        if ch and r:
-            await ch.send(f'🔔 **当日リマインド**\n\n『{r["scenario_name"]}』\n本日{s["start_time"]}開始です！')
-        with db() as c:
-            c.execute("UPDATE sessions SET reminder_sent=1 WHERE id=?", (session_id,))
+                sess=c.execute('SELECT * FROM sessions WHERE id=?',(int(session_id),)).fetchone()
+                r=c.execute('SELECT * FROM recruitments WHERE id=?',(int(sess['recruitment_id']),)).fetchone() if sess else None
+            guild=bot.get_guild(GUILD_ID)
+            ch=guild.get_channel(int(sess['channel_id'])) if guild and sess and sess['channel_id'] else None
+            if ch and r:
+                await ch.send(f'🔔 **開始1時間前リマインド**\n\n『{r["scenario_name"]}』\n本日{sl["start_time"]}開始です！')
+            with db() as c:
+                c.execute('UPDATE session_slots SET reminder_sent=1 WHERE id=?',(int(sl['id']),))
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        log_error(f"session_reminder_task session_id={session_id}", e)
+        log_error(f'session_reminder_task session_id={session_id}',e)
     finally:
-        reminder_tasks.pop(session_id, None)
+        reminder_tasks.pop(session_id,None)
 
 
 def schedule_session_reminder(session_id: int):
-    old = reminder_tasks.get(session_id)
-    if old and not old.done():
-        old.cancel()
-    reminder_tasks[session_id] = asyncio.create_task(session_reminder_task(session_id))
+    old=reminder_tasks.get(session_id)
+    if old and not old.done(): old.cancel()
+    reminder_tasks[session_id]=asyncio.create_task(session_reminder_task(session_id))
 
 
 async def restore_reminder_tasks():
     with db() as c:
-        rows = c.execute("SELECT id FROM sessions WHERE reminder_sent=0").fetchall()
+        rows=c.execute('SELECT DISTINCT session_id FROM session_slots WHERE reminder_sent=0').fetchall()
     for row in rows:
-        schedule_session_reminder(int(row["id"]))
-
+        schedule_session_reminder(int(row['session_id']))
 
 
 async def post_achievement_notifications(new_rows):
@@ -5248,6 +5346,7 @@ async def simple_schedule_form(request: Request):
               <span><b style='color:#22c55e'>○</b> 開催できる</span>
               <span><b>-</b> 開催できない</span>
             </div>
+            {advanced_schedule_controls_html()}
           </div>
 
           <div class='form-section'>
@@ -5281,6 +5380,7 @@ async def simple_schedule_form(request: Request):
             s.textContent='○';
           }}
           document.getElementById('gm_dates').value=selected.join(',');
+          refreshAdvancedSlots();
         }}
         function tp(){{
           document.getElementById('pf').style.display=document.getElementById('pc').checked?'block':'none';
@@ -5350,6 +5450,9 @@ async def simple_schedule_submit(
     dates = sorted({x for x in gm_dates.split(',') if re.fullmatch(r"\d{4}-\d{2}-\d{2}", x)})
     if not dates:
         raise HTTPException(400, "開催可能日を1日以上選んでください")
+    adv_form = await request.form()
+    per_day_time = str(adv_form.get('per_day_time') or '') == '1'
+    schedule_slots = parse_schedule_slots(dates, start_time, per_day_time, str(adv_form.get('schedule_slots_json') or ''))
 
     allowed = {str(x.id): x for x in await visible_sendable_channels_for_user(str(uid))}
     ch = allowed.get(str(channel_id))
@@ -5382,6 +5485,7 @@ async def simple_schedule_submit(
             "INSERT INTO gm_dates(recruitment_id,event_date) VALUES(?,?)",
             [(rid, x) for x in dates],
         )
+    set_recruitment_schedule_slots(rid, schedule_slots, per_day_time)
 
     guild = bot.get_guild(GUILD_ID)
     targets = []
@@ -5597,6 +5701,7 @@ async def new_form(request: Request):
               <span><b style='color:#22c55e'>○</b> 開催できる</span>
               <span><b>-</b> 開催できない</span>
             </div>
+            {advanced_schedule_controls_html()}
           </div>
 
           <button id='recruitmentSubmitBtn' class='submit-btn' type='submit'>卓を作成する</button>
@@ -5637,6 +5742,7 @@ async def new_form(request: Request):
           }}
 
           document.getElementById('gm_dates').value=selected.join(',');
+          refreshAdvancedSlots();
         }}
 
         // 二重送信防止（画面側）
@@ -5708,6 +5814,9 @@ async def new_submit(
             400,
             "開催可能日を1日以上選んでください"
         )
+    adv_form = await request.form()
+    per_day_time = str(adv_form.get('per_day_time') or '') == '1'
+    schedule_slots = parse_schedule_slots(dates, start_time, per_day_time, str(adv_form.get('schedule_slots_json') or '')) if not pending_schedule else []
 
     if not deadline_date:
         deadline_date = (
@@ -5784,6 +5893,8 @@ async def new_submit(
                    ) VALUES(?,?,?)""",
                 [(rid, p, i) for i, p in enumerate(saved_images)],
             )
+    if not pending_schedule:
+        set_recruitment_schedule_slots(rid, schedule_slots, per_day_time)
     try:
         await create_waiting_channel(rid)
         await post_recruitment(rid)
@@ -6030,6 +6141,7 @@ async def recruitment_page(rid: int, request: Request):
 
     spectator = is_active_member(rid, uid, "spectator")
     dates = get_gm_dates(rid)
+    per_day_time, schedule_slots = recruitment_schedule_slots(rid)
     schedule_pending = bool(
         int(r["schedule_pending"] or 0)
     )
@@ -6092,7 +6204,7 @@ async def recruitment_page(rid: int, request: Request):
     pl_uids = [x["discord_id"] for x in active]
     weekday_jp = ["月","火","水","木","金","土","日"]
 
-    rows = candidate_rows(rid)
+    rows = candidate_slot_rows(rid) if per_day_time else candidate_rows(rid)
     # 回答状況に表示される各参加者について、その日に別の成立卓があるかを取得。
     # 自分自身の大きな○/△にも同じ警告を出せるようuidも含める。
     conflict_users = list(dict.fromkeys([*pl_uids, uid]))
@@ -6165,6 +6277,41 @@ async def recruitment_page(rid: int, request: Request):
             f"</div>"
         )
 
+    if per_day_time:
+        slot_all = recruitment_slot_answer_map(rid)
+        my_slot_answers = {
+            f"{d}|{t}": a
+            for (puid,d,t),a in slot_all.items()
+            if str(puid)==uid
+        }
+        js_obj = json.dumps(my_slot_answers, ensure_ascii=False)
+        cards=[]
+        for sl in schedule_slots:
+            ds=str(sl['event_date']); tm=str(sl['start_time']); key=f"{ds}|{tm}"
+            d=date.fromisoformat(ds)
+            day_label=f"{d.month}/{d.day}({weekday_jp[d.weekday()]}) {tm}〜"
+            current=my_slot_answers.get(key,'') if can_answer else ''
+            cls='yes' if current=='yes' else 'maybe' if current=='maybe' else ''
+            symbol='○' if current=='yes' else '△' if current=='maybe' else '-'
+            member_lines=[]
+            for puid in pl_uids:
+                a=slot_all.get((str(puid),ds,tm),'')
+                mark='○' if a=='yes' else '△' if a=='maybe' else '-'
+                mcls='yes' if a=='yes' else 'maybe' if a=='maybe' else 'no'
+                conflict_mark=("<span class='calendar-conflict-badge' title='この日は別の開催予定があります'>!</span>" if (str(puid),ds) in user_conflicts else '')
+                member_lines.append(
+                    f"<div class='answer-member'><span class='answer-member-name'>{esc(user_display(puid))}</span>"
+                    f"<span class='answer-member-result'>{conflict_mark}<span class='answer-member-symbol {mcls}'>{mark}</span></span></div>"
+                )
+            onclick=" onclick='togglePL(this)'" if can_answer else ''
+            clickable=' clickable' if can_answer else ''
+            cards.append(
+                f"<div class='answer-day {cls}{clickable}' data-date='{ds}' data-key='{esc(key)}'{onclick}>"
+                f"<div class='answer-day-head'>{day_label}</div><div class='answer-day-state'>{symbol}</div>"
+                f"<div class='answer-members'>{''.join(member_lines) if member_lines else '<div class=\"muted small\">未回答</div>'}</div></div>"
+            )
+        available=any(len(x['yes'])>=int(r['min_players']) for x in rows)
+
     schedule_block = ""
 
     if schedule_pending:
@@ -6228,7 +6375,7 @@ async def recruitment_page(rid: int, request: Request):
         }}
 
         function togglePL(el){{
-          const d=el.dataset.date;
+          const d=el.dataset.key||el.dataset.date;
           let s=ans[d]||'';
 
           s = s==='' ? 'yes' : (s==='yes' ? 'maybe' : '');
@@ -6433,6 +6580,7 @@ async def all_unavailable(rid: int, request: Request):
                 (rid, str(uid), "participant", 1, iso_now()),
             )
         c.execute("DELETE FROM answers WHERE recruitment_id=? AND discord_id=?",(rid,uid))
+        c.execute("DELETE FROM slot_answers WHERE recruitment_id=? AND discord_id=?",(rid,uid))
         c.execute("INSERT INTO answer_submissions(recruitment_id,discord_id,submitted_at) VALUES(?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET submitted_at=excluded.submitted_at",(rid,uid,iso_now()))
     return RedirectResponse(f"/r/{rid}", status_code=303)
 
@@ -6450,6 +6598,7 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
     if not is_active_member(rid, uid, "participant") and not simple_open_answer:
         raise HTTPException(403, "参加者のみ回答できます")
     allowed_dates = set(get_gm_dates(rid))
+    per_day_time, _schedule_slots = recruitment_schedule_slots(rid)
     try:
         obj = json.loads(answers)
     except json.JSONDecodeError:
@@ -6461,11 +6610,15 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
                 (rid, str(uid), "participant", 1, iso_now()),
             )
         c.execute("DELETE FROM answers WHERE recruitment_id=? AND discord_id=?", (rid, uid))
-        for d, a in obj.items():
-            if d in allowed_dates and a in {"yes","maybe"}:
-                c.execute("INSERT INTO answers(recruitment_id,discord_id,event_date,answer,updated_at) VALUES(?,?,?,?,?)", (rid, uid, d, a, iso_now()))
+        if not per_day_time:
+            for d, a in obj.items():
+                if d in allowed_dates and a in {"yes","maybe"}:
+                    c.execute("INSERT INTO answers(recruitment_id,discord_id,event_date,answer,updated_at) VALUES(?,?,?,?,?)", (rid, uid, d, a, iso_now()))
         c.execute("INSERT INTO comments(recruitment_id,discord_id,comment,updated_at) VALUES(?,?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET comment=excluded.comment,updated_at=excluded.updated_at", (rid, uid, comment.strip(), iso_now()))
         c.execute("INSERT INTO answer_submissions(recruitment_id,discord_id,submitted_at) VALUES(?,?,?) ON CONFLICT(recruitment_id,discord_id) DO UPDATE SET submitted_at=excluded.submitted_at",(rid,uid,iso_now()))
+
+    if per_day_time:
+        save_slot_answers(rid, uid, obj if isinstance(obj,dict) else {}, iso_now())
 
     # 回答保存後、初めて必要人数を満たした瞬間だけ通知
     try:
@@ -6504,183 +6657,152 @@ async def decide_form(rid: int, request: Request):
     if not r:
         raise HTTPException(404)
     if str(uid) != str(r["gm_discord_id"]):
-        return page(
-            "日程決定",
-            f"""
+        return page("日程決定", f"""
             <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
-            <div class='card' style='text-align:center'>
-              <h2>GMの方のみ表示できます</h2>
-              <p class='muted'>日程の決定はGMのみ行えます。</p>
-              <a class='btn alt' style='display:flex;justify-content:center;text-align:center;margin-top:18px' href='/r/{rid}'>日程調整ページへ戻る</a>
-            </div>
-            """,
-            request,
-        )
-    # 全員の回答を待たず、必要人数を満たす候補日があれば日程決定できる。
-    candidates = [x for x in candidate_rows(rid) if len(x["yes"]) >= int(r["min_players"])]
+            <div class='card' style='text-align:center'><h2>GMの方のみ表示できます</h2>
+            <p class='muted'>日程の決定はGMのみ行えます。</p></div>""", request)
+
+    per_day_time, _slots = recruitment_schedule_slots(rid)
+    if per_day_time:
+        raw = candidate_slot_rows(rid)
+    else:
+        raw = []
+        default_time = str(r["start_time"] or "未定")
+        for x in candidate_rows(rid):
+            raw.append({**x, "time": default_time, "key": f"{x['date']}|{default_time}"})
+    candidates=[x for x in raw if len(x['yes']) >= int(r['min_players'])]
     if not candidates:
-        return page(
-            "開催日決定",
-            f"""<a class='back-link' href='/r/{rid}'>‹ 戻る</a>
-            <div class='card'>
-              <p>現在、最小人数{r['min_players']}人を満たす日がありません。</p>
-              <a class='btn' href='/r/{rid}/reschedule'>再日程調整</a>
-            </div>""",
-            request,
-        )
-    cards = ""
+        return page("開催日決定", f"""<a class='back-link' href='/r/{rid}'>‹ 戻る</a>
+        <div class='card'><p>現在、最小人数{r['min_players']}人を満たす候補がありません。</p>
+        <a class='btn' href='/r/{rid}/reschedule'>再日程調整</a></div>""", request)
+
+    data=[]; cards=[]
     for x in candidates:
-        checkboxes = "".join(f"<label><input style='width:auto' type='checkbox' name='member_{x['date']}' value='{uid2}' checked> {esc(user_display(uid2))}</label>" for uid2 in x["yes"])
-        maybe = ", ".join(esc(user_display(u)) for u in x["maybe"]) or "なし"
-        over = len(x["yes"]) > r["max_players"]
-        cards += f"""<div class='candidate {'good' if not over else ''}'><label><input style='width:auto' type='radio' name='event_date' value='{x['date']}' required> <b>{x['date']}</b><div style='margin-top:6px'>○{len(x['yes'])}人 {'⚠ 最大人数超過' if over else ''}</div></label><div class='members'>{checkboxes}</div><p class='small muted'>△：{maybe}</p>{f'<button type="button" class="btn alt" onclick="randomPick(\'{x["date"]}\',{r["max_players"]})">この日からランダムで{r["max_players"]}人選ぶ</button>' if over else ''}</div>"""
-    candidate_dates_json = json.dumps(
-        [x["date"] for x in candidates],
-        ensure_ascii=False,
-    )
+        key=str(x['key']); d=str(x['date']); t=str(x['time'])
+        yes=[str(u) for u in x['yes']]; maybe=[str(u) for u in x['maybe']]
+        data.append({'key':key,'date':d,'time':t,'yes':yes})
+        maybe_names=', '.join(esc(user_display(u)) for u in maybe) or 'なし'
+        cards.append(f"""
+        <label class='candidate' style='display:block'>
+          <div style='display:flex;align-items:flex-start;gap:10px'>
+            <input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'>
+            <div style='flex:1'><b>{esc(d)} {esc(t)}〜</b><div style='margin-top:6px'>○{len(yes)}人</div>
+            <p class='small muted' style='margin-bottom:0'>△：{maybe_names}</p></div>
+          </div>
+        </label>""")
+    data_json=json.dumps(data,ensure_ascii=False)
+    member_names={u:user_display(u) for x in candidates for u in x['yes']}
+    member_json=json.dumps(member_names,ensure_ascii=False)
 
     return page("開催日決定", f"""
     <a class='back-link' href='/r/{rid}'>‹ 戻る</a>
-
-    <form class='card' method='post' action='/r/{rid}/decide'>
+    <form class='card' method='post' action='/r/{rid}/decide' onsubmit='return validateDecision()'>
       {csrf_field(request)}
       <h2>開催日を決定</h2>
+      <label class='round-number-row'><input type='number' min='1' name='round_no' value='1' required><span>陣目</span></label>
 
-      <label class='round-number-row'>
-        <input type='number'
-               min='1'
-               name='round_no'
-               value='1'
-               required>
-        <span>陣目</span>
+      <label class='checkbox-row' style='margin:16px 0 6px'>
+        <input type='checkbox' id='multiDay' name='multi_day' value='1' onchange='toggleMultiDay()'>
+        複数日に分けて開催する
       </label>
+      <p class='muted small' style='margin-top:0'>一つの卓を複数日に分けて開催する場合に使用します。選択したすべての日程を1つの卓・1つのチャンネルとして扱います。</p>
 
-      <input type='hidden'
-             id='selection_method'
-             name='selection_method'
-             value='manual'>
-
-      <button type='button'
-              class='btn alt random-session-btn'
-              onclick='randomSessionPick()'>
-        🎲 開催日と参加者をランダムで選ぶ
-      </button>
-
-      {cards}
+      <div id='candidateList'>{''.join(cards)}</div>
+      <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'>
+        <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div>
+        <p id='commonMemberNote' class='muted small' style='margin:8px 0 0'></p></div>
+      </div>
       {("<label class='checkbox-row'><input type='checkbox' name='create_session_channel' value='1'> 参加メンバーだけのDiscordチャンネルを作成する</label>" if is_simple_schedule(r) else "")}
       <div style='margin-top:26px;display:flex;justify-content:center'>
-        <button style='width:auto;min-width:280px;text-align:center'>
-          {"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}
-        </button>
+        <button style='width:auto;min-width:280px;text-align:center'>{"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}</button>
       </div>
     </form>
-
     <script>
-    const candidateDates={candidate_dates_json};
-
-    function shuffle(xs){{
-      return [...xs].sort(()=>Math.random()-.5);
+    const candidateData={data_json};
+    const memberNames={member_json};
+    const minPlayers={int(r['min_players'])};
+    const maxPlayers={int(r['max_players'])};
+    function choices(){{ return [...document.querySelectorAll('.slot-choice:checked')]; }}
+    function onSlotChoice(el){{
+      if(!document.getElementById('multiDay').checked && el.checked){{
+        document.querySelectorAll('.slot-choice').forEach(x=>{{if(x!==el)x.checked=false;}});
+      }}
+      updateCommon();
     }}
-
-    function clearAllMembers(){{
-      document.querySelectorAll(
-        'input[type="checkbox"][name^="member_"]'
-      ).forEach(x=>x.checked=false);
+    function toggleMultiDay(){{
+      if(!document.getElementById('multiDay').checked){{
+        const xs=choices(); xs.slice(1).forEach(x=>x.checked=false);
+      }}
+      updateCommon();
     }}
-
-    function randomPick(d,max){{
-      document.getElementById('selection_method').value='random';
-
-      let xs=[
-        ...document.querySelectorAll(
-          `[name="member_${{d}}"]`
-        )
-      ];
-
-      xs.forEach(x=>x.checked=false);
-
-      shuffle(xs)
-        .slice(0,Math.min(max,xs.length))
-        .forEach(x=>x.checked=true);
+    function updateCommon(){{
+      const keys=choices().map(x=>x.value);
+      const box=document.getElementById('commonMembers'); const list=document.getElementById('commonMemberList');
+      if(!keys.length){{box.style.display='none';list.innerHTML='';return;}}
+      let common=null;
+      keys.forEach(k=>{{ const row=candidateData.find(x=>x.key===k); const ys=new Set(row?row.yes:[]); common=common===null?ys:new Set([...common].filter(x=>ys.has(x))); }});
+      const ids=[...(common||new Set())]; box.style.display='block';
+      list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;align-items:center;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('') || '<div class="warn">共通して○の参加者がいません。</div>';
+      document.getElementById('commonMemberNote').textContent=`選択中の全日程に○の共通参加者：${{ids.length}}人`;
     }}
-
-    function randomSessionPick(){{
-      if(!candidateDates.length) return;
-
-      const d =
-        candidateDates[
-          Math.floor(Math.random()*candidateDates.length)
-        ];
-
-      const radio=document.querySelector(
-        `input[name="event_date"][value="${{d}}"]`
-      );
-
-      if(!radio) return;
-
-      radio.checked=true;
-      clearAllMembers();
-
-      const members=[
-        ...document.querySelectorAll(
-          `[name="member_${{d}}"]`
-        )
-      ];
-
-      const max={int(r["max_players"])};
-      const chosen=shuffle(members)
-        .slice(0,Math.min(max,members.length));
-
-      chosen.forEach(x=>x.checked=true);
-
-      document.getElementById(
-        'selection_method'
-      ).value='random';
-
-      radio.scrollIntoView({{
-        behavior:'smooth',
-        block:'center'
-      }});
+    function validateDecision(){{
+      const n=choices().length; const multi=document.getElementById('multiDay').checked;
+      if((!multi&&n!==1)||(multi&&n<2)){{alert(multi?'開催日を2つ以上選択してください。':'開催日を1つ選択してください。');return false;}}
+      const m=document.querySelectorAll('[name="member_id"]:checked').length;
+      if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください。`);return false;}}
+      return true;
     }}
     </script>
     """, request)
 
 
 @app.post("/r/{rid}/decide")
-async def decide_submit(
-    request: Request,
-    rid: int,
-    event_date: str = Form(...),
-    round_no: int = Form(...),
-    selection_method: str = Form("manual"),
-    create_session_channel: Optional[str] = Form(None),
-):
+async def decide_submit(request: Request, rid: int):
     uid = require_login(request)
     await require_csrf(request)
-    r = get_recruitment(rid)
-    if not r or uid != r["gm_discord_id"]:
-        raise HTTPException(403)
-    candidates = {x["date"]: x for x in candidate_rows(rid)}
-    if event_date not in candidates or len(candidates[event_date]["yes"]) < int(r["min_players"]):
-        raise HTTPException(400, "開催条件を満たさない日です")
-    form = await request.form()
-    selected = form.getlist(f"member_{event_date}")
-    allowed = set(candidates[event_date]["yes"])
-    selected = list(dict.fromkeys([str(x) for x in selected if str(x) in allowed]))
-    min_sel,max_sel=int(r["min_players"]),int(r["max_players"])
-    if is_simple_schedule(r) and not r["target_players"]: min_sel,max_sel=1,len(allowed)
-    if not (min_sel <= len(selected) <= max_sel): raise HTTPException(400,f"参加者を{min_sel}〜{max_sel}人選択してください")
+    r=get_recruitment(rid)
+    if not r or str(uid)!=str(r['gm_discord_id']): raise HTTPException(403)
+    form=await request.form()
+    try: round_no=int(form.get('round_no') or 1)
+    except Exception: round_no=1
+    multi_day=str(form.get('multi_day') or '')=='1'
+    selected_keys=[str(x) for x in form.getlist('selected_slot')]
+    per_day_time,_=recruitment_schedule_slots(rid)
+    if per_day_time:
+        raw=candidate_slot_rows(rid)
+    else:
+        default_time=str(r['start_time'] or '未定')
+        raw=[{**x,'time':default_time,'key':f"{x['date']}|{default_time}"} for x in candidate_rows(rid)]
+    cmap={str(x['key']):x for x in raw if len(x['yes'])>=int(r['min_players'])}
+    selected_keys=list(dict.fromkeys(k for k in selected_keys if k in cmap))
+    if (not multi_day and len(selected_keys)!=1) or (multi_day and len(selected_keys)<2):
+        raise HTTPException(400,'開催日の選択を確認してください')
+    common=None
+    for k in selected_keys:
+        ys=set(str(u) for u in cmap[k]['yes'])
+        common=ys if common is None else common & ys
+    common=common or set()
+    selected=list(dict.fromkeys(str(x) for x in form.getlist('member_id') if str(x) in common))
+    min_sel,max_sel=int(r['min_players']),int(r['max_players'])
+    if is_simple_schedule(r) and not r['target_players']: min_sel,max_sel=1,max(1,len(common))
+    if not (min_sel<=len(selected)<=max_sel):
+        raise HTTPException(400,f'参加者を{min_sel}〜{max_sel}人選択してください')
+    slots=[(str(cmap[k]['date']),str(cmap[k]['time'])) for k in selected_keys]
+    slots.sort()
+    event_date,start_time=slots[0]
+
     with db() as c:
-        existing = c.execute("SELECT 1 FROM sessions WHERE recruitment_id=? AND round_no=?", (rid, round_no)).fetchone()
-        if existing:
-            raise HTTPException(400, "その陣数はすでに使われています")
-        cur = c.execute("INSERT INTO sessions(recruitment_id,round_no,event_date,start_time,created_at) VALUES(?,?,?,?,?)", (rid, round_no, event_date, r["start_time"], iso_now()))
-        sid = cur.lastrowid
-        c.executemany("INSERT INTO session_members(session_id,discord_id) VALUES(?,?)", [(sid, u) for u in selected])
+        if c.execute('SELECT 1 FROM sessions WHERE recruitment_id=? AND round_no=?',(rid,round_no)).fetchone():
+            raise HTTPException(400,'その陣数はすでに使われています')
+        cur=c.execute('INSERT INTO sessions(recruitment_id,round_no,event_date,start_time,created_at) VALUES(?,?,?,?,?)',(rid,round_no,event_date,start_time,iso_now()))
+        sid=int(cur.lastrowid)
+        c.executemany('INSERT INTO session_members(session_id,discord_id) VALUES(?,?)',[(sid,u) for u in selected])
+    set_session_slots(sid,slots,iso_now())
+
     try:
         guild=bot.get_guild(GUILD_ID)
-        if not guild: raise RuntimeError("Guildが見つかりません")
-        ch=None; should_create=(not is_simple_schedule(r)) or bool(create_session_channel)
+        if not guild: raise RuntimeError('Guildが見つかりません')
+        ch=None; should_create=(not is_simple_schedule(r)) or bool(form.get('create_session_channel'))
         if should_create:
             category=guild.get_channel(SESSION_CATEGORY_ID); gm=await fetch_member(guild,uid)
             overwrites={guild.default_role:discord.PermissionOverwrite(view_channel=False),guild.me:discord.PermissionOverwrite(view_channel=True,send_messages=True,manage_channels=True),gm:discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)}
@@ -6692,108 +6814,43 @@ async def decide_submit(
                 for sp in spectators:
                     member=await fetch_member(guild,sp[0])
                     if member: overwrites[member]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
-            suffix=f"-{round_no}陣"
-            ch=await guild.create_text_channel(
-                safe_channel_name(f'{r["scenario_name"]}{suffix}'),
-                category=category,
-                overwrites=overwrites,
-                topic=f"つぶ卓 成立 ID:{sid}"
-            )
-            mentions="\n".join(f"・<@{x}>" for x in selected)
-            gm_label=r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else f"<@{uid}>"
-            time_text="未定" if r["start_time"]=="未定" else f'{r["start_time"]}〜'
-            heading=f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**'
-            role_label = "主催" if r["game_type"] == "EVENT" else "GM"
-            manage_text = "" if is_simple_schedule(r) else (
-                f"\n\n日程変更・開催中止は以下のリンクよりお願いします！（GM専用）\n{BASE_URL}/session/{sid}/manage"
-            )
-            await send_long(
-                ch,
-                f'{heading}\n\n開催日：**{event_date}**\n開催時間：**{time_text}**\n\n{role_label}：{gm_label}\n参加者：\n{mentions}{manage_text}'
-            )
+            ch=await guild.create_text_channel(safe_channel_name(f'{r["scenario_name"]}-{round_no}陣'),category=category,overwrites=overwrites,topic=f'つぶ卓 成立 ID:{sid}')
+            mentions='\n'.join(f'・<@{x}>' for x in selected)
+            gm_label=r['gm_name_override'] if is_simple_schedule(r) and r['gm_name_override'] else f'<@{uid}>'
+            role_label='主催' if r['game_type']=='EVENT' else 'GM'
+            slot_lines='\n'.join(f'・{d} {t}〜' for d,t in slots)
+            manage_text='' if is_simple_schedule(r) else f'\n\n日程変更・開催中止は以下のリンクよりお願いします！（GM専用）\n{BASE_URL}/session/{sid}/manage'
+            await send_long(ch,f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日時：\n{slot_lines}\n\n{role_label}：{gm_label}\n参加者：\n{mentions}{manage_text}')
 
-        # 日程調整チャンネルにも簡易通知（常にsilent）
-        waiting_ch = None
-
-        if r["waiting_channel_id"]:
-            waiting_ch = guild.get_channel(
-                int(r["waiting_channel_id"])
-            )
-
+        waiting_ch=None
+        if r['waiting_channel_id']:
+            waiting_ch=guild.get_channel(int(r['waiting_channel_id']))
             if not waiting_ch:
-                try:
-                    waiting_ch = await guild.fetch_channel(
-                        int(r["waiting_channel_id"])
-                    )
-                except Exception:
-                    waiting_ch = None
-
+                try: waiting_ch=await guild.fetch_channel(int(r['waiting_channel_id']))
+                except Exception: waiting_ch=None
         if waiting_ch:
-            member_mentions = "、".join(
-                f"<@{x}>"
-                for x in selected
-            )
+            member_mentions='、'.join(f'<@{x}>' for x in selected)
+            slot_lines='\n'.join(f'・**{d} {t}〜**' for d,t in slots)
+            label=f"✅ **{r['scenario_name']} の開催日時が決定しました**" if is_simple_schedule(r) else f'✅ **{round_no}陣の開催日時が決定しました**'
+            await waiting_ch.send(f'{label}\n{slot_lines}\n参加者：{member_mentions}',silent=True)
 
-            if is_simple_schedule(r):
-                tt="" if r["start_time"]=="未定" else f" {r['start_time']}〜"
-                waiting_msg=f"✅ **{r['scenario_name']} の開催日が決定しました**\n開催日：**{event_date}{tt}**\n参加者：{member_mentions}"
-            else:
-                waiting_msg=(f"✅ **{round_no}陣の開催が決定しました**\n" f"開催日：**{event_date} {r['start_time']}〜**\n" f"参加者：{member_mentions}")
-
-            if selection_method == "random":
-                waiting_msg += (
-                    "\n※開催日・参加者はランダムで選出しました。"
-                )
-
-            await waiting_ch.send(
-                waiting_msg,
-                silent=True,
-            )
-
+        reminder_channel_id = str(ch.id) if ch else (str(waiting_ch.id) if waiting_ch else None)
         with db() as c:
-            c.execute(
-                "UPDATE sessions SET channel_id=? WHERE id=?",
-                (str(ch.id) if ch else None, sid),
-            )
-            c.execute(
-                "UPDATE recruitments SET status='CONFIRMED' WHERE id=?",
-                (rid,),
-            )
-
-        # 成立卓を募集データとは別の永久履歴DBへ保存。
-        # recruitments/sessionsが90日後に削除されてもカレンダーには残る。
-        try:
-            archive_confirmed_session(
-                source_session_id=sid,
-                source_recruitment_id=rid,
-                game_type=r["game_type"],
-                scenario_name=r["scenario_name"],
-                event_date=event_date,
-                start_time=r["start_time"],
-                gm_discord_id=uid,
-                participant_ids=selected,
-                created_at=iso_now(),
-                calendar_visible=(
-                    bool(int(r["calendar_visible"] or 0))
-                    if r["game_type"] == "EVENT"
-                    else True
-                ),
-            )
-        except Exception as archive_error:
-            log_error(f"calendar_archive sid={sid}", archive_error)
-
-        if ch:
-            schedule_session_reminder(sid)
+            c.execute('UPDATE sessions SET channel_id=? WHERE id=?',(reminder_channel_id,sid))
+            c.execute("UPDATE recruitments SET status='CONFIRMED' WHERE id=?",(rid,))
+        cal_id=archive_confirmed_session(
+            source_session_id=sid,source_recruitment_id=rid,game_type=r['game_type'],scenario_name=r['scenario_name'],
+            event_date=event_date,start_time=start_time,gm_discord_id=uid,participant_ids=selected,created_at=iso_now(),
+            calendar_visible=(bool(int(r['calendar_visible'] or 0)) if r['game_type']=='EVENT' else True),slots=slots,
+        )
+        if reminder_channel_id: schedule_session_reminder(sid)
     except Exception as e:
-        log_error(f"decide_submit rid={rid}", e)
-        return page("Discordエラー", "<div class='card'><p class='warn'>Discord側でエラーが発生し、卓の作成に失敗しました。権限やチャンネル設定を確認するか、再度お試しください。詳細はサーバーログをご確認ください。</p></div>", request)
-    if is_simple_schedule(r):
-        tt="" if r["start_time"]=="未定" else f" {esc(r['start_time'])}〜"
-        return page("日程決定",f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} の開催日が決定しました！</h2><p>{event_date}{tt}</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>",request)
-    return page("卓成立", f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} {round_no}陣が成立しました！</h2><p>{event_date} {esc(r['start_time'])}〜</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>", request)
+        log_error(f'decide_submit rid={rid}',e)
+        return page('Discordエラー',"<div class='card'><p class='warn'>Discord側でエラーが発生し、卓の作成に失敗しました。権限やチャンネル設定を確認してください。</p></div>",request)
 
-
-
+    summary='<br>'.join(f'{esc(d)} {esc(t)}〜' for d,t in slots)
+    title='日程決定' if is_simple_schedule(r) else '卓成立'
+    return page(title,f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} {'' if is_simple_schedule(r) else str(round_no)+'陣'}が成立しました！</h2><p>{summary}</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>",request)
 
 
 def _session_change_needs_reconcile(old_event_date: str) -> bool:
@@ -6848,10 +6905,12 @@ async def session_manage(session_id: int, request: Request):
     if detail.get("cancelled_at"):
         return page("開催管理", "<div class='card'><h2>開催中止済みです</h2></div>", request)
     member_html = "".join(f"<li>{esc(x['display_name'])}</li>" for x in members)
+    current_slots=get_session_slots(session_id)
+    slot_html='<br>'.join(f"・{esc(x['event_date'])} {esc(x['start_time'])}〜" for x in current_slots)
     body=f"""
     <div class='card'>
       <h2>『{esc(detail['scenario_name'])}』{int(detail['round_no'])}陣</h2>
-      <p class='muted'>現在：{esc(detail['event_date'])} {esc(detail['start_time'])}〜</p>
+      <p class='muted'>現在：<br>{slot_html}</p>
       <ul>{member_html}</ul>
       <div style='display:grid;gap:10px;margin-top:16px'>
         <a class='btn' style='display:flex;align-items:center;justify-content:center;text-align:center' href='/session/{session_id}/reschedule/new'>再日程調整</a>
@@ -6864,346 +6923,162 @@ async def session_manage(session_id: int, request: Request):
 
 @app.get("/session/{session_id}/reschedule/new", response_class=HTMLResponse)
 async def session_reschedule_new(session_id: int, request: Request):
-    uid = request.session.get("user_id")
-    if not uid:
-        return RedirectResponse(f"/login?next=/session/{session_id}/reschedule/new")
-    detail, _ = session_management_detail(session_id)
-    if not detail:
-        raise HTTPException(404)
-    if str(uid) != str(detail["gm_discord_id"]):
-        raise HTTPException(403)
+    uid=request.session.get('user_id')
+    if not uid: return RedirectResponse(f'/login?next=/session/{session_id}/reschedule/new')
+    detail,_members=session_management_detail(session_id)
+    if not detail: raise HTTPException(404)
+    if str(uid)!=str(detail['gm_discord_id']): raise HTTPException(403)
     default_deadline=(now_jst().date()+timedelta(days=7)).isoformat()
-    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    weekday_jp=['月','火','水','木','金','土','日']
     cards=[]
     for ds in month_dates():
-        d=date.fromisoformat(ds)
-        label=f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
-        cards.append(
-            f'<div class="day" data-date="{ds}" onclick="toggleSessionGM(this)">'
-            f'<span>{label}</span><span class="state">-</span></div>'
-        )
-    return page("再日程調整", f"""
+        d=date.fromisoformat(ds); label=f'{d.month}/{d.day}({weekday_jp[d.weekday()]})'
+        cards.append(f'<div class="day" data-date="{ds}" onclick="toggleSessionGM(this)"><span>{label}</span><span class="state">-</span></div>')
+    return page('再日程調整',f"""
       <a class='back-link' href='/session/{session_id}/manage'>‹ 戻る</a>
       <div class='section-title'>再日程調整</div>
-
       <form class='form-shell' method='post'>
         {csrf_field(request)}
-
-        <div class='form-section compact'>
-          <div class='field-row'>
-            <label>
-              <div class='field-box no-icon'>
-                <div class='field-stack'>
-                  <span class='field-label'>開始時間</span>
-                  <input type='time' name='start_time' value='{esc(detail['start_time'] if detail['start_time']!='未定' else '21:00')}' required>
-                </div>
-              </div>
-            </label>
-            <label>
-              <div class='field-box no-icon'>
-                <div class='field-stack'>
-                  <span class='field-label'>回答期限</span>
-                  <input type='date' name='deadline' value='{default_deadline}' required>
-                </div>
-              </div>
-            </label>
-          </div>
-        </div>
-
-
-
+        <div class='form-section compact'><div class='field-row'>
+          <label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>開始時間</span><input type='time' name='start_time' value='{esc(detail['start_time'] if detail['start_time']!='未定' else '21:00')}' required></div></div></label>
+          <label><div class='field-box no-icon'><div class='field-stack'><span class='field-label'>回答期限</span><input type='date' name='deadline' value='{default_deadline}' required></div></div></label>
+        </div></div>
         <div class='create-date-heading'>開催候補日を選択（今月と来月末まで）</div>
         <input type='hidden' id='session_gm_dates' name='gm_dates'>
-
-        <div class='date-scroll'>
-          <div class='grid'>{''.join(cards)}</div>
-        </div>
-
-        <div class='legend'>
-          <span><b style='color:#22c55e'>○</b> 開催できる</span>
-          <span><b>-</b> 開催できない</span>
-        </div>
-
+        <div class='date-scroll'><div class='grid'>{''.join(cards)}</div></div>
+        <div class='legend'><span><b style='color:#22c55e'>○</b> 開催できる</span><span><b>-</b> 開催できない</span></div>
+        {advanced_schedule_controls_html()}
         <button class='submit-btn' type='submit'>再日程調整を開始する</button>
       </form>
-
       <script>
-      let sessionSelected=[];
+      let selected=[];
       function toggleSessionGM(el){{
-        const d=el.dataset.date;
-        const state=el.querySelector('.state');
-        if(sessionSelected.includes(d)){{
-          sessionSelected=sessionSelected.filter(x=>x!==d);
-          el.classList.remove('yes');
-          state.textContent='-';
-        }}else{{
-          sessionSelected.push(d);
-          el.classList.add('yes');
-          state.textContent='○';
-        }}
-        document.getElementById('session_gm_dates').value=sessionSelected.join(',');
+        const d=el.dataset.date, state=el.querySelector('.state');
+        if(selected.includes(d)){{selected=selected.filter(x=>x!==d);el.classList.remove('yes');state.textContent='-';}}
+        else{{selected.push(d);el.classList.add('yes');state.textContent='○';}}
+        document.getElementById('session_gm_dates').value=selected.join(',');
+        refreshAdvancedSlots();
       }}
       </script>
-    """, request)
+    """,request)
 
 
 @app.post("/session/{session_id}/reschedule/new")
-async def session_reschedule_new_submit(session_id: int, request: Request):
-    uid=require_login(request)
-    await require_csrf(request)
-    detail, _ = session_management_detail(session_id)
-    if not detail or str(uid)!=str(detail["gm_discord_id"]):
-        raise HTTPException(403)
+async def session_reschedule_new_submit(session_id:int,request:Request):
+    uid=require_login(request); await require_csrf(request)
+    detail,_=session_management_detail(session_id)
+    if not detail or str(uid)!=str(detail['gm_discord_id']): raise HTTPException(403)
     form=await request.form()
-    dates=[]
-    for raw in str(form.get("gm_dates") or "").split(","):
-        raw=str(raw or '').strip()
-        if raw:
-            try: date.fromisoformat(raw)
-            except Exception: continue
-            if raw not in dates:
-                dates.append(raw)
-    if not dates:
-        raise HTTPException(400,"候補日を1つ以上選択してください")
-    start_time=str(form.get("start_time") or detail["start_time"] or "21:00")
-    deadline=str(form.get("deadline") or "")
-    reschedule_id=create_session_reschedule(session_id,start_time,deadline,dates,iso_now())
+    start_time=str(form.get('start_time') or '21:00')
+    deadline=str(form.get('deadline') or '')
+    dates=sorted({d for d in str(form.get('gm_dates') or '').split(',') if re.fullmatch(r'\d{4}-\d{2}-\d{2}',d)})
+    if not dates: raise HTTPException(400,'開催可能日を選択してください')
+    per_day_time=str(form.get('per_day_time') or '')=='1'
+    slots=parse_schedule_slots(dates,start_time,per_day_time,str(form.get('schedule_slots_json') or ''))
+    reschedule_id=create_session_reschedule(session_id,start_time,deadline,dates,iso_now(),candidate_slots=slots,per_day_time=per_day_time)
     ch=await _session_channel(session_id)
     if ch:
-        await ch.send(
-            f"開催日の再調整を開始しました。\n以下から回答してください。\n{BASE_URL}/session-reschedule/{reschedule_id}",
-            silent=_session_feature_silent(),
-        )
-    return RedirectResponse(f"/session-reschedule/{reschedule_id}",303)
+        await ch.send(f'開催日の再調整を開始しました。\n以下から回答してください。\n{BASE_URL}/session-reschedule/{reschedule_id}',silent=_session_feature_silent())
+    return RedirectResponse(f'/session-reschedule/{reschedule_id}',303)
 
 
 @app.get("/session-reschedule/{reschedule_id}", response_class=HTMLResponse)
-async def session_reschedule_answer(reschedule_id: int, request: Request):
-    """成立後の再日程調整も、従来の再日程調整と同じ回答UIを使う。"""
-    uid = request.session.get("user_id")
-    if not uid:
-        return RedirectResponse(f"/login?next=/session-reschedule/{reschedule_id}")
-    uid = str(uid)
-    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
-    if not rs:
-        raise HTTPException(404)
-
-    member_ids = {str(x["discord_id"]) for x in members}
-    is_gm = uid == str(rs["gm_discord_id"])
-    if uid not in member_ids and not is_gm:
-        raise HTTPException(403, "この日程調整の参加者ではありません")
-
-    own = answers.get(uid, {})
-    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    pl_uids = [str(x["discord_id"]) for x in members]
-    user_conflicts = calendar_conflicts_for_users(list(dict.fromkeys([*pl_uids, uid])), dates)
-
-    cards = []
-    for ds in dates:
-        d = date.fromisoformat(ds)
-        day_label = f"{d.month}/{d.day}({weekday_jp[d.weekday()]})"
-        current = own.get(ds, "") if uid in member_ids else ""
-        cls = "yes" if current == "YES" else "maybe" if current == "MAYBE" else ""
-        symbol = "○" if current == "YES" else "△" if current == "MAYBE" else "-"
-
-        member_lines = []
+async def session_reschedule_answer(reschedule_id:int,request:Request):
+    uid=str(request.session.get('user_id') or '')
+    if not uid:return RedirectResponse(f'/login?next=/session-reschedule/{reschedule_id}')
+    rs,slots,members,answers,_per=session_reschedule_slot_detail(reschedule_id)
+    if not rs: raise HTTPException(404)
+    member_ids={str(x['discord_id']) for x in members}
+    is_gm=uid==str(rs['gm_discord_id'])
+    if uid not in member_ids and not is_gm: raise HTTPException(403,'この日程調整の参加者ではありません')
+    dates=sorted({str(x['event_date']) for x in slots})
+    user_conflicts=calendar_conflicts_for_users([str(x['discord_id']) for x in members],dates)
+    own={f"{d}|{t}":a for (puid,d,t),a in answers.items() if puid==uid}
+    cards=[]; weekday_jp=['月','火','水','木','金','土','日']
+    for sl in slots:
+        ds,tm=str(sl['event_date']),str(sl['start_time']); key=f'{ds}|{tm}'
+        d=date.fromisoformat(ds); label=f'{d.month}/{d.day}({weekday_jp[d.weekday()]}) {tm}〜'
+        current=own.get(key,''); cls='yes' if current=='YES' else 'maybe' if current=='MAYBE' else ''; symbol='○' if current=='YES' else '△' if current=='MAYBE' else '-'
+        lines=[]
         for m in members:
-            puid = str(m["discord_id"])
-            a = answers.get(puid, {}).get(ds, "")
-            mark = "○" if a == "YES" else "△" if a == "MAYBE" else "-"
-            mcls = "yes" if a == "YES" else "maybe" if a == "MAYBE" else "no"
-            conflict_mark = (
-                "<span class='calendar-conflict-badge' title='この日は別の開催予定があります'>!</span>"
-                if (puid, ds) in user_conflicts else ""
-            )
-            member_lines.append(
-                f"<div class='answer-member'>"
-                f"<span class='answer-member-name'>{esc(m['display_name'])}</span>"
-                f"<span class='answer-member-result'>{conflict_mark}"
-                f"<span class='answer-member-symbol {mcls}'>{mark}</span></span></div>"
-            )
-
-        onclick = " onclick='togglePL(this)'" if uid in member_ids and rs["status"] == "OPEN" else ""
-        clickable = " clickable" if onclick else ""
-        cards.append(
-            f"<div class='answer-day {cls}{clickable}' data-date='{ds}'{onclick}>"
-            f"<div class='answer-day-head'>{day_label}</div>"
-            f"<div class='answer-day-state'>{symbol}</div>"
-            f"<div class='answer-members'>{''.join(member_lines)}</div></div>"
-        )
-
-    js_obj = json.dumps(own, ensure_ascii=False)
-    answer_block = ""
-    if uid in member_ids and rs["status"] == "OPEN":
-        answer_block = f"""
-        <div class='answer-title'>日程回答</div>
-        <div class='answer-legend'>
-          <span><b class='yes-mark'>○</b>：参加可能</span>
-          <span><b class='maybe-mark'>△</b>：未定</span>
-          <span><b class='no-mark'>-</b>：無理</span>
-          <span><b class='conflict-legend-mark'>!</b>：すでに開催予定あり</span>
-        </div>
-        <form method='post' action='/session-reschedule/{reschedule_id}'>
-          {csrf_field(request)}
-          <input type='hidden' name='answers' id='answers'>
-          <div class='answer-grid status-grid'>{''.join(cards)}</div>
-          <button class='save-answer' type='submit'>回答を保存</button>
-        </form>
-        <script>
-        let ans={js_obj};
-        function refreshHidden(){{
-          document.getElementById('answers').value=JSON.stringify(ans);
-        }}
-        function togglePL(el){{
-          const d=el.dataset.date;
-          let s=ans[d]||'';
-          s = s==='' ? 'YES' : (s==='YES' ? 'MAYBE' : '');
-          if(s) ans[d]=s; else delete ans[d];
-          el.classList.remove('yes','maybe');
-          if(s==='YES') el.classList.add('yes');
-          if(s==='MAYBE') el.classList.add('maybe');
-          el.querySelector('.answer-day-state').textContent = s==='YES' ? '○' : (s==='MAYBE' ? '△' : '-');
-          refreshHidden();
-        }}
-        refreshHidden();
-        </script>
-        """
-    else:
-        answer_block = f"<div class='answer-grid status-grid'>{''.join(cards)}</div>"
-
-    yes_candidates = [d for d in dates if sum(1 for m in members if answers.get(str(m['discord_id']), {}).get(d) == 'YES') >= int(rs.get('min_players') or 1)]
-    gm_action = ""
-    if is_gm and rs["status"] == "OPEN" and yes_candidates:
-        gm_action = f"""
-        <div style='margin-top:18px'>
-          <a class='btn green' style='display:flex;justify-content:center;text-align:center' href='/session-reschedule/{reschedule_id}/decide'>開催日を決定</a>
-        </div>"""
-
-    return page("再日程調整", f"""
-      <a class='back-link' href='/session/{int(rs['session_id'])}/manage'>‹ 戻る</a>
-      <div class='section-title'>再日程調整</div>
-      <div class='card'>
-        <h2>『{esc(rs['scenario_name'])}』{int(rs['round_no'])}陣</h2>
-        <p class='muted'>開催時間：{esc(rs['start_time'])}〜</p>
-        {answer_block}
-        {gm_action}
-      </div>
-    """, request)
+            puid=str(m['discord_id']); a=answers.get((puid,ds,tm),''); mark='○' if a=='YES' else '△' if a=='MAYBE' else '-'; mcls='yes' if a=='YES' else 'maybe' if a=='MAYBE' else 'no'
+            conflict="<span class='calendar-conflict-badge'>!</span>" if (puid,ds) in user_conflicts else ''
+            lines.append(f"<div class='answer-member'><span class='answer-member-name'>{esc(m['display_name'])}</span><span class='answer-member-result'>{conflict}<span class='answer-member-symbol {mcls}'>{mark}</span></span></div>")
+        onclick=" onclick='togglePL(this)'" if uid in member_ids and rs['status']=='OPEN' else ''
+        cards.append(f"<div class='answer-day {cls}{' clickable' if onclick else ''}' data-key='{esc(key)}'{onclick}><div class='answer-day-head'>{label}</div><div class='answer-day-state'>{symbol}</div><div class='answer-members'>{''.join(lines)}</div></div>")
+    js=json.dumps(own,ensure_ascii=False)
+    block=f"<div class='answer-grid status-grid'>{''.join(cards)}</div>"
+    if uid in member_ids and rs['status']=='OPEN':
+        block=f"""
+        <div class='answer-title'>日程回答</div><div class='answer-legend'><span><b class='yes-mark'>○</b>：参加可能</span><span><b class='maybe-mark'>△</b>：未定</span><span><b class='no-mark'>-</b>：無理</span><span><b class='conflict-legend-mark'>!</b>：すでに開催予定あり</span></div>
+        <form method='post' action='/session-reschedule/{reschedule_id}'>{csrf_field(request)}<input type='hidden' name='answers' id='answers'><div class='answer-grid status-grid'>{''.join(cards)}</div><button class='save-answer' type='submit'>回答を保存</button></form>
+        <script>let ans={js};function refreshHidden(){{document.getElementById('answers').value=JSON.stringify(ans);}}function togglePL(el){{const k=el.dataset.key;let v=ans[k]||'';v=v===''?'YES':(v==='YES'?'MAYBE':'');if(v)ans[k]=v;else delete ans[k];el.classList.remove('yes','maybe');if(v==='YES')el.classList.add('yes');if(v==='MAYBE')el.classList.add('maybe');el.querySelector('.answer-day-state').textContent=v==='YES'?'○':(v==='MAYBE'?'△':'-');refreshHidden();}}refreshHidden();</script>"""
+    minp=int(rs.get('min_players') or 1)
+    available=any(sum(1 for m in members if answers.get((str(m['discord_id']),str(sl['event_date']),str(sl['start_time'])))=='YES')>=minp for sl in slots)
+    gm_action=f"<div style='margin-top:18px'><a class='btn green' style='display:flex;justify-content:center;text-align:center' href='/session-reschedule/{reschedule_id}/decide'>開催日を決定</a></div>" if is_gm and rs['status']=='OPEN' and available else ''
+    return page('再日程調整',f"<a class='back-link' href='/session/{int(rs['session_id'])}/manage'>‹ 戻る</a><div class='section-title'>再日程調整</div><div class='card'><h2>『{esc(rs['scenario_name'])}』{int(rs['round_no'])}陣</h2>{block}{gm_action}</div>",request)
 
 
 @app.post("/session-reschedule/{reschedule_id}")
-async def session_reschedule_answer_submit(reschedule_id: int, request: Request):
-    uid = str(require_login(request))
-    await require_csrf(request)
-    rs, dates, members, _ = session_reschedule_detail(reschedule_id)
-    if not rs or uid not in {str(x['discord_id']) for x in members}:
-        raise HTTPException(403)
-    form = await request.form()
-    try:
-        raw = json.loads(str(form.get("answers") or "{}"))
-    except Exception:
-        raw = {}
-    data = {str(d): str(v) for d, v in raw.items() if str(d) in set(dates) and str(v) in {"YES", "MAYBE"}}
-    save_session_reschedule_answers(reschedule_id, uid, data, iso_now())
-    return RedirectResponse(f"/session-reschedule/{reschedule_id}", 303)
+async def session_reschedule_answer_submit(reschedule_id:int,request:Request):
+    uid=str(require_login(request)); await require_csrf(request)
+    rs,slots,members,_answers,_per=session_reschedule_slot_detail(reschedule_id)
+    if not rs or uid not in {str(x['discord_id']) for x in members}: raise HTTPException(403)
+    form=await request.form()
+    try: raw=json.loads(str(form.get('answers') or '{}'))
+    except Exception: raw={}
+    save_session_reschedule_slot_answers(reschedule_id,uid,raw if isinstance(raw,dict) else {},iso_now())
+    return RedirectResponse(f'/session-reschedule/{reschedule_id}',303)
 
 
 @app.get("/session-reschedule/{reschedule_id}/decide", response_class=HTMLResponse)
-async def session_reschedule_decide(reschedule_id: int, request: Request):
-    """従来の『開催日を決定』と同じ、日付＋PL選択UI。"""
-    uid = str(request.session.get("user_id") or "")
-    if not uid:
-        return RedirectResponse(f"/login?next=/session-reschedule/{reschedule_id}/decide")
-    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
-    if not rs or uid != str(rs["gm_discord_id"]):
-        raise HTTPException(403)
-
-    min_players = int(rs.get("min_players") or 1)
-    max_players = int(rs.get("max_players") or len(members) or 1)
-    candidates = []
-    for d in dates:
-        yes = [m for m in members if answers.get(str(m["discord_id"]), {}).get(d) == "YES"]
-        maybe = [m for m in members if answers.get(str(m["discord_id"]), {}).get(d) == "MAYBE"]
-        if len(yes) >= min_players:
-            candidates.append((d, yes, maybe))
-
-    if not candidates:
-        return page("開催日決定", f"""
-          <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
-          <div class='card'><p>現在、最小人数{min_players}人を満たす日がありません。</p></div>
-        """, request)
-
-    cards = []
-    for d, yes, maybe in candidates:
-        checks = "".join(
-            f"<label><input style='width:auto' type='checkbox' name='member_{d}' value='{esc(str(m['discord_id']))}' checked> {esc(m['display_name'])}</label>"
-            for m in yes
-        )
-        maybe_names = ", ".join(esc(m["display_name"]) for m in maybe) or "なし"
-        over = len(yes) > max_players
-        random_btn = (
-            f"<button type='button' class='btn alt' onclick=\"randomPick('{d}',{max_players})\">この日からランダムで{max_players}人選ぶ</button>"
-            if over else ""
-        )
-        cards.append(f"""
-          <div class='candidate {'good' if not over else ''}'>
-            <label><input style='width:auto' type='radio' name='event_date' value='{d}' required> <b>{d}</b>
-              <div style='margin-top:6px'>○{len(yes)}人 {'⚠ 最大人数超過' if over else ''}</div>
-            </label>
-            <div class='members'>{checks}</div>
-            <p class='small muted'>△：{maybe_names}</p>
-            {random_btn}
-          </div>
-        """)
-
-    return page("開催日決定", f"""
+async def session_reschedule_decide(reschedule_id:int,request:Request):
+    uid=str(request.session.get('user_id') or '')
+    if not uid:return RedirectResponse(f'/login?next=/session-reschedule/{reschedule_id}/decide')
+    rs,slots,members,answers,_per=session_reschedule_slot_detail(reschedule_id)
+    if not rs or uid!=str(rs['gm_discord_id']): raise HTTPException(403)
+    minp=int(rs.get('min_players') or 1); maxp=int(rs.get('max_players') or len(members) or 1)
+    data=[]; cards=[]; names={str(m['discord_id']):str(m['display_name']) for m in members}
+    for sl in slots:
+        d,t=str(sl['event_date']),str(sl['start_time']); key=f'{d}|{t}'; yes=[str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='YES']
+        if len(yes)<minp: continue
+        data.append({'key':key,'date':d,'time':t,'yes':yes})
+        cards.append(f"<label class='candidate' style='display:block'><div style='display:flex;gap:10px'><input class='slot-choice' style='width:auto' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div><b>{d} {t}〜</b><div>○{len(yes)}人</div></div></div></label>")
+    if not data:return page('開催日決定',f"<a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a><div class='card'><p>現在、最小人数{minp}人を満たす候補がありません。</p></div>",request)
+    return page('開催日決定',f"""
       <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
-      <form class='card' method='post' action='/session-reschedule/{reschedule_id}/confirm'>
-        {csrf_field(request)}
-        <h2>開催日を決定</h2>
-        {''.join(cards)}
-        <div style='margin-top:26px;display:flex;justify-content:center'>
-          <button style='width:auto;min-width:280px;text-align:center'>この内容で卓を成立させる</button>
-        </div>
-      </form>
-      <script>
-      function shuffle(xs){{ return [...xs].sort(()=>Math.random()-.5); }}
-      function randomPick(d,max){{
-        let xs=[...document.querySelectorAll(`[name="member_${{d}}"]`)];
-        xs.forEach(x=>x.checked=false);
-        shuffle(xs).slice(0,Math.min(max,xs.length)).forEach(x=>x.checked=true);
-      }}
-      </script>
-    """, request)
+      <form class='card' method='post' action='/session-reschedule/{reschedule_id}/confirm' onsubmit='return validateDecision()'>{csrf_field(request)}<h2>開催日を決定</h2>
+      <label class='checkbox-row'><input type='checkbox' id='multiDay' name='multi_day' value='1' onchange='toggleMultiDay()'> 複数日に分けて開催する</label>
+      <p class='muted small'>選択したすべての日程を同じ参加者・同じ○陣で開催します。</p>{''.join(cards)}
+      <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'><div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div><p id='commonMemberNote' class='muted small'></p></div></div>
+      <div style='margin-top:26px;display:flex;justify-content:center'><button style='width:auto;min-width:280px'>この内容で卓を成立させる</button></div></form>
+      <script>const candidateData={json.dumps(data,ensure_ascii=False)};const memberNames={json.dumps(names,ensure_ascii=False)};const minPlayers={minp},maxPlayers={maxp};function choices(){{return [...document.querySelectorAll('.slot-choice:checked')];}}function onSlotChoice(el){{if(!document.getElementById('multiDay').checked&&el.checked)document.querySelectorAll('.slot-choice').forEach(x=>{{if(x!==el)x.checked=false;}});updateCommon();}}function toggleMultiDay(){{if(!document.getElementById('multiDay').checked)choices().slice(1).forEach(x=>x.checked=false);updateCommon();}}function updateCommon(){{const keys=choices().map(x=>x.value),box=document.getElementById('commonMembers'),list=document.getElementById('commonMemberList');if(!keys.length){{box.style.display='none';return;}}let common=null;keys.forEach(k=>{{const row=candidateData.find(x=>x.key===k),ys=new Set(row?row.yes:[]);common=common===null?ys:new Set([...common].filter(x=>ys.has(x)));}});const ids=[...(common||new Set())];box.style.display='block';list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('');document.getElementById('commonMemberNote').textContent=`選択中の全日程に○：${{ids.length}}人`;}}function validateDecision(){{const n=choices().length,multi=document.getElementById('multiDay').checked,m=document.querySelectorAll('[name="member_id"]:checked').length;if((!multi&&n!==1)||(multi&&n<2)){{alert(multi?'2日程以上選択してください':'1日程選択してください');return false;}}if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください`);return false;}}return true;}}</script>
+    """,request)
 
 
 @app.post("/session-reschedule/{reschedule_id}/confirm")
-async def session_reschedule_confirm(reschedule_id: int, request: Request):
-    uid = str(require_login(request))
-    await require_csrf(request)
-    rs, dates, members, answers = session_reschedule_detail(reschedule_id)
-    if not rs or uid != str(rs["gm_discord_id"]):
-        raise HTTPException(403)
-    form = await request.form()
-    event_date = str(form.get("event_date") or "")
-    if event_date not in dates:
-        raise HTTPException(400)
-    selected = [str(x) for x in form.getlist(f"member_{event_date}")]
-    result = confirm_session_reschedule(reschedule_id, event_date, str(rs["start_time"]), selected)
-    if not result:
-        raise HTTPException(400, "参加人数または選択内容を確認してください")
+async def session_reschedule_confirm(reschedule_id:int,request:Request):
+    uid=str(require_login(request)); await require_csrf(request)
+    rs,slots,members,answers,_per=session_reschedule_slot_detail(reschedule_id)
+    if not rs or uid!=str(rs['gm_discord_id']): raise HTTPException(403)
+    form=await request.form(); multi=str(form.get('multi_day') or '')=='1'; keys=[str(x) for x in form.getlist('selected_slot')]
+    smap={f"{x['event_date']}|{x['start_time']}":(str(x['event_date']),str(x['start_time'])) for x in slots}
+    chosen=[smap[k] for k in dict.fromkeys(keys) if k in smap]
+    if (not multi and len(chosen)!=1) or (multi and len(chosen)<2): raise HTTPException(400,'開催日時の選択を確認してください')
+    selected=[str(x) for x in form.getlist('member_id')]
+    result=confirm_session_reschedule_slots(reschedule_id,chosen,selected)
+    if not result: raise HTTPException(400,'参加人数または選択内容を確認してください')
     try:
-        _session_change_reconcile_if_needed(result["old_date"])
-    except Exception as e:
-        log_error(f"session_reschedule_reconcile id={reschedule_id}", e)
-    ch = await _session_channel(int(rs["session_id"]))
+        old_dates=list(dict.fromkeys(d for d,_ in result['old_slots']))
+        target=next((d for d in old_dates if _session_change_needs_reconcile(d)),None)
+        if target:_session_change_reconcile_if_needed(target)
+    except Exception as e: log_error(f'session_reschedule_reconcile id={reschedule_id}',e)
+    ch=await _session_channel(int(rs['session_id']))
     if ch:
-        await ch.send(
-            f"開催日が変更されました！\n\n変更前：{result['old_date']} {result['old_time']}〜\n変更後：{result['new_date']} {result['new_time']}〜",
-            silent=_session_feature_silent(),
-        )
-    schedule_session_reminder(int(rs["session_id"]))
-    return RedirectResponse(f"/session/{int(rs['session_id'])}/manage", 303)
+        old='\n'.join(f'・{d} {t}〜' for d,t in result['old_slots']); new='\n'.join(f'・{d} {t}〜' for d,t in result['new_slots'])
+        await ch.send(f'開催日が変更されました！\n\n変更前：\n{old}\n\n変更後：\n{new}',silent=_session_feature_silent())
+    schedule_session_reminder(int(rs['session_id']))
+    return RedirectResponse(f"/session/{int(rs['session_id'])}/manage",303)
 
 
 @app.get("/session/{session_id}/cancel", response_class=HTMLResponse)
@@ -7383,6 +7258,7 @@ async def schedule_start_form(rid: int, request: Request):
               開催できない
             </span>
           </div>
+          {advanced_schedule_controls_html()}
 
           <button class='submit-btn' type='submit'>
             日程調整を開始する
@@ -7408,6 +7284,7 @@ async def schedule_start_form(rid: int, request: Request):
 
           document.getElementById('gm_dates').value=
             selected.join(',');
+          refreshAdvancedSlots();
         }}
         </script>
         """,
@@ -7454,6 +7331,9 @@ async def schedule_start_submit(
             400,
             "開催可能日を1日以上選択してください"
         )
+    adv_form = await request.form()
+    per_day_time = str(adv_form.get('per_day_time') or '') == '1'
+    schedule_slots = parse_schedule_slots(dates, start_time, per_day_time, str(adv_form.get('schedule_slots_json') or ''))
 
     deadline = datetime.fromisoformat(
         deadline_date + "T21:00:00"
@@ -7488,6 +7368,7 @@ async def schedule_start_submit(
                 rid,
             ),
         )
+    set_recruitment_schedule_slots(rid, schedule_slots, per_day_time)
 
     # 既存の日程調整チャンネルへ案内
     guild = bot.get_guild(GUILD_ID)
@@ -7604,6 +7485,7 @@ async def reschedule_form(rid: int, request: Request):
             <span><b style='color:#22c55e'>○</b> 開催できる</span>
             <span><b>-</b> 開催できない</span>
           </div>
+          {advanced_schedule_controls_html()}
 
           <button class='submit-btn' type='submit'>
             再日程調整を開始する
@@ -7628,6 +7510,7 @@ async def reschedule_form(rid: int, request: Request):
           }}
 
           document.getElementById('gm_dates').value=selected.join(',');
+          refreshAdvancedSlots();
         }}
         </script>
         """,
@@ -7656,6 +7539,9 @@ async def reschedule_submit(
     })
     if not dates:
         raise HTTPException(400, "開催可能日を選択してください")
+    adv_form = await request.form()
+    per_day_time = str(adv_form.get('per_day_time') or '') == '1'
+    schedule_slots = parse_schedule_slots(dates, start_time, per_day_time, str(adv_form.get('schedule_slots_json') or ''))
 
     deadline = datetime.fromisoformat(
         deadline_date + "T21:00:00"
@@ -7807,6 +7693,7 @@ async def reschedule_submit(
             "UPDATE recruitments SET status='RESCHEDULED' WHERE id=?",
             (rid,),
         )
+    set_recruitment_schedule_slots(new_id, schedule_slots, per_day_time)
 
     guild = bot.get_guild(GUILD_ID)
     channel = None
