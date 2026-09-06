@@ -937,6 +937,8 @@ button,input,textarea,select{font:inherit}
   font-size:.82rem;
   font-weight:900;
   color:#dfe6ef;
+  height:18px;
+  line-height:18px;
   margin-bottom:5px;
   white-space:nowrap;
 }
@@ -950,12 +952,12 @@ button,input,textarea,select{font:inherit}
   width:18px;
   height:18px;
   margin:0 0 5px 0;
-  font-size:.72rem;
-  border-radius:50%;
-  background:#7667e8;
+  font-size:.68rem;
+  border-radius:0;
+  background:radial-gradient(circle at center, #7667e8 0 7.5px, transparent 8px);
   color:#fff;
-  line-height:1;
-  box-shadow:0 0 0 1px rgba(255,255,255,.08), 0 2px 8px rgba(118,103,232,.24);
+  line-height:18px;
+  box-shadow:none;
 }
 
 /* 1つの卓が他のマスの幅・高さを押し広げないようにする */
