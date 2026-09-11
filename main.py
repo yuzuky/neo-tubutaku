@@ -6842,15 +6842,25 @@ async def decide_form(rid: int, request: Request):
         data.append({'key':key,'date':d,'time':t,'yes':yes})
         yes_names=', '.join(esc(user_display(u)) for u in yes) or 'なし'
         maybe_names=', '.join(esc(user_display(u)) for u in maybe) or 'なし'
+        over=len(yes) > int(r['max_players'])
+        member_checks=''.join(
+            f"<label style='display:flex;gap:9px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' style='width:auto' type='checkbox' value='{esc(u)}' checked> {esc(user_display(u))}</label>"
+            for u in yes
+        )
+        random_btn=(
+            f"<button type='button' class='btn alt' style='margin-top:10px' onclick='randomPickForSlot(\"{esc(key)}\", {int(r['max_players'])})'>この日からランダムで{int(r['max_players'])}人選ぶ</button>"
+            if over else ''
+        )
         cards.append(f"""
-        <label class='candidate' style='display:block'>
-          <div style='display:flex;align-items:flex-start;gap:10px'>
+        <div class='candidate' style='display:block'>
+          <label style='display:flex;align-items:flex-start;gap:10px'>
             <input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'>
-            <div style='flex:1'><b>{esc(d)} {esc(t)}〜</b><div style='margin-top:6px'>○{len(yes)}人</div>
+            <div style='flex:1'><b>{esc(d)} {esc(t)}〜</b><div style='margin-top:6px'>○{len(yes)}人 {'⚠ 最大人数超過' if over else ''}</div>
             <p class='small' style='margin:8px 0 0'>○：{yes_names}</p>
             <p class='small muted' style='margin:4px 0 0'>△：{maybe_names}</p></div>
-          </div>
-        </label>""")
+          </label>
+          <div class='member-picker' data-slot='{esc(key)}' style='margin:12px 0 0 30px'>{member_checks}{random_btn}</div>
+        </div>""")
     data_json=json.dumps(data,ensure_ascii=False)
     member_names={u:user_display(u) for x in candidates for u in x['yes']}
     member_json=json.dumps(member_names,ensure_ascii=False)
@@ -6872,11 +6882,7 @@ async def decide_form(rid: int, request: Request):
         <div class='small' style='margin-top:4px;color:#c9a8a8'>1卓を複数日に分けて開催するため、同じ参加者となるように選択してください</div>
       </div>
       <div id='candidateList'>{''.join(cards)}</div>
-      <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'>
-        <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div>
-        <p id='commonMemberNote' class='muted small' style='margin:8px 0 0'></p></div>
-      </div>
-      <div id='multiDayMemberInputs' style='display:none'></div>
+      <div id='decisionMemberInputs' style='display:none'></div>
       {("<label class='checkbox-row'><input type='checkbox' name='create_session_channel' value='1'> 参加メンバーだけのDiscordチャンネルを作成する</label>" if is_simple_schedule(r) else "")}
       <div style='margin-top:26px;display:flex;justify-content:center'>
         <button style='width:auto;min-width:280px;text-align:center'>{"この内容で日程を決定する" if is_simple_schedule(r) else "この内容で卓を成立させる"}</button>
@@ -6911,28 +6917,38 @@ async def decide_form(rid: int, request: Request):
       const sets=keys.map(k=>{{const row=candidateData.find(x=>x.key===k);return new Set(row?row.yes:[]);}});
       return sets.slice(1).some(s=>!sameMembers(sets[0],s));
     }}
+    function slotMemberChecks(key){{
+      return [...document.querySelectorAll('.candidate-member')].filter(x=>x.dataset.slot===key);
+    }}
+    function randomPickForSlot(key,max){{
+      const boxes=slotMemberChecks(key);
+      const shuffled=[...boxes].sort(()=>Math.random()-0.5);
+      boxes.forEach(x=>x.checked=false);
+      shuffled.slice(0,Math.min(max,shuffled.length)).forEach(x=>x.checked=true);
+      updateCommon();
+    }}
+    function updateMemberPickerVisibility(){{
+      const multi=document.getElementById('multiDay').checked;
+      document.querySelectorAll('.member-picker').forEach(x=>x.style.display=multi?'none':'block');
+    }}
     function updateCommon(){{
       const keys=choices().map(x=>x.value);
-      const box=document.getElementById('commonMembers'); const list=document.getElementById('commonMemberList');
       const mismatch=document.getElementById('multiDayMismatch');
+      const hidden=document.getElementById('decisionMemberInputs');
+      const multi=document.getElementById('multiDay').checked;
       const isMismatch=hasMultiDayMismatch();
       mismatch.style.display=isMismatch?'block':'none';
-      if(!keys.length){{box.style.display='none';list.innerHTML='';return;}}
-      let common=null;
-      keys.forEach(k=>{{ const row=candidateData.find(x=>x.key===k); const ys=new Set(row?row.yes:[]); common=common===null?ys:new Set([...common].filter(x=>ys.has(x))); }});
-      const ids=[...(common||new Set())];
-      const multi=document.getElementById('multiDay').checked;
-      const hidden=document.getElementById('multiDayMemberInputs');
+      updateMemberPickerVisibility();
+      hidden.innerHTML='';
+      if(!keys.length)return;
+      let ids=[];
       if(multi){{
-        box.style.display='none';
-        list.innerHTML='';
-        hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
+        const row=candidateData.find(x=>x.key===keys[0]);
+        ids=row?row.yes:[];
       }}else{{
-        hidden.innerHTML='';
-        box.style.display='block';
-        list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;align-items:center;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('') || '<div class="warn">○の参加者がいません。</div>';
-        document.getElementById('commonMemberNote').textContent=`○の参加者：${{ids.length}}人`;
+        ids=slotMemberChecks(keys[0]).filter(x=>x.checked).map(x=>x.value);
       }}
+      hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
     }}
     function validateDecision(){{
       const n=choices().length; const multi=document.getElementById('multiDay').checked;
@@ -6940,10 +6956,12 @@ async def decide_form(rid: int, request: Request):
       if(multi&&hasMultiDayMismatch()){{
         const e=document.getElementById('multiDayMismatch');e.style.display='block';e.scrollIntoView({{behavior:'smooth',block:'center'}});return false;
       }}
-      const m=document.querySelectorAll('[name="member_id"]:checked').length;
+      updateCommon();
+      const m=document.querySelectorAll('#decisionMemberInputs input[name="member_id"]').length;
       if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください。`);return false;}}
       return true;
     }}
+    updateMemberPickerVisibility();
     </script>
     """, request)
 
@@ -7240,7 +7258,13 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
         if len(yes)<minp: continue
         data.append({'key':key,'date':d,'time':t,'yes':yes})
         yes_names=', '.join(esc(names.get(u,u)) for u in yes) or 'なし'
-        cards.append(f"<label class='candidate' style='display:block'><div style='display:flex;gap:10px;align-items:flex-start'><input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div style='flex:1'><b>{d} {t}〜</b><div style='margin-top:6px'>○{len(yes)}人</div><p class='small' style='margin:8px 0 0'>○：{yes_names}</p></div></div></label>")
+        over=len(yes)>maxp
+        member_checks=''.join(
+            f"<label style='display:flex;gap:9px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' style='width:auto' type='checkbox' value='{esc(u)}' checked> {esc(names.get(u,u))}</label>"
+            for u in yes
+        )
+        random_btn=(f"<button type='button' class='btn alt' style='margin-top:10px' onclick='randomPickForSlot(\"{esc(key)}\", {maxp})'>この日からランダムで{maxp}人選ぶ</button>" if over else '')
+        cards.append(f"<div class='candidate' style='display:block'><label style='display:flex;gap:10px;align-items:flex-start'><input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div style='flex:1'><b>{d} {t}〜</b><div style='margin-top:6px'>○{len(yes)}人 {'⚠ 最大人数超過' if over else ''}</div><p class='small' style='margin:8px 0 0'>○：{yes_names}</p></div></label><div class='member-picker' data-slot='{esc(key)}' style='margin:12px 0 0 30px'>{member_checks}{random_btn}</div></div>")
     if not data:return page('開催日決定',f"<a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a><div class='card'><p>現在、最小人数{minp}人を満たす候補がありません。</p></div>",request)
     return page('開催日決定',f"""
       <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
@@ -7256,10 +7280,7 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
           <div class='small' style='margin-top:4px;color:#c9a8a8'>1卓を複数日に分けて開催するため、同じ参加者となるように選択してください</div>
         </div>
         {''.join(cards)}
-        <div id='commonMembers' class='field-box no-icon' style='display:none;margin-top:16px'>
-          <div class='field-stack'><span class='field-label'>参加者</span><div id='commonMemberList'></div><p id='commonMemberNote' class='muted small'></p></div>
-        </div>
-        <div id='multiDayMemberInputs' style='display:none'></div>
+        <div id='decisionMemberInputs' style='display:none'></div>
         <div style='margin-top:26px;display:flex;justify-content:center'><button style='width:auto;min-width:280px'>この内容で卓を成立させる</button></div>
       </form>
       <script>
@@ -7282,34 +7303,44 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
         if(!document.getElementById('multiDay').checked)choices().slice(1).forEach(x=>x.checked=false);
         updateCommon();
       }}
-      function updateCommon(){{
-        const keys=choices().map(x=>x.value),box=document.getElementById('commonMembers'),list=document.getElementById('commonMemberList');
-        const mismatch=document.getElementById('multiDayMismatch');
-        mismatch.style.display=hasMultiDayMismatch()?'block':'none';
-        if(!keys.length){{box.style.display='none';list.innerHTML='';return;}}
-        let common=null;
-        keys.forEach(k=>{{const row=candidateData.find(x=>x.key===k),ys=new Set(row?row.yes:[]);common=common===null?ys:new Set([...common].filter(x=>ys.has(x)));}});
-        const ids=[...(common||new Set())];
+      function slotMemberChecks(key){{return [...document.querySelectorAll('.candidate-member')].filter(x=>x.dataset.slot===key);}}
+      function randomPickForSlot(key,max){{
+        const boxes=slotMemberChecks(key),shuffled=[...boxes].sort(()=>Math.random()-0.5);
+        boxes.forEach(x=>x.checked=false);
+        shuffled.slice(0,Math.min(max,shuffled.length)).forEach(x=>x.checked=true);
+        updateCommon();
+      }}
+      function updateMemberPickerVisibility(){{
         const multi=document.getElementById('multiDay').checked;
-        const hidden=document.getElementById('multiDayMemberInputs');
+        document.querySelectorAll('.member-picker').forEach(x=>x.style.display=multi?'none':'block');
+      }}
+      function updateCommon(){{
+        const keys=choices().map(x=>x.value);
+        const mismatch=document.getElementById('multiDayMismatch');
+        const hidden=document.getElementById('decisionMemberInputs');
+        const multi=document.getElementById('multiDay').checked;
+        mismatch.style.display=hasMultiDayMismatch()?'block':'none';
+        updateMemberPickerVisibility();
+        hidden.innerHTML='';
+        if(!keys.length)return;
+        let ids=[];
         if(multi){{
-          box.style.display='none';
-          list.innerHTML='';
-          hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
+          const row=candidateData.find(x=>x.key===keys[0]);ids=row?row.yes:[];
         }}else{{
-          hidden.innerHTML='';
-          box.style.display='block';
-          list.innerHTML=ids.map(id=>`<label style="display:flex;gap:9px;padding:5px 0"><input style="width:auto" type="checkbox" name="member_id" value="${{id}}" checked> ${{memberNames[id]||id}}</label>`).join('');
-          document.getElementById('commonMemberNote').textContent=`○の参加者：${{ids.length}}人`;
+          ids=slotMemberChecks(keys[0]).filter(x=>x.checked).map(x=>x.value);
         }}
+        hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
       }}
       function validateDecision(){{
-        const n=choices().length,multi=document.getElementById('multiDay').checked,m=document.querySelectorAll('[name="member_id"]:checked').length;
+        const n=choices().length,multi=document.getElementById('multiDay').checked;
         if((!multi&&n!==1)||(multi&&n<2)){{alert(multi?'2日程以上選択してください':'1日程選択してください');return false;}}
         if(multi&&hasMultiDayMismatch()){{const e=document.getElementById('multiDayMismatch');e.style.display='block';e.scrollIntoView({{behavior:'smooth',block:'center'}});return false;}}
+        updateCommon();
+        const m=document.querySelectorAll('#decisionMemberInputs input[name="member_id"]').length;
         if(m<minPlayers||m>maxPlayers){{alert(`参加者を${{minPlayers}}〜${{maxPlayers}}人選択してください`);return false;}}
         return true;
       }}
+      updateMemberPickerVisibility();
       </script>
     """,request)
 
