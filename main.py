@@ -35,7 +35,7 @@ class CachedStaticFiles(StaticFiles):
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3385,9 +3385,13 @@ _reminders_restored = False
 
 
 async def session_reminder_task(session_id: int):
-    """v106: 1卓につき1task。未通知slotのうち次の1件だけ待ち、送信後に次へ進む。"""
+    """v117: 1卓につき1task。開催中止済み卓は絶対に通知しない。"""
     try:
         while True:
+            with db() as c:
+                sess_state=c.execute('SELECT cancelled_at FROM sessions WHERE id=?',(int(session_id),)).fetchone()
+            if not sess_state or sess_state['cancelled_at']:
+                return
             slots=get_session_slots(session_id)
             pending=[x for x in slots if not int(x.get('reminder_sent') or 0)]
             if not pending:
@@ -3417,7 +3421,9 @@ async def session_reminder_task(session_id: int):
                 continue
             with db() as c:
                 sess=c.execute('SELECT * FROM sessions WHERE id=?',(int(session_id),)).fetchone()
-                r=c.execute('SELECT * FROM recruitments WHERE id=?',(int(sess['recruitment_id']),)).fetchone() if sess else None
+                if not sess or sess['cancelled_at']:
+                    return
+                r=c.execute('SELECT * FROM recruitments WHERE id=?',(int(sess['recruitment_id']),)).fetchone()
             guild=bot.get_guild(GUILD_ID)
             ch=guild.get_channel(int(sess['channel_id'])) if guild and sess and sess['channel_id'] else None
             if ch and r:
@@ -3438,9 +3444,22 @@ def schedule_session_reminder(session_id: int):
     reminder_tasks[session_id]=asyncio.create_task(session_reminder_task(session_id))
 
 
+def cancel_session_reminder(session_id: int):
+    """v117: 開催中止時に待機中の1時間前リマインドtaskを即時停止する。"""
+    old=reminder_tasks.pop(int(session_id),None)
+    if old and not old.done():
+        old.cancel()
+
+
 async def restore_reminder_tasks():
     with db() as c:
-        rows=c.execute('SELECT DISTINCT session_id FROM session_slots WHERE reminder_sent=0').fetchall()
+        rows=c.execute(
+            """SELECT DISTINCT ss.session_id
+                 FROM session_slots ss
+                 JOIN sessions s ON s.id=ss.session_id
+                WHERE ss.reminder_sent=0
+                  AND s.cancelled_at IS NULL"""
+        ).fetchall()
     for row in rows:
         schedule_session_reminder(int(row['session_id']))
 
@@ -4968,6 +4987,8 @@ async def calendar_edit_details(
 ):
     require_login(request); await require_csrf(request)
     detail_before, _ = calendar_session_detail(calendar_session_id)
+    old_day_for_stats = original_event_date or str(detail_before['event_date'] if detail_before else '')
+    old_profile_record = profile_delta_record_for_calendar_session(calendar_session_id)
     if not scenario_name.strip(): raise HTTPException(400, "シナリオ名 / イベント名を入力してください")
     if game_type not in {"TRPG", "MADMIS", "EVENT"}: raise HTTPException(400, "種別が不正です")
     try:
@@ -4993,6 +5014,25 @@ async def calendar_edit_details(
             c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",(str(first['event_date']),str(first['start_time']),int(calendar_session_id)))
     if sync_result and sync_result.get('session_id'):
         schedule_session_reminder(int(sync_result['session_id']))
+
+    # v118: カレンダー編集による集計補正は、集計境界に影響するケースだけ。
+    # 1) 集計済みの過去卓を今日/未来へ移す
+    # 2) 当日20:00以降に当日の卓を編集する
+    # 過去→過去、未来→未来、当日20時前は何もしない。全履歴再同期もしない。
+    try:
+        now = now_jst()
+        old_day = date.fromisoformat(str(old_day_for_stats))
+        new_day = date.fromisoformat(str(event_date))
+        boundary_change = old_day < now.date() and new_day >= now.date()
+        today_after_cutoff = now.hour >= 20 and old_day == now.date()
+        if boundary_change or today_after_cutoff:
+            if old_profile_record and remove_profile_record_delta(old_profile_record, iso_now()):
+                # 移動先が既に集計対象なら、その日だけ差分再加算。今日20時前/未来は20時処理に任せる。
+                if new_day < now.date() or (new_day == now.date() and now.hour >= 20):
+                    apply_profile_daily_delta(new_day.isoformat(), iso_now())
+    except Exception as e:
+        log_error(f'calendar_edit_delta_reconcile calendar_session_id={calendar_session_id}', e)
+
     return RedirectResponse(f"/calendar?month={edited_day.strftime('%Y-%m')}", status_code=303)
 
 @app.post("/calendar/hide")
@@ -6839,30 +6879,22 @@ async def decide_form(rid: int, request: Request):
     for x in candidates:
         key=str(x['key']); d=str(x['date']); t=str(x['time'])
         yes=[str(u) for u in x['yes']]; maybe=[str(u) for u in x['maybe']]
-        data.append({'key':key,'date':d,'time':t,'yes':yes})
-        yes_names=', '.join(esc(user_display(u)) for u in yes) or 'なし'
-        maybe_names=', '.join(esc(user_display(u)) for u in maybe) or 'なし'
-        over=len(yes) > int(r['max_players'])
-        member_checks=''.join(
-            f"<label style='display:flex;gap:9px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' style='width:auto' type='checkbox' value='{esc(u)}' checked> {esc(user_display(u))}</label>"
-            for u in yes
-        )
-        random_btn=(
-            f"<button type='button' class='btn alt' style='margin-top:10px' onclick='randomPickForSlot(\"{esc(key)}\", {int(r['max_players'])})'>この日からランダムで{int(r['max_players'])}人選ぶ</button>"
-            if over else ''
-        )
+        data.append({'key':key,'date':d,'time':t,'yes':yes,'maybe':maybe})
+        rows=[]
+        for u in yes:
+            rows.append(f"<label style='display:flex;gap:8px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' data-answer='yes' style='width:auto' type='checkbox' value='{esc(u)}' checked><span>○：{esc(user_display(u))}</span></label>")
+        for u in maybe:
+            rows.append(f"<label style='display:flex;gap:8px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' data-answer='maybe' style='width:auto' type='checkbox' value='{esc(u)}'><span class='muted'>△：{esc(user_display(u))}</span></label>")
         cards.append(f"""
         <div class='candidate' style='display:block'>
           <label style='display:flex;align-items:flex-start;gap:10px'>
             <input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'>
-            <div style='flex:1'><b>{esc(d)} {esc(t)}〜</b><div style='margin-top:6px'>○{len(yes)}人 {'⚠ 最大人数超過' if over else ''}</div>
-            <p class='small' style='margin:8px 0 0'>○：{yes_names}</p>
-            <p class='small muted' style='margin:4px 0 0'>△：{maybe_names}</p></div>
+            <div style='flex:1'><b>{esc(d.replace('-', '/'))} {esc(t)}〜</b></div>
           </label>
-          <div class='member-picker' data-slot='{esc(key)}' style='margin:12px 0 0 30px'>{member_checks}{random_btn}</div>
+          <div class='member-picker' data-slot='{esc(key)}' style='margin:8px 0 0 30px'>{''.join(rows)}</div>
         </div>""")
     data_json=json.dumps(data,ensure_ascii=False)
-    member_names={u:user_display(u) for x in candidates for u in x['yes']}
+    member_names={u:user_display(u) for x in candidates for u in (list(x['yes'])+list(x['maybe']))}
     member_json=json.dumps(member_names,ensure_ascii=False)
 
     return page("開催日決定", f"""
@@ -6880,6 +6912,11 @@ async def decide_form(rid: int, request: Request):
       <div id='multiDayMismatch' style='display:none;margin:0 0 14px;padding:12px 14px;border:1px solid #6b2a31;border-radius:12px;background:#2a1519'>
         <div style='font-weight:800;color:#ff8b82'>選択した日程の参加者が一致していません</div>
         <div class='small' style='margin-top:4px;color:#c9a8a8'>1卓を複数日に分けて開催するため、同じ参加者となるように選択してください</div>
+      </div>
+      <div id='multiDayMemberPicker' class='candidate' style='display:none;margin-bottom:14px'>
+        <div style='font-weight:800;margin-bottom:6px'>参加者を選択</div>
+        <div class='small muted' style='margin-bottom:8px'>全開催日に○で参加できるメンバーから、今回の参加者を選択してください。</div>
+        <div id='multiDayMemberList'></div>
       </div>
       <div id='candidateList'>{''.join(cards)}</div>
       <div id='decisionMemberInputs' style='display:none'></div>
@@ -6906,16 +6943,17 @@ async def decide_form(rid: int, request: Request):
       }}
       updateCommon();
     }}
-    function sameMembers(a,b){{
-      if(a.size!==b.size)return false;
-      for(const x of a)if(!b.has(x))return false;
-      return true;
+    function commonMultiDayMembers(){{
+      const keys=choices().map(x=>x.value);
+      if(!keys.length)return [];
+      const rows=keys.map(k=>candidateData.find(x=>x.key===k)).filter(Boolean);
+      if(!rows.length)return [];
+      return rows[0].yes.filter(id=>rows.slice(1).every(r=>r.yes.includes(id)));
     }}
     function hasMultiDayMismatch(){{
       const keys=choices().map(x=>x.value);
       if(!document.getElementById('multiDay').checked||keys.length<2)return false;
-      const sets=keys.map(k=>{{const row=candidateData.find(x=>x.key===k);return new Set(row?row.yes:[]);}});
-      return sets.slice(1).some(s=>!sameMembers(sets[0],s));
+      return commonMultiDayMembers().length<minPlayers;
     }}
     function slotMemberChecks(key){{
       return [...document.querySelectorAll('.candidate-member')].filter(x=>x.dataset.slot===key);
@@ -6931,6 +6969,19 @@ async def decide_form(rid: int, request: Request):
       const multi=document.getElementById('multiDay').checked;
       document.querySelectorAll('.member-picker').forEach(x=>x.style.display=multi?'none':'block');
     }}
+    function renderMultiDayMemberPicker(ids, showPicker){{
+      const box=document.getElementById('multiDayMemberPicker');
+      const list=document.getElementById('multiDayMemberList');
+      const signature=ids.join('|');
+      box.style.display=showPicker?'block':'none';
+      if(!showPicker){{ list.innerHTML=''; list.dataset.signature=''; return; }}
+      if(list.dataset.signature===signature && list.querySelector('.multi-day-member')) return;
+      list.dataset.signature=signature;
+      list.innerHTML=ids.map(id=>{{
+        const name=memberNames[id]||id;
+        return `<label style="display:flex;gap:9px;align-items:center;padding:5px 0"><input class="multi-day-member" style="width:auto" type="checkbox" value="${{id}}" checked onchange="updateCommon()"> ${{name}}</label>`;
+      }}).join('');
+    }}
     function updateCommon(){{
       const keys=choices().map(x=>x.value);
       const mismatch=document.getElementById('multiDayMismatch');
@@ -6940,12 +6991,17 @@ async def decide_form(rid: int, request: Request):
       mismatch.style.display=isMismatch?'block':'none';
       updateMemberPickerVisibility();
       hidden.innerHTML='';
-      if(!keys.length)return;
+      if(!keys.length){{ renderMultiDayMemberPicker([],false); return; }}
       let ids=[];
       if(multi){{
-        const row=candidateData.find(x=>x.key===keys[0]);
-        ids=row?row.yes:[];
+        const common=commonMultiDayMembers();
+        const showPicker=!isMismatch && keys.length>=2;
+        renderMultiDayMemberPicker(common,showPicker);
+        ids=showPicker
+          ? [...document.querySelectorAll('.multi-day-member:checked')].map(x=>x.value)
+          : (!isMismatch ? common : []);
       }}else{{
+        renderMultiDayMemberPicker([],false);
         ids=slotMemberChecks(keys[0]).filter(x=>x.checked).map(x=>x.value);
       }}
       hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
@@ -6987,15 +7043,16 @@ async def decide_submit(request: Request, rid: int):
     selected_keys=list(dict.fromkeys(k for k in selected_keys if k in cmap))
     if (not multi_day and len(selected_keys)!=1) or (multi_day and len(selected_keys)<2):
         raise HTTPException(400,'開催日の選択を確認してください')
-    if multi_day:
-        member_sets=[set(str(u) for u in cmap[k]['yes']) for k in selected_keys]
-        if any(x != member_sets[0] for x in member_sets[1:]):
-            raise HTTPException(400,'選択した日程の参加者が一致していません。1卓を複数日に分けて開催するため、同じ参加者となるように選択してください')
     common=None
     for k in selected_keys:
-        ys=set(str(u) for u in cmap[k]['yes'])
-        common=ys if common is None else common & ys
+        # 複数日開催は全日程で○の人だけ。通常の1日開催では△もGMが任意選択できる。
+        allowed=set(str(u) for u in cmap[k]['yes'])
+        if not multi_day:
+            allowed |= set(str(u) for u in cmap[k].get('maybe', []))
+        common=allowed if common is None else common & allowed
     common=common or set()
+    if multi_day and len(common) < int(r['min_players']):
+        raise HTTPException(400,'選択した日程の参加者が一致していません。1卓を複数日に分けて開催するため、同じ参加者となるように選択してください')
     selected=list(dict.fromkeys(str(x) for x in form.getlist('member_id') if str(x) in common))
     min_sel,max_sel=int(r['min_players']),int(r['max_players'])
     if is_simple_schedule(r) and not r['target_players']: min_sel,max_sel=1,max(1,len(common))
@@ -7254,17 +7311,17 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
     minp=int(rs.get('min_players') or 1); maxp=int(rs.get('max_players') or len(members) or 1)
     data=[]; cards=[]; names={str(m['discord_id']):str(m['display_name']) for m in members}
     for sl in slots:
-        d,t=str(sl['event_date']),str(sl['start_time']); key=f'{d}|{t}'; yes=[str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='YES']
+        d,t=str(sl['event_date']),str(sl['start_time']); key=f'{d}|{t}'
+        yes=[str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='YES']
+        maybe=[str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='MAYBE']
         if len(yes)<minp: continue
-        data.append({'key':key,'date':d,'time':t,'yes':yes})
-        yes_names=', '.join(esc(names.get(u,u)) for u in yes) or 'なし'
-        over=len(yes)>maxp
-        member_checks=''.join(
-            f"<label style='display:flex;gap:9px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' style='width:auto' type='checkbox' value='{esc(u)}' checked> {esc(names.get(u,u))}</label>"
-            for u in yes
-        )
-        random_btn=(f"<button type='button' class='btn alt' style='margin-top:10px' onclick='randomPickForSlot(\"{esc(key)}\", {maxp})'>この日からランダムで{maxp}人選ぶ</button>" if over else '')
-        cards.append(f"<div class='candidate' style='display:block'><label style='display:flex;gap:10px;align-items:flex-start'><input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div style='flex:1'><b>{d} {t}〜</b><div style='margin-top:6px'>○{len(yes)}人 {'⚠ 最大人数超過' if over else ''}</div><p class='small' style='margin:8px 0 0'>○：{yes_names}</p></div></label><div class='member-picker' data-slot='{esc(key)}' style='margin:12px 0 0 30px'>{member_checks}{random_btn}</div></div>")
+        data.append({'key':key,'date':d,'time':t,'yes':yes,'maybe':maybe})
+        rows=[]
+        for u in yes:
+            rows.append(f"<label style='display:flex;gap:8px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' data-answer='yes' style='width:auto' type='checkbox' value='{esc(u)}' checked><span>○：{esc(names.get(u,u))}</span></label>")
+        for u in maybe:
+            rows.append(f"<label style='display:flex;gap:8px;align-items:center;padding:5px 0'><input class='candidate-member' data-slot='{esc(key)}' data-answer='maybe' style='width:auto' type='checkbox' value='{esc(u)}'><span class='muted'>△：{esc(names.get(u,u))}</span></label>")
+        cards.append(f"<div class='candidate' style='display:block'><label style='display:flex;gap:10px;align-items:flex-start'><input class='slot-choice' style='width:auto;margin-top:4px' type='checkbox' name='selected_slot' value='{esc(key)}' onchange='onSlotChoice(this)'><div style='flex:1'><b>{d.replace('-', '/')} {t}〜</b></div></label><div class='member-picker' data-slot='{esc(key)}' style='margin:8px 0 0 30px'>{''.join(rows)}</div></div>")
     if not data:return page('開催日決定',f"<a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a><div class='card'><p>現在、最小人数{minp}人を満たす候補がありません。</p></div>",request)
     return page('開催日決定',f"""
       <a class='back-link' href='/session-reschedule/{reschedule_id}'>‹ 戻る</a>
@@ -7279,6 +7336,11 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
           <div style='font-weight:800;color:#ff8b82'>選択した日程の参加者が一致していません</div>
           <div class='small' style='margin-top:4px;color:#c9a8a8'>1卓を複数日に分けて開催するため、同じ参加者となるように選択してください</div>
         </div>
+        <div id='multiDayMemberPicker' class='candidate' style='display:none;margin-bottom:14px'>
+          <div style='font-weight:800;margin-bottom:6px'>参加者を選択</div>
+          <div class='small muted' style='margin-bottom:8px'>全開催日に○で参加できるメンバーから、今回の参加者を選択してください。</div>
+          <div id='multiDayMemberList'></div>
+        </div>
         {''.join(cards)}
         <div id='decisionMemberInputs' style='display:none'></div>
         <div style='margin-top:26px;display:flex;justify-content:center'><button style='width:auto;min-width:280px'>この内容で卓を成立させる</button></div>
@@ -7288,12 +7350,17 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
       const memberNames={json.dumps(names,ensure_ascii=False)};
       const minPlayers={minp},maxPlayers={maxp};
       function choices(){{return [...document.querySelectorAll('.slot-choice:checked')];}}
-      function sameMembers(a,b){{if(a.size!==b.size)return false;for(const x of a)if(!b.has(x))return false;return true;}}
+      function commonMultiDayMembers(){{
+        const keys=choices().map(x=>x.value);
+        if(!keys.length)return [];
+        const rows=keys.map(k=>candidateData.find(x=>x.key===k)).filter(Boolean);
+        if(!rows.length)return [];
+        return rows[0].yes.filter(id=>rows.slice(1).every(r=>r.yes.includes(id)));
+      }}
       function hasMultiDayMismatch(){{
         const keys=choices().map(x=>x.value);
         if(!document.getElementById('multiDay').checked||keys.length<2)return false;
-        const sets=keys.map(k=>{{const row=candidateData.find(x=>x.key===k);return new Set(row?row.yes:[]);}});
-        return sets.slice(1).some(s=>!sameMembers(sets[0],s));
+        return commonMultiDayMembers().length<minPlayers;
       }}
       function onSlotChoice(el){{
         if(!document.getElementById('multiDay').checked&&el.checked)document.querySelectorAll('.slot-choice').forEach(x=>{{if(x!==el)x.checked=false;}});
@@ -7314,19 +7381,39 @@ async def session_reschedule_decide(reschedule_id:int,request:Request):
         const multi=document.getElementById('multiDay').checked;
         document.querySelectorAll('.member-picker').forEach(x=>x.style.display=multi?'none':'block');
       }}
+      function renderMultiDayMemberPicker(ids, showPicker){{
+        const box=document.getElementById('multiDayMemberPicker');
+        const list=document.getElementById('multiDayMemberList');
+        const signature=ids.join('|');
+        box.style.display=showPicker?'block':'none';
+        if(!showPicker){{ list.innerHTML=''; list.dataset.signature=''; return; }}
+        if(list.dataset.signature===signature && list.querySelector('.multi-day-member')) return;
+        list.dataset.signature=signature;
+        list.innerHTML=ids.map(id=>{{
+          const name=memberNames[id]||id;
+          return `<label style="display:flex;gap:9px;align-items:center;padding:5px 0"><input class="multi-day-member" style="width:auto" type="checkbox" value="${{id}}" checked onchange="updateCommon()"> ${{name}}</label>`;
+        }}).join('');
+      }}
       function updateCommon(){{
         const keys=choices().map(x=>x.value);
         const mismatch=document.getElementById('multiDayMismatch');
         const hidden=document.getElementById('decisionMemberInputs');
         const multi=document.getElementById('multiDay').checked;
-        mismatch.style.display=hasMultiDayMismatch()?'block':'none';
+        const isMismatch=hasMultiDayMismatch();
+        mismatch.style.display=isMismatch?'block':'none';
         updateMemberPickerVisibility();
         hidden.innerHTML='';
-        if(!keys.length)return;
+        if(!keys.length){{ renderMultiDayMemberPicker([],false); return; }}
         let ids=[];
         if(multi){{
-          const row=candidateData.find(x=>x.key===keys[0]);ids=row?row.yes:[];
+          const common=commonMultiDayMembers();
+          const showPicker=!isMismatch && keys.length>=2;
+          renderMultiDayMemberPicker(common,showPicker);
+          ids=showPicker
+            ? [...document.querySelectorAll('.multi-day-member:checked')].map(x=>x.value)
+            : (!isMismatch ? common : []);
         }}else{{
+          renderMultiDayMemberPicker([],false);
           ids=slotMemberChecks(keys[0]).filter(x=>x.checked).map(x=>x.value);
         }}
         hidden.innerHTML=ids.map(id=>`<input type="hidden" name="member_id" value="${{id}}">`).join('');
@@ -7350,17 +7437,25 @@ async def session_reschedule_confirm(reschedule_id:int,request:Request):
     uid=str(require_login(request)); await require_csrf(request)
     rs,slots,members,answers,_per=session_reschedule_slot_detail(reschedule_id)
     if not rs or uid!=str(rs['gm_discord_id']): raise HTTPException(403)
+    minp=int(rs.get('min_players') or 1); maxp=int(rs.get('max_players') or len(members) or 1)
     form=await request.form(); multi=str(form.get('multi_day') or '')=='1'; keys=[str(x) for x in form.getlist('selected_slot')]
     smap={f"{x['event_date']}|{x['start_time']}":(str(x['event_date']),str(x['start_time'])) for x in slots}
     chosen=[smap[k] for k in dict.fromkeys(keys) if k in smap]
     if (not multi and len(chosen)!=1) or (multi and len(chosen)<2): raise HTTPException(400,'開催日時の選択を確認してください')
+    allowed_common=None
     if multi:
         answer_sets=[]
         for d,t in chosen:
             answer_sets.append({str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t))=='YES'})
-        if any(x != answer_sets[0] for x in answer_sets[1:]):
+        allowed_common=set.intersection(*answer_sets) if answer_sets else set()
+        if len(allowed_common) < minp:
             raise HTTPException(400,'選択した日程の参加者が一致していません。1卓を複数日に分けて開催するため、同じ参加者となるように選択してください')
-    selected=[str(x) for x in form.getlist('member_id')]
+    else:
+        d,t=chosen[0]
+        allowed_common={str(m['discord_id']) for m in members if answers.get((str(m['discord_id']),d,t)) in {'YES','MAYBE'}}
+    selected=list(dict.fromkeys(str(x) for x in form.getlist('member_id') if str(x) in allowed_common))
+    if not (minp <= len(selected) <= maxp):
+        raise HTTPException(400,f'参加者を{minp}〜{maxp}人選択してください')
     result=confirm_session_reschedule_slots(reschedule_id,chosen,selected)
     if not result: raise HTTPException(400,'参加人数または選択内容を確認してください')
     try:
@@ -7415,6 +7510,7 @@ async def session_cancel_submit(session_id: int, request: Request):
     cancelled=cancel_confirmed_session(session_id,iso_now())
     if not cancelled:
         raise HTTPException(404)
+    cancel_session_reminder(session_id)
     try:
         _session_change_reconcile_if_needed(old_date)
     except Exception as e:
