@@ -1506,7 +1506,9 @@ def cancel_confirmed_session(session_id: int, cancelled_at: str):
         return None
     calendar_session_id = detail.get("calendar_session_id")
     with db() as c:
-        c.execute("UPDATE sessions SET cancelled_at=? WHERE id=?", (str(cancelled_at), int(session_id)))
+        c.execute("UPDATE sessions SET cancelled_at=?, reminder_sent=1 WHERE id=?", (str(cancelled_at), int(session_id)))
+        # v117: 中止後に再起動しても1時間前通知が復活しないよう、全slotを通知済み扱いにする。
+        c.execute("UPDATE session_slots SET reminder_sent=1 WHERE session_id=?", (int(session_id),))
         c.execute("UPDATE session_reschedules SET status='CANCELLED' WHERE session_id=? AND status='OPEN'", (int(session_id),))
     if calendar_session_id:
         permanently_delete_calendar_session(int(calendar_session_id), str(cancelled_at))
@@ -2609,6 +2611,77 @@ def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
         )
         return added
 
+
+
+def profile_delta_record_for_calendar_session(calendar_session_id: int):
+    """v118: カレンダー編集前の1卓ぶんを差分調整用レコードとして取得する。"""
+    with db() as c:
+        r=c.execute("SELECT id,event_date,game_type,scenario_name,gm_discord_id FROM calendar_sessions WHERE id=?",(int(calendar_session_id),)).fetchone()
+        if not r or str(r["game_type"] or "") not in {"TRPG","MADMIS","マダミス"}:
+            return None
+        members=tuple(sorted(str(x["discord_id"]) for x in c.execute("SELECT discord_id FROM calendar_session_members WHERE calendar_session_id=?",(int(calendar_session_id),)).fetchall()))
+        guests=tuple(sorted(str(x["display_name"]) for x in c.execute("SELECT display_name FROM calendar_guest_members WHERE calendar_session_id=?",(int(calendar_session_id),)).fetchall()))
+        rec={"id":int(r["id"]),"date":str(r["event_date"]),"game_type":_achievement_gt(r["game_type"]),"scenario":str(r["scenario_name"] or "").strip(),"gm":str(r["gm_discord_id"] or ""),"members":members,"guests":guests}
+        rec["table_key"]=_record_table_key(rec)
+        return rec
+
+
+def remove_profile_record_delta(record, updated_at: str) -> bool:
+    """v118: 既に20時差分へ入った1卓だけをプロフィール集計から差し引く。全履歴再構築はしない。"""
+    if not record:
+        return False
+    day=str(record.get("date") or "")
+    key=str(record.get("table_key") or _record_table_key(record))
+    with db() as c:
+        processed=c.execute("SELECT 1 FROM profile_processed_tables WHERE table_key=?",(key,)).fetchone()
+        if not processed:
+            return False
+        registered={str(r["discord_id"]) for r in c.execute("SELECT discord_id FROM registered_members").fetchall()}
+        gm=str(record.get("gm") or "")
+        members=[str(x) for x in record.get("members",()) if str(x)]
+        people=set(members)
+        if gm: people.add(gm)
+        people &= registered
+        ay=_activity_year_for_date(day); term=ay-2023
+        is_madamis=str(record.get("game_type"))=="MADMIS"
+        type_col="madamis_count" if is_madamis else "trpg_count"
+        pl_type_col="madamis_pl_count" if is_madamis else "trpg_pl_count"
+        if gm in registered:
+            c.execute(f"UPDATE profile_stats_cache SET gm_count=MAX(gm_count-1,0),{type_col}=MAX({type_col}-1,0),total_roles=MAX(total_roles-1,0),updated_at=? WHERE discord_id=?",(str(updated_at),gm))
+            c.execute(f"UPDATE profile_year_stats_cache SET gm_count=MAX(gm_count-1,0),{type_col}=MAX({type_col}-1,0),updated_at=? WHERE discord_id=? AND activity_year=?",(str(updated_at),gm,ay))
+            scenario=str(record.get("scenario") or "").strip()
+            if scenario:
+                c.execute("UPDATE achievement_scenario_gm_totals SET gm_count=gm_count-1 WHERE discord_id=? AND scenario_name=?",(gm,scenario))
+                c.execute("DELETE FROM achievement_scenario_gm_totals WHERE discord_id=? AND scenario_name=? AND gm_count<=0",(gm,scenario))
+        for uid in members:
+            if uid not in registered: continue
+            c.execute(f"UPDATE profile_stats_cache SET pl_count=MAX(pl_count-1,0),{type_col}=MAX({type_col}-1,0),{pl_type_col}=MAX({pl_type_col}-1,0),total_roles=MAX(total_roles-1,0),updated_at=? WHERE discord_id=?",(str(updated_at),uid))
+            c.execute(f"UPDATE profile_year_stats_cache SET pl_count=MAX(pl_count-1,0),{type_col}=MAX({type_col}-1,0),{pl_type_col}=MAX({pl_type_col}-1,0),updated_at=? WHERE discord_id=? AND activity_year=?",(str(updated_at),uid,ay))
+        for uid in people:
+            c.execute("UPDATE profile_active_days SET table_count=table_count-1 WHERE discord_id=? AND event_date=?",(uid,day))
+            c.execute("DELETE FROM profile_active_days WHERE discord_id=? AND event_date=? AND table_count<=0",(uid,day))
+            for other in people:
+                if other==uid: continue
+                c.execute("UPDATE profile_pair_totals SET table_count=table_count-1 WHERE discord_id=? AND partner_discord_id=?",(uid,other))
+                c.execute("DELETE FROM profile_pair_totals WHERE discord_id=? AND partner_discord_id=? AND table_count<=0",(uid,other))
+        c.execute("DELETE FROM profile_processed_tables WHERE table_key=?",(key,))
+        # 年活動は当該年に活動日が残る人だけ残す。
+        for uid in people:
+            still=c.execute("SELECT 1 FROM profile_active_days WHERE discord_id=? AND substr(event_date,1,7) IS NOT NULL AND ((CAST(substr(event_date,1,4) AS INTEGER)=? AND CAST(substr(event_date,6,2) AS INTEGER)>=6) OR (CAST(substr(event_date,1,4) AS INTEGER)=? AND CAST(substr(event_date,6,2) AS INTEGER)<6)) LIMIT 1",(uid,ay,ay+1)).fetchone()
+            if not still: c.execute("DELETE FROM profile_active_years WHERE discord_id=? AND activity_year=?",(uid,ay))
+            active_years=int(c.execute("SELECT COUNT(*) AS n FROM profile_active_years WHERE discord_id=?",(uid,)).fetchone()["n"])
+            max_pair=int(c.execute("SELECT COALESCE(MAX(table_count),0) AS n FROM profile_pair_totals WHERE discord_id=?",(uid,)).fetchone()["n"])
+            max_day=int(c.execute("SELECT COALESCE(MAX(table_count),0) AS n FROM profile_active_days WHERE discord_id=?",(uid,)).fetchone()["n"])
+            # 変更は稀なので、対象ユーザーの活動日だけで最大連続日数を再計算する。
+            ds=[str(x["event_date"]) for x in c.execute("SELECT event_date FROM profile_active_days WHERE discord_id=? ORDER BY event_date",(uid,)).fetchall()]
+            max_streak=0; cur=0; prev=None
+            from datetime import date as _d, timedelta as _td
+            for x in ds:
+                dd=_d.fromisoformat(x); cur=cur+1 if prev is not None and dd==prev+_td(days=1) else 1; max_streak=max(max_streak,cur); prev=dd
+            christmas=1 if any(x[5:] in ("12-24","12-25") for x in ds) else 0
+            c.execute("UPDATE profile_stats_cache SET max_pair=?,active_years=?,max_day=?,max_streak=?,christmas=?,updated_at=? WHERE discord_id=?",(max_pair,active_years,max_day,max_streak,christmas,str(updated_at),uid))
+            _refresh_pair_top_for_user(c,uid,str(updated_at))
+        return True
 
 def profile_data(discord_id: str):
     """v68: 履歴を再計算せず、20時更新の表示専用キャッシュだけを読む。"""
