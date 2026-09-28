@@ -65,6 +65,7 @@ def init_db():
                 status TEXT NOT NULL DEFAULT 'RECRUITING',
                 recruitment_message_id TEXT,
                 recruitment_channel_id TEXT,
+                signup_mode TEXT NOT NULL DEFAULT 'reaction',
                 waiting_channel_id TEXT,
                 deadline_notified INTEGER NOT NULL DEFAULT 0,
                 schedule_pending INTEGER NOT NULL DEFAULT 0,
@@ -479,15 +480,12 @@ def ensure_recruitment_columns():
             c.execute("ALTER TABLE recruitments ADD COLUMN target_channel_id TEXT")
         if "target_message_id" not in cols:
             c.execute("ALTER TABLE recruitments ADD COLUMN target_message_id TEXT")
+        if "signup_mode" not in cols:
+            c.execute("ALTER TABLE recruitments ADD COLUMN signup_mode TEXT NOT NULL DEFAULT 'reaction'")
         if "calendar_visible" not in cols:
             c.execute(
                 "ALTER TABLE recruitments "
                 "ADD COLUMN calendar_visible INTEGER NOT NULL DEFAULT 0"
-            )
-        if "predeadline_notified" not in cols:
-            c.execute(
-                "ALTER TABLE recruitments "
-                "ADD COLUMN predeadline_notified INTEGER NOT NULL DEFAULT 0"
             )
 
 
@@ -497,9 +495,8 @@ def ensure_session_columns():
         cols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)").fetchall()}
         if "cancelled_at" not in cols:
             c.execute("ALTER TABLE sessions ADD COLUMN cancelled_at TEXT")
-        rcols = {r["name"] for r in c.execute("PRAGMA table_info(session_reschedules)").fetchall()}
-        if "predeadline_notified" not in rcols:
-            c.execute("ALTER TABLE session_reschedules ADD COLUMN predeadline_notified INTEGER NOT NULL DEFAULT 0")
+        if "ended_at" not in cols:
+            c.execute("ALTER TABLE sessions ADD COLUMN ended_at TEXT")
 
 
 def ensure_profile_cache_columns():
@@ -1747,6 +1744,11 @@ def initialize_database():
     ensure_calendar_columns()
     ensure_profile_cache_columns()
     with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS weekly_schedule_posts (
+            week_start TEXT PRIMARY KEY,
+            message_id TEXT NOT NULL,
+            posted_at TEXT NOT NULL
+        )""")
         # 年別の手動補正値を履歴再集計とは独立して保持する。
         # 一度登録した補正はキャッシュ再構築でも消えない。
         c.execute(
@@ -1887,7 +1889,9 @@ def _unique_table_records(c, as_of_date: str | None = None):
         members = tuple(sorted(member_map.get(sid, ())))
         guests = tuple(sorted(guest_map.get(sid, ())))
         gt = _achievement_gt(r["game_type"])
-        key = (gt, str(r["scenario_name"] or "").strip(), str(r["gm_discord_id"] or ""), members, guests)
+        # 同じ種別・シナリオ・GM・参加者は開催日が違っても一卓として集計する。
+        key = (gt, str(r["scenario_name"] or "").strip(),
+               str(r["gm_discord_id"] or ""), members, guests)
         if key not in unique:
             unique[key] = {
                 "id": sid, "date": str(r["event_date"]), "game_type": gt,
@@ -2017,14 +2021,15 @@ def _seed_incremental_tracking(c, records, updated_at: str):
         )
 
 
-def refresh_profile_caches(as_of_date: str, updated_at: str):
+def refresh_profile_caches(as_of_date: str, updated_at: str, records=None):
     """プロフィール/称号表示用の集計結果を一括更新する。
 
     通常のページ表示では履歴を再集計せず、このキャッシュだけを読む。
     毎日20:00の称号判定と同じタイミングで呼び出す想定。
     """
     with db() as c:
-        records = _unique_table_records(c, str(as_of_date))
+        if records is None:
+            records = _unique_table_records(c, str(as_of_date))
         users = [str(r["discord_id"]) for r in c.execute(
             "SELECT discord_id FROM registered_members ORDER BY discord_id"
         ).fetchall()]
@@ -2169,6 +2174,62 @@ def cutoff_resync_v83_done() -> bool:
         return c.execute(
             "SELECT 1 FROM achievement_meta WHERE meta_key='cutoff_resync_v83_done' AND meta_value='1'"
         ).fetchone() is not None
+
+
+def reconcile_profile_stats(as_of_date: str, updated_at: str):
+    """日付変更・処理漏れを集計へ反映し、取得済み称号と装備は保持する。"""
+    with db() as c:
+        records = _unique_table_records(c, str(as_of_date))
+    refresh_profile_caches(str(as_of_date), str(updated_at), records=records)
+    with db() as c:
+        counts = {}
+        for row in records:
+            gm, scenario = str(row.get("gm") or ""), str(row.get("scenario") or "").strip()
+            if gm and scenario:
+                counts[(gm, scenario)] = counts.get((gm, scenario), 0) + 1
+        c.execute("DELETE FROM achievement_scenario_gm_totals")
+        c.executemany(
+            "INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,?)",
+            [(gm, scenario, count) for (gm, scenario), count in counts.items()],
+        )
+    evaluate_achievements(str(as_of_date), str(updated_at))
+
+
+def ensure_count_identity_v3(as_of_date: str, updated_at: str) -> bool:
+    """誤った日付別集計が適用済みの場合だけ一度再集計する。"""
+    with db() as c:
+        done = c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='count_identity_v3_done' AND meta_value='1'"
+        ).fetchone()
+        wrong_version = c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='count_identity_v2_done' AND meta_value='1'"
+        ).fetchone()
+    if done:
+        return False
+    if wrong_version:
+        reconcile_profile_stats(str(as_of_date), str(updated_at))
+    with db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('count_identity_v3_done','1')"
+        )
+    return bool(wrong_version)
+
+
+def catch_up_profile_stats(after_date: str, through_date: str, updated_at: str) -> int:
+    """停止中の日付だけを差分加算する。卓がない日や過去の全履歴は読まない。"""
+    with db() as c:
+        days = [str(r["event_date"]) for r in c.execute(
+            """SELECT DISTINCT event_date FROM calendar_sessions
+               WHERE event_date>? AND event_date<=?
+                 AND game_type IN ('TRPG','MADMIS','マダミス')
+               ORDER BY event_date""", (str(after_date), str(through_date)),
+        ).fetchall()]
+    added = 0
+    for day in days:
+        added += apply_profile_daily_delta(day, str(updated_at))
+    if not days or days[-1] < str(through_date):
+        apply_profile_daily_delta(str(through_date), str(updated_at))
+    return added
 
 
 def cutoff_resync_v83(as_of_date: str, updated_at: str):
