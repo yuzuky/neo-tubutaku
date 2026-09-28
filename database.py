@@ -1187,14 +1187,16 @@ def candidate_slot_rows(recruitment_id: int):
                 """SELECT DISTINCT a.discord_id FROM slot_answers a JOIN members m
                    ON m.recruitment_id=a.recruitment_id AND m.discord_id=a.discord_id
                    WHERE a.recruitment_id=? AND a.event_date=? AND a.start_time=? AND a.answer='yes'
-                     AND m.member_type='participant' AND m.active=1 AND a.discord_id<>?""",
+                     AND m.member_type='participant' AND m.active=1 AND a.discord_id<>?
+                     AND NOT EXISTS (SELECT 1 FROM members spectator WHERE spectator.recruitment_id=m.recruitment_id AND spectator.discord_id=m.discord_id AND spectator.member_type='spectator' AND spectator.active=1)""",
                 (int(recruitment_id),d,t,gm),
             ).fetchall()
             maybe=c.execute(
                 """SELECT DISTINCT a.discord_id FROM slot_answers a JOIN members m
                    ON m.recruitment_id=a.recruitment_id AND m.discord_id=a.discord_id
                    WHERE a.recruitment_id=? AND a.event_date=? AND a.start_time=? AND a.answer='maybe'
-                     AND m.member_type='participant' AND m.active=1 AND a.discord_id<>?""",
+                     AND m.member_type='participant' AND m.active=1 AND a.discord_id<>?
+                     AND NOT EXISTS (SELECT 1 FROM members spectator WHERE spectator.recruitment_id=m.recruitment_id AND spectator.discord_id=m.discord_id AND spectator.member_type='spectator' AND spectator.active=1)""",
                 (int(recruitment_id),d,t,gm),
             ).fetchall()
             out.append({'date':d,'time':t,'key':f'{d}|{t}','yes':[str(x[0]) for x in yes],'maybe':[str(x[0]) for x in maybe]})
@@ -1510,6 +1512,31 @@ def cancel_confirmed_session(session_id: int, cancelled_at: str):
     if calendar_session_id:
         permanently_delete_calendar_session(int(calendar_session_id), str(cancelled_at))
     return detail
+
+
+def assigned_recruitment_members(recruitment_id: int) -> set[str]:
+    """元募集と再日程調整の系列内で、取り消されていない成立卓のPLを返す。"""
+    with db() as c:
+        rows = c.execute(
+            """WITH RECURSIVE ancestors(id,parent_id) AS (
+                   SELECT id,parent_id FROM recruitments WHERE id=?
+                   UNION ALL
+                   SELECT r.id,r.parent_id FROM recruitments r JOIN ancestors a ON r.id=a.parent_id
+               ), family(id) AS (
+                   SELECT id FROM ancestors WHERE parent_id IS NULL
+                   UNION ALL
+                   SELECT r.id FROM recruitments r JOIN family f ON r.parent_id=f.id
+               )
+               SELECT sm.discord_id FROM session_members sm
+               JOIN sessions s ON sm.session_id=s.id
+               WHERE s.recruitment_id IN (SELECT id FROM family) AND s.cancelled_at IS NULL
+               UNION
+               SELECT cm.discord_id FROM calendar_session_members cm
+               JOIN calendar_sessions cs ON cm.calendar_session_id=cs.id
+               WHERE cs.source_recruitment_id IN (SELECT id FROM family)""",
+            (int(recruitment_id),),
+        ).fetchall()
+    return {str(row["discord_id"]) for row in rows}
 
 def normalize_progress_game_type(game_type: str) -> str:
     gt = str(game_type or "").strip()
