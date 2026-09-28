@@ -1007,15 +1007,6 @@ def sync_linked_session_from_calendar_edit(calendar_session_id: int, original_ev
         return {'session_id':session_id,'old_date':old_date,'old_time':old_time,'new_date':str(new_event_date),'new_time':old_time}
 
 
-def hide_calendar_session(calendar_session_id: int):
-    with db() as c:
-        cur = c.execute(
-            "UPDATE calendar_sessions SET calendar_visible=0 WHERE id=?",
-            (calendar_session_id,),
-        )
-    return cur.rowcount > 0
-
-
 def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: str):
     """
     カレンダー履歴を完全削除する。
@@ -1885,7 +1876,7 @@ def _unique_table_records(c, as_of_date: str | None = None):
         clauses.append("cs.event_date<=?")
         params.append(str(as_of_date))
     rows = c.execute(
-        "SELECT cs.id,cs.event_date,cs.game_type,cs.scenario_name,cs.gm_discord_id "
+        "SELECT cs.id,cs.event_date,cs.game_type,cs.scenario_name,cs.gm_discord_id,cs.gm_guest_name "
         "FROM calendar_sessions cs WHERE " + " AND ".join(clauses) + " ORDER BY cs.event_date,cs.id",
         params,
     ).fetchall()
@@ -1916,14 +1907,17 @@ def _unique_table_records(c, as_of_date: str | None = None):
         members = tuple(sorted(member_map.get(sid, ())))
         guests = tuple(sorted(guest_map.get(sid, ())))
         gt = _achievement_gt(r["game_type"])
+        gm_guest = str(r["gm_guest_name"] or "").strip()
+        gm_key = ("guest:" + gm_guest) if gm_guest else ("id:" + str(r["gm_discord_id"] or ""))
         # 同じ種別・シナリオ・GM・参加者は開催日が違っても一卓として集計する。
         key = (gt, str(r["scenario_name"] or "").strip(),
-               str(r["gm_discord_id"] or ""), members, guests)
+               gm_key, members, guests)
         if key not in unique:
             unique[key] = {
                 "id": sid, "date": str(r["event_date"]), "game_type": gt,
                 "scenario": str(r["scenario_name"] or "").strip(),
-                "gm": str(r["gm_discord_id"] or ""), "members": members, "guests": guests,
+                "gm": "" if gm_guest else str(r["gm_discord_id"] or ""), "gm_guest": gm_guest,
+                "members": members, "guests": guests,
             }
     return list(unique.values())
 
@@ -1993,10 +1987,11 @@ def _member_metrics(c, uid: str, records):
 
 
 def _record_table_key(r) -> str:
+    guest_gm = str(r.get("gm_guest") or "").strip()
     payload = [
         str(r.get("game_type") or ""),
         str(r.get("scenario") or "").strip(),
-        str(r.get("gm") or ""),
+        ("guest:" + guest_gm) if guest_gm else str(r.get("gm") or ""),
         sorted(str(x) for x in (r.get("members") or ()) if str(x)),
         sorted(str(x) for x in (r.get("guests") or ()) if str(x)),
     ]
@@ -2242,6 +2237,23 @@ def ensure_count_identity_v3(as_of_date: str, updated_at: str) -> bool:
     return bool(wrong_version)
 
 
+def ensure_calendar_recount_v4(as_of_date: str, updated_at: str) -> bool:
+    """この版の導入時だけカレンダー履歴を正本に再集計する。イベントと未来卓は対象外。"""
+    with db() as c:
+        done = c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='calendar_recount_v4_done' AND meta_value='1'"
+        ).fetchone()
+    if done:
+        return False
+    # 取得済み称号や装備、手動の年別補正は維持する。処理済み卓の基準もここで再構築。
+    reconcile_profile_stats(str(as_of_date), str(updated_at))
+    with db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('calendar_recount_v4_done','1')"
+        )
+    return True
+
+
 def catch_up_profile_stats(after_date: str, through_date: str, updated_at: str) -> int:
     """停止中の日付だけを差分加算する。卓がない日や過去の全履歴は読まない。"""
     with db() as c:
@@ -2477,7 +2489,7 @@ def profile_delta_initialized() -> bool:
 
 def _unique_table_records_for_date(c, event_date: str):
     rows = c.execute(
-        """SELECT id,event_date,game_type,scenario_name,gm_discord_id
+        """SELECT id,event_date,game_type,scenario_name,gm_discord_id,gm_guest_name
              FROM calendar_sessions
             WHERE event_date=? AND game_type IN ('TRPG','MADMIS','マダミス')
             ORDER BY id""",
@@ -2509,7 +2521,8 @@ def _unique_table_records_for_date(c, event_date: str):
             "date": str(r["event_date"]),
             "game_type": _achievement_gt(r["game_type"]),
             "scenario": str(r["scenario_name"] or "").strip(),
-            "gm": str(r["gm_discord_id"] or ""),
+            "gm": "" if str(r["gm_guest_name"] or "").strip() else str(r["gm_discord_id"] or ""),
+            "gm_guest": str(r["gm_guest_name"] or "").strip(),
             "members": tuple(sorted(member_map.get(sid, ()))),
             "guests": tuple(sorted(guest_map.get(sid, ()))),
         }
@@ -2704,12 +2717,12 @@ def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
 def profile_delta_record_for_calendar_session(calendar_session_id: int):
     """v118: カレンダー編集前の1卓ぶんを差分調整用レコードとして取得する。"""
     with db() as c:
-        r=c.execute("SELECT id,event_date,game_type,scenario_name,gm_discord_id FROM calendar_sessions WHERE id=?",(int(calendar_session_id),)).fetchone()
+        r=c.execute("SELECT id,event_date,game_type,scenario_name,gm_discord_id,gm_guest_name FROM calendar_sessions WHERE id=?",(int(calendar_session_id),)).fetchone()
         if not r or str(r["game_type"] or "") not in {"TRPG","MADMIS","マダミス"}:
             return None
         members=tuple(sorted(str(x["discord_id"]) for x in c.execute("SELECT discord_id FROM calendar_session_members WHERE calendar_session_id=?",(int(calendar_session_id),)).fetchall()))
         guests=tuple(sorted(str(x["display_name"]) for x in c.execute("SELECT display_name FROM calendar_guest_members WHERE calendar_session_id=?",(int(calendar_session_id),)).fetchall()))
-        rec={"id":int(r["id"]),"date":str(r["event_date"]),"game_type":_achievement_gt(r["game_type"]),"scenario":str(r["scenario_name"] or "").strip(),"gm":str(r["gm_discord_id"] or ""),"members":members,"guests":guests}
+        rec={"id":int(r["id"]),"date":str(r["event_date"]),"game_type":_achievement_gt(r["game_type"]),"scenario":str(r["scenario_name"] or "").strip(),"gm":"" if str(r["gm_guest_name"] or "").strip() else str(r["gm_discord_id"] or ""),"gm_guest":str(r["gm_guest_name"] or "").strip(),"members":members,"guests":guests}
         rec["table_key"]=_record_table_key(rec)
         return rec
 
