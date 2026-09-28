@@ -2931,7 +2931,7 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
         await send_long(ch, f'🎲 **「{r["scenario_name"]}」日程調整**\n\n'
                         + overview + '\n\n'
                         + f'回答期限：**{deadline.strftime("%Y/%m/%d")}**\n'
-                        + '参加した方は下のボタンから日程を回答してください。',
+                        + '以下のボタンから日程回答をお願いします',
                         view=WaitingButtons(rid, has_detail=bool((r["guide_message"] or "").strip()),
                                             answer_url=f'{BASE_URL}/r/{rid}'))
 
@@ -3168,7 +3168,7 @@ class WaitingButtons(discord.ui.View):
             self.add_item(discord.ui.Button(label="日程を回答する", style=discord.ButtonStyle.link, url=answer_url))
         if not legacy:
             # URLを直接開くリンクボタン。Web側でGMだけに再日程調整を許可する。
-            self.add_item(discord.ui.Button(label="再日程調整", style=discord.ButtonStyle.link,
+            self.add_item(discord.ui.Button(label="再日程調整(GM用)", style=discord.ButtonStyle.link,
                                             url=f"{BASE_URL}/r/{rid}/reschedule"))
         if pending:
             self.start = discord.ui.Button(label="日程調整開始", style=discord.ButtonStyle.success,
@@ -3196,7 +3196,7 @@ class WaitingButtons(discord.ui.View):
             return
         await gm_action(interaction, r["gm_discord_id"], f"{BASE_URL}/r/{self.rid}/schedule/start", "日程調整を開始")
 
-    @discord.ui.button(label="再日程調整", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="再日程調整(GM用)", style=discord.ButtonStyle.primary)
     async def reschedule(self, interaction: discord.Interaction, button: discord.ui.Button):
         r = get_recruitment(self.rid)
         if not r:
@@ -3206,10 +3206,14 @@ class WaitingButtons(discord.ui.View):
 
 
 class DecideButton(discord.ui.View):
-    def __init__(self, rid: int):
+    def __init__(self, rid: int, legacy: bool = False):
         super().__init__(timeout=None)
         self.rid = int(rid)
         self.decide.custom_id = f"tsubutaku:decide:{rid}"
+        if not legacy:
+            self.remove_item(self.decide)
+            self.add_item(discord.ui.Button(label="日程を確定する", style=discord.ButtonStyle.link,
+                                            url=f"{BASE_URL}/r/{rid}/decide"))
 
     @discord.ui.button(label="日程確定", style=discord.ButtonStyle.success)
     async def decide(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3227,16 +3231,33 @@ class AnswerButton(discord.ui.View):
 
 
 class SessionButtons(discord.ui.View):
-    def __init__(self, sid: int, has_detail: bool = True):
+    def __init__(self, sid: int, has_detail: bool = True, legacy: bool = False):
         super().__init__(timeout=None)
         self.sid = int(sid)
         self.change.custom_id = f"tsubutaku:session:change:{sid}"
         self.cancel.custom_id = f"tsubutaku:session:cancel:{sid}"
         self.scenario.custom_id = f"tsubutaku:session:detail:{sid}"
+        self.overview.custom_id = f"tsubutaku:session:overview:{sid}"
         if not has_detail:
             self.remove_item(self.scenario)
 
-    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.secondary)
+        if legacy:
+            self.remove_item(self.overview)
+        else:
+            self.remove_item(self.change)
+            self.remove_item(self.cancel)
+            self.add_item(discord.ui.Button(label="日程変更(GM用)", style=discord.ButtonStyle.link,
+                                            url=f"{BASE_URL}/session/{sid}/reschedule/new", row=1))
+            self.add_item(discord.ui.Button(label="開催中止(GM用)", style=discord.ButtonStyle.link,
+                                            url=f"{BASE_URL}/session/{sid}/cancel", row=1))
+
+    @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.success, row=0)
+    async def overview(self, interaction: discord.Interaction, button: discord.ui.Button):
+        with db() as c:
+            r = c.execute("SELECT r.scenario_name,r.description FROM recruitments r JOIN sessions s ON s.recruitment_id=r.id WHERE s.id=?", (self.sid,)).fetchone()
+        await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ概要**\n\n{r["description"]}' if r else "卓が見つかりません。")
+
+    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.primary, row=0)
     async def scenario(self, interaction: discord.Interaction, button: discord.ui.Button):
         with db() as c:
             r = c.execute("SELECT r.scenario_name,r.guide_message FROM recruitments r JOIN sessions s ON s.recruitment_id=r.id WHERE s.id=?", (self.sid,)).fetchone()
@@ -3251,11 +3272,11 @@ class SessionButtons(discord.ui.View):
         await gm_action(interaction, detail["gm_discord_id"], f"{BASE_URL}/session/{self.sid}/{path}",
                         "日程変更を開く" if kind == "change" else "開催中止を確認")
 
-    @discord.ui.button(label="日程変更", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="日程変更", style=discord.ButtonStyle.primary, row=1)
     async def change(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.action(interaction, "change")
 
-    @discord.ui.button(label="開催中止", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="開催中止", style=discord.ButtonStyle.danger, row=1)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.action(interaction, "cancel")
 
@@ -3339,9 +3360,9 @@ def restore_discord_buttons():
     for r in waiting:
         bot.add_view(WaitingButtons(int(r["id"]), True, bool((r["guide_message"] or "").strip()), legacy=True))
     for r in decisions:
-        bot.add_view(DecideButton(int(r["id"])))
+        bot.add_view(DecideButton(int(r["id"]), legacy=True))
     for s in sessions:
-        bot.add_view(SessionButtons(int(s["id"]), bool((s["guide_message"] or "").strip())))
+        bot.add_view(SessionButtons(int(s["id"]), bool((s["guide_message"] or "").strip()), legacy=True))
         bot.add_view(FinishButton(int(s["id"])))
     _registered_button_views = True
 
@@ -7348,11 +7369,12 @@ async def decide_submit(request: Request, rid: int):
             gm_label=r['gm_name_override'] if is_simple_schedule(r) and r['gm_name_override'] else f'<@{uid}>'
             role_label='主催' if r['game_type']=='EVENT' else 'GM'
             slot_lines='\n'.join(f'・{d} {t}〜' for d,t in slots)
-            await send_long(ch,f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日時：\n{slot_lines}\n\n{role_label}：{gm_label}\n参加者：\n{mentions}')
+            await send_long(ch,f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日時：\n{slot_lines}\n\n{role_label}：{gm_label}\n参加者：\n{mentions}',
+                            view=SessionButtons(sid, has_detail=bool((r["guide_message"] or "").strip())) if not is_simple_schedule(r) else None)
             if not is_simple_schedule(r):
                 details = (r["guide_message"] or "").strip()
-                await send_long(ch, f'📖 **シナリオ詳細**\n\n{details}' if details else '卓の管理',
-                                view=SessionButtons(sid, has_detail=bool(details)))
+                if details:
+                    await send_long(ch, f'📖 **シナリオ詳細**\n\n{details}')
 
         waiting_ch=None
         if r['waiting_channel_id']:
@@ -7511,7 +7533,7 @@ async def session_reschedule_new_submit(session_id:int,request:Request):
     reschedule_id=create_session_reschedule(session_id,start_time,deadline,dates,iso_now(),candidate_slots=slots,per_day_time=per_day_time)
     ch=await _session_channel(session_id)
     if ch:
-        await ch.send('開催日の再調整を開始しました。下のボタンから回答してください。',
+        await ch.send('開催日の再調整を行います\n以下のボタンから回答してください',
                       silent=in_quiet_hours(), view=AnswerButton(f'{BASE_URL}/session-reschedule/{reschedule_id}'))
     return RedirectResponse(f'/session-reschedule/{reschedule_id}',303)
 
@@ -8056,7 +8078,7 @@ async def schedule_start_submit(
         f"回答期限：**{deadline_date}**\n"
         f"募集人数：**{updated['min_players']}〜{updated['max_players']}人**\n"
         f"プレイ時間：**{updated['play_time']}**\n\n"
-        "下のボタンから日程を回答してください。",
+        "以下のボタンから日程回答をお願いします",
         view=WaitingButtons(rid, has_detail=bool((updated['guide_message'] or '').strip()),
                             answer_url=f"{BASE_URL}/r/{rid}"),
     )
@@ -8397,12 +8419,12 @@ async def reschedule_submit(
             channel,
             (
                 "## 🔄 再日程調整\n\n"
-                f"『{r['scenario_name']}』の再日程調整を開始しました。\n\n"
+                f"『{r['scenario_name']}』\n開催日の再調整を行います\n\n"
                 f"開始時間：**{start_time}〜**\n"
                 f"回答期限：**{deadline_date}**\n"
                 f"募集人数：**{r['min_players']}〜{r['max_players']}人**\n"
                 f"プレイ時間：**{r['play_time']}**\n\n"
-                "下のボタンから新しい日程を回答してください。"
+                "以下のボタンから回答してください"
             ),
             view=WaitingButtons(new_id, has_detail=bool((r['guide_message'] or '').strip()),
                                 answer_url=f"{BASE_URL}/r/{new_id}"),
