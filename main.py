@@ -3165,23 +3165,24 @@ class WaitingButtons(discord.ui.View):
         if not legacy:
             self.remove_item(self.reschedule)
         if answer_url:
-            self.add_item(discord.ui.Button(label="日程を回答する", style=discord.ButtonStyle.link, url=answer_url))
+            self.add_item(discord.ui.Button(label="日程を回答する", style=discord.ButtonStyle.link,
+                                            url=answer_url, row=1))
         if not legacy:
             # URLを直接開くリンクボタン。Web側でGMだけに再日程調整を許可する。
             self.add_item(discord.ui.Button(label="再日程調整(GM用)", style=discord.ButtonStyle.link,
-                                            url=f"{BASE_URL}/r/{rid}/reschedule"))
+                                            url=f"{BASE_URL}/r/{rid}/reschedule", row=1))
         if pending:
             self.start = discord.ui.Button(label="日程調整開始", style=discord.ButtonStyle.success,
-                                           custom_id=f"tsubutaku:start:{rid}")
+                                           custom_id=f"tsubutaku:start:{rid}", row=1)
             self.start.callback = self.start_schedule
             self.add_item(self.start)
 
-    @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.success, row=0)
     async def overview(self, interaction: discord.Interaction, button: discord.ui.Button):
         r = get_recruitment(self.rid)
         await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ概要**\n\n{r["description"]}' if r else "募集が見つかりません。")
 
-    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.primary, row=0)
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
         r = get_recruitment(self.rid)
         if not r or not (r["guide_message"] or "").strip():
@@ -3196,7 +3197,7 @@ class WaitingButtons(discord.ui.View):
             return
         await gm_action(interaction, r["gm_discord_id"], f"{BASE_URL}/r/{self.rid}/schedule/start", "日程調整を開始")
 
-    @discord.ui.button(label="再日程調整(GM用)", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="再日程調整(GM用)", style=discord.ButtonStyle.primary, row=1)
     async def reschedule(self, interaction: discord.Interaction, button: discord.ui.Button):
         r = get_recruitment(self.rid)
         if not r:
