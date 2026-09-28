@@ -35,7 +35,7 @@ class CachedStaticFiles(StaticFiles):
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, reconcile_profile_stats, catch_up_profile_stats, ensure_count_identity_v3, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -117,6 +117,7 @@ SESSION_CATEGORY_ID = env_int("SESSION_CATEGORY_ID", 1245192932147855401)
 JOIN_EMOJI_ID = env_int("JOIN_EMOJI_ID", 1486316302308999218)
 WATCH_EMOJI_ID = env_int("WATCH_EMOJI_ID", 1486316056711794748)
 TSUBUTTER_CHANNEL_ID = int(os.getenv('TSUBUTTER_CHANNEL_ID', '1278698568231817317'))
+WEEKLY_SCHEDULE_CHANNEL_ID = 1291212194557595720
 DEVELOPER_USER_ID = "804350794371039272"  # yuzuky / 開発者テスト用
 
 PORT = env_int("PORT", 8000)
@@ -350,6 +351,10 @@ def original_recruitment_with_message(rid: int):
     return None
 
 
+# 撤去予定：旧リアクション募集がすべて終了し、再日程調整も不要になった後に
+# fetch_current_reaction_members / handle_reaction / on_raw_reaction_add・remove、
+# JOIN_EMOJI_ID・WATCH_EMOJI_ID、intents.reactions、configured() の絵文字必須条件を整理する。
+# DB の signup_mode と既存投稿は稼働中に一括削除しない。撤去前に旧募集の残数をDBで確認する。
 async def fetch_current_reaction_members(rid: int):
     """
     元の募集投稿に現在付いている参加・観戦リアクションをDiscordから再取得する。
@@ -360,6 +365,9 @@ async def fetch_current_reaction_members(rid: int):
     """
     source = original_recruitment_with_message(rid)
     if not source:
+        return None
+    # ボタン投稿はDBの登録者を正とする。リアクションは旧投稿のみ参照する。
+    if source["signup_mode"] == "button":
         return None
 
     guild = bot.get_guild(GUILD_ID)
@@ -2685,9 +2693,11 @@ def emoji_by_id(eid: int):
     return bot.get_emoji(eid)
 
 
-async def send_long(channel, text: str):
-    for chunk in split_text(text):
-        await channel.send(chunk)
+async def send_long(channel, text: str, view=None, allowed_mentions=None):
+    chunks = split_text(text)
+    for index, chunk in enumerate(chunks):
+        await channel.send(chunk, silent=in_quiet_hours(), allowed_mentions=allowed_mentions,
+                           view=view if index == len(chunks) - 1 else None)
 
 def in_quiet_hours(dt: datetime | None = None) -> bool:
     """
@@ -2695,6 +2705,29 @@ def in_quiet_hours(dt: datetime | None = None) -> bool:
     """
     dt = dt or now_jst()
     return dt.hour >= 21 or dt.hour < 9
+
+
+def in_overnight_mute(dt: datetime | None = None) -> bool:
+    """開催可能通知は指定された0:00〜6:00だけ通知音を抑える。"""
+    dt = dt or now_jst()
+    return 0 <= dt.hour < 6
+
+
+async def ephemeral_text(interaction: discord.Interaction, message: str):
+    """長い案内は本人にだけ分割して表示する。"""
+    chunks = split_text(message or "詳細は登録されていません。")
+    await interaction.response.send_message(chunks[0], ephemeral=True)
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
+
+
+async def gm_action(interaction: discord.Interaction, gm_id: str, url: str, label: str):
+    if str(interaction.user.id) != str(gm_id):
+        await interaction.response.send_message("この操作はGMだけが行えます。", ephemeral=True)
+        return
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label=label, url=url))
+    await interaction.response.send_message("続きは以下から操作してください。", view=view, ephemeral=True)
 
 
 SIMPLE_SCHEDULE_ALLOWED_CATEGORIES = {
@@ -2819,7 +2852,7 @@ async def notify_availability_if_needed(rid: int):
         return
 
     lines = [
-        (f'・{x["date"]} {x.get("time", "")}〜：○ {len(x["yes"])}人' if per_day_time else f'・{x["date"]}：○ {len(x["yes"])}人')
+        (f'・{x["date"]} {x.get("time", "")}〜：○ {len(x["yes"])}人 △ {len(x.get("maybe", []))}人' if per_day_time else f'・{x["date"]}：○ {len(x["yes"])}人 △ {len(x.get("maybe", []))}人')
         for x in candidates
     ]
 
@@ -2827,12 +2860,13 @@ async def notify_availability_if_needed(rid: int):
         "🎉 **開催できるようになりました！**\n\n"
         "必要人数を満たした日程があります。\n"
         + "\n".join(lines)
-        + f"\n\nGMは開催日を決定できます。\n{BASE_URL}/r/{rid}/decide"
+        + "\n\nGMは開催日を決定できます。"
     )
 
     await ch.send(
         message,
-        silent=in_quiet_hours(),
+        silent=in_overnight_mute(),
+        view=DecideButton(rid),
     )
 
     with db() as c:
@@ -2842,7 +2876,7 @@ async def notify_availability_if_needed(rid: int):
         )
 
     print(
-        f"[AVAILABILITY] notified rid={rid} quiet={in_quiet_hours()}",
+        f"[AVAILABILITY] notified rid={rid} quiet={in_overnight_mute()}",
         flush=True,
     )
 
@@ -2873,27 +2907,25 @@ async def create_waiting_channel(rid: int) -> discord.TextChannel:
     )
     with db() as c:
         c.execute("UPDATE recruitments SET waiting_channel_id=? WHERE id=?", (str(ch.id), rid))
+    players = (str(r["min_players"]) if r["min_players"] == r["max_players"]
+               else f'{r["min_players"]}〜{r["max_players"]}')
+    overview = (f'募集人数：**{players}人**\nプレイ時間：**{r["play_time"]}**\n'
+                f'開始時間：**{r["start_time"]}〜**')
     if int(r["schedule_pending"] or 0):
-        await ch.send(
-            f'🎲 **「{r["scenario_name"]}」募集開始**\n\n'
-            '日程調整は後日行います！\n\n'
-            '参加リアクションを押した方はこちらのチャンネルへ追加されます。\n'
-            'GMからの日程調整開始の案内をお待ちください。\n\n'
-            f'GMの方へ：日程調整は以下のリンクよりお願いします！\n{BASE_URL}/r/{rid}/schedule/start',
-            silent=in_quiet_hours(),
-        )
+        await send_long(ch, f'🎲 **「{r["scenario_name"]}」募集開始**\n\n'
+                        + overview + '\n\n日程調整は後日行います。参加・観戦を選んだ方はこちらのチャンネルへ追加されます。',
+                        view=WaitingButtons(rid, pending=True, has_detail=bool((r["guide_message"] or "").strip())))
     else:
         deadline = datetime.fromisoformat(
             r["deadline"]
         ).astimezone(JST)
 
-        await ch.send(
-            f'🎲 **「{r["scenario_name"]}」日程調整**\n\n'
-            f'回答期限：**{deadline.strftime("%Y/%m/%d 21:00")}**\n'
-            '参加リアクションを押した方は、こちらから回答してください。\n'
-            f'{BASE_URL}/r/{rid}',
-            silent=in_quiet_hours(),
-        )
+        await send_long(ch, f'🎲 **「{r["scenario_name"]}」日程調整**\n\n'
+                        + overview + '\n\n'
+                        + f'回答期限：**{deadline.strftime("%Y/%m/%d")}**\n'
+                        + '参加した方は下のボタンから日程を回答してください。',
+                        view=WaitingButtons(rid, has_detail=bool((r["guide_message"] or "").strip()),
+                                            answer_url=f'{BASE_URL}/r/{rid}'))
 
     return ch
 
@@ -2939,13 +2971,12 @@ async def post_recruitment(rid: int):
 
     if int(r["schedule_pending"] or 0):
         closing = (
-            '参加希望の方は「参加」リアクションを押してください！\n'
+            '参加希望の方は下のボタンから登録してください。\n'
             '日程調整は後日行います！'
         )
     else:
         closing = (
-            '参加希望の方は「参加」リアクションを押して'
-            '日程調整への回答をお願いします！'
+            '参加希望の方は下のボタンから登録し、日程を回答してください！'
         )
 
     header = (
@@ -2974,33 +3005,22 @@ async def post_recruitment(rid: int):
         chunks[0],
         files=files if files else None,
         silent=recruitment_silent,
+        view=RecruitmentButtons(has_detail=bool((r["guide_message"] or "").strip())),
     )
+
+    # 投稿直後からボタンを有効にする。後続の長文送信に失敗しても対応付けを失わない。
+    with db() as c:
+        c.execute(
+            """UPDATE recruitments
+               SET recruitment_message_id=?, recruitment_channel_id=?, signup_mode='button'
+               WHERE id=?""",
+            (str(first.id), str(channel.id), rid),
+        )
 
     for chunk in chunks[1:]:
         await channel.send(
             chunk,
             silent=recruitment_silent,
-        )
-
-    join_emoji = emoji_by_id(JOIN_EMOJI_ID)
-    watch_emoji = emoji_by_id(WATCH_EMOJI_ID)
-
-    if not join_emoji or not watch_emoji:
-        raise RuntimeError(
-            "参加/観戦用カスタム絵文字が見つかりません。"
-            "絵文字IDを確認してください。"
-        )
-
-    await first.add_reaction(join_emoji)
-    await first.add_reaction(watch_emoji)
-
-    with db() as c:
-        c.execute(
-            """UPDATE recruitments
-               SET recruitment_message_id=?,
-                   recruitment_channel_id=?
-               WHERE id=?""",
-            (str(first.id), str(channel.id), rid),
         )
 
     # Discordへの投稿が正常完了したら、Railway側の画像コピーは不要。
@@ -3047,6 +3067,272 @@ async def set_waiting_access(rid: int, uid: str, allow: bool):
         )
 
 
+class RecruitmentButtons(discord.ui.View):
+    """募集投稿のIDから対象を引くので、再起動後も同じボタンを処理できる。"""
+    def __init__(self, has_detail: bool = True):
+        super().__init__(timeout=None)
+        if not has_detail:
+            self.remove_item(self.detail)
+
+    async def choose(self, interaction: discord.Interaction, kind: str):
+        if not interaction.message or interaction.guild_id != GUILD_ID:
+            await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
+            return
+        with db() as c:
+            r = c.execute("SELECT * FROM recruitments WHERE recruitment_message_id=?",
+                          (str(interaction.message.id),)).fetchone()
+        if not r:
+            await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
+            return
+        if r["status"] in ("ERROR", "CANCELLED"):
+            await interaction.response.send_message("この募集は終了しています。", ephemeral=True)
+            return
+        uid = str(interaction.user.id)
+        with db() as c:
+            existing = c.execute("SELECT member_type FROM members WHERE recruitment_id=? AND discord_id=? AND active=1",
+                                 (int(r["id"]), uid)).fetchall()
+        if len(existing) == 1 and str(existing[0]["member_type"]) == kind:
+            await interaction.response.send_message("すでに登録済みです。", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            # DBに参加を記録する前に、チャンネル閲覧権限が付与できるか確認する。
+            await set_waiting_access(int(r["id"]), uid, True)
+            root_id = int(r["id"])
+            latest_id = latest_reschedule_id(root_id)
+            targets = list(dict.fromkeys((root_id, latest_id)))
+            with db() as c:
+                for target in targets:
+                    c.execute("UPDATE members SET active=0 WHERE recruitment_id=? AND discord_id=?", (target, uid))
+                    c.execute("""INSERT INTO members(recruitment_id,discord_id,member_type,active,joined_at)
+                                 VALUES(?,?,?,?,?) ON CONFLICT(recruitment_id,discord_id,member_type)
+                                 DO UPDATE SET active=1,joined_at=excluded.joined_at""",
+                              (target, uid, kind, 1, iso_now()))
+                    # 観戦へ切り替えても回答履歴は保持。参加者だけを集計するため候補には入らない。
+                member = interaction.user
+                c.execute("""INSERT INTO users(discord_id,username,display_name,avatar_url,updated_at)
+                             VALUES(?,?,?,?,?) ON CONFLICT(discord_id) DO UPDATE SET
+                             username=excluded.username,display_name=excluded.display_name,
+                             avatar_url=excluded.avatar_url,updated_at=excluded.updated_at""",
+                          (uid, member.name, member.display_name, str(member.display_avatar.url), iso_now()))
+            ch = interaction.guild.get_channel(int(r["waiting_channel_id"])) if r["waiting_channel_id"] else None
+            if ch:
+                await ch.send(f'<@{uid}> が{"参加" if kind == "participant" else "観戦"}を選びました。',
+                              silent=True)
+            await interaction.followup.send(
+                "参加登録しました。日程調整チャンネルを確認してください。" if kind == "participant"
+                else "観戦登録しました。日程回答の対象にはなりません。", ephemeral=True)
+        except Exception as e:
+            log_error(f"recruitment_button kind={kind} rid={r['id']}", e)
+            await interaction.followup.send("登録に失敗しました。少し待って再度お試しください。", ephemeral=True)
+
+    @discord.ui.button(label="参加", style=discord.ButtonStyle.success, custom_id="tsubutaku:join")
+    async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(interaction, "participant")
+
+    @discord.ui.button(label="観戦", style=discord.ButtonStyle.secondary, custom_id="tsubutaku:watch")
+    async def watch(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.choose(interaction, "spectator")
+
+    @discord.ui.button(label="募集詳細", style=discord.ButtonStyle.primary, custom_id="tsubutaku:detail")
+    async def detail(self, interaction: discord.Interaction, button: discord.ui.Button):
+        with db() as c:
+            r = c.execute("SELECT scenario_name,guide_message FROM recruitments WHERE recruitment_message_id=?",
+                          (str(interaction.message.id),)).fetchone()
+        if not r:
+            await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
+            return
+        await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ詳細**\n\n{r["guide_message"] or "詳細は登録されていません。"}')
+
+
+class WaitingButtons(discord.ui.View):
+    def __init__(self, rid: int, pending: bool = False, has_detail: bool = True,
+                 answer_url: str | None = None):
+        super().__init__(timeout=None)
+        self.rid = int(rid)
+        self.overview.custom_id = f"tsubutaku:overview:{rid}"
+        self.details.custom_id = f"tsubutaku:waiting:detail:{rid}"
+        self.reschedule.custom_id = f"tsubutaku:reschedule:{rid}"
+        if not has_detail:
+            self.remove_item(self.details)
+        if answer_url:
+            self.add_item(discord.ui.Button(label="回答", style=discord.ButtonStyle.link, url=answer_url))
+        if pending:
+            self.start = discord.ui.Button(label="日程調整開始", style=discord.ButtonStyle.success,
+                                           custom_id=f"tsubutaku:start:{rid}")
+            self.start.callback = self.start_schedule
+            self.add_item(self.start)
+
+    @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.secondary)
+    async def overview(self, interaction: discord.Interaction, button: discord.ui.Button):
+        r = get_recruitment(self.rid)
+        await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ概要**\n\n{r["description"]}' if r else "募集が見つかりません。")
+
+    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.secondary)
+    async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
+        r = get_recruitment(self.rid)
+        if not r or not (r["guide_message"] or "").strip():
+            await interaction.response.send_message("シナリオ詳細は登録されていません。", ephemeral=True)
+            return
+        await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ詳細**\n\n{r["guide_message"]}')
+
+    async def start_schedule(self, interaction: discord.Interaction):
+        r = get_recruitment(self.rid)
+        if not r or not int(r["schedule_pending"] or 0):
+            await interaction.response.send_message("日程調整は開始済みです。", ephemeral=True)
+            return
+        await gm_action(interaction, r["gm_discord_id"], f"{BASE_URL}/r/{self.rid}/schedule/start", "日程調整を開始")
+
+    @discord.ui.button(label="再日程調整", style=discord.ButtonStyle.primary)
+    async def reschedule(self, interaction: discord.Interaction, button: discord.ui.Button):
+        r = get_recruitment(self.rid)
+        if not r:
+            await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
+            return
+        await gm_action(interaction, r["gm_discord_id"], f"{BASE_URL}/r/{self.rid}/reschedule", "再日程調整を開く")
+
+
+class DecideButton(discord.ui.View):
+    def __init__(self, rid: int):
+        super().__init__(timeout=None)
+        self.rid = int(rid)
+        self.decide.custom_id = f"tsubutaku:decide:{rid}"
+
+    @discord.ui.button(label="日程確定", style=discord.ButtonStyle.success)
+    async def decide(self, interaction: discord.Interaction, button: discord.ui.Button):
+        r = get_recruitment(self.rid)
+        if not r:
+            await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
+            return
+        await gm_action(interaction, r["gm_discord_id"], f"{BASE_URL}/r/{self.rid}/decide", "日程を確定")
+
+
+class AnswerButton(discord.ui.View):
+    def __init__(self, url: str):
+        super().__init__()
+        self.add_item(discord.ui.Button(label="回答", style=discord.ButtonStyle.link, url=url))
+
+
+class SessionButtons(discord.ui.View):
+    def __init__(self, sid: int, has_detail: bool = True):
+        super().__init__(timeout=None)
+        self.sid = int(sid)
+        self.change.custom_id = f"tsubutaku:session:change:{sid}"
+        self.cancel.custom_id = f"tsubutaku:session:cancel:{sid}"
+        self.scenario.custom_id = f"tsubutaku:session:detail:{sid}"
+        if not has_detail:
+            self.remove_item(self.scenario)
+
+    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.secondary)
+    async def scenario(self, interaction: discord.Interaction, button: discord.ui.Button):
+        with db() as c:
+            r = c.execute("SELECT r.scenario_name,r.guide_message FROM recruitments r JOIN sessions s ON s.recruitment_id=r.id WHERE s.id=?", (self.sid,)).fetchone()
+        await ephemeral_text(interaction, f'**{r["scenario_name"]}**\n\n{r["guide_message"] or "詳細は登録されていません。"}' if r else "卓が見つかりません。")
+
+    async def action(self, interaction: discord.Interaction, kind: str):
+        detail, _ = session_management_detail(self.sid)
+        if not detail or detail.get("cancelled_at") or detail.get("ended_at"):
+            await interaction.response.send_message("この卓は操作できません。", ephemeral=True)
+            return
+        path = "reschedule/new" if kind == "change" else "cancel"
+        await gm_action(interaction, detail["gm_discord_id"], f"{BASE_URL}/session/{self.sid}/{path}",
+                        "日程変更を開く" if kind == "change" else "開催中止を確認")
+
+    @discord.ui.button(label="日程変更", style=discord.ButtonStyle.primary)
+    async def change(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.action(interaction, "change")
+
+    @discord.ui.button(label="開催中止", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.action(interaction, "cancel")
+
+
+class FinishButton(discord.ui.View):
+    def __init__(self, sid: int):
+        super().__init__(timeout=None)
+        self.sid = int(sid)
+        self.finish.custom_id = f"tsubutaku:session:finish:{sid}"
+
+    @discord.ui.button(label="終了", style=discord.ButtonStyle.success)
+    async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        detail, _ = session_management_detail(self.sid)
+        if not detail or detail.get("cancelled_at") or detail.get("ended_at"):
+            await interaction.response.send_message("この卓は終了済み、または操作できません。", ephemeral=True)
+            return
+        if str(interaction.user.id) != str(detail["gm_discord_id"]):
+            await interaction.response.send_message("終了操作はGMだけが行えます。", ephemeral=True)
+            return
+        if str(detail["event_date"]) > now_jst().date().isoformat():
+            await interaction.response.send_message("開催日以降に終了できます。", ephemeral=True)
+            return
+        starts = []
+        for slot in get_session_slots(self.sid):
+            try:
+                starts.append(datetime.fromisoformat(f'{slot["event_date"]}T{slot["start_time"]}:00').replace(tzinfo=JST))
+            except ValueError:
+                pass
+        if starts and now_jst() < max(starts):
+            await interaction.response.send_message("最後の開催開始時刻以降に終了できます。", ephemeral=True)
+            return
+        ch = interaction.guild.get_channel(int(detail["channel_id"])) if detail.get("channel_id") else None
+        if not ch or not isinstance(ch, discord.TextChannel) or not ch.topic or f"つぶ卓 成立 ID:{self.sid}" not in ch.topic:
+            await interaction.response.send_message("成立卓チャンネルが見つかりません。", ephemeral=True)
+            return
+        game_type = str(detail["game_type"])
+        if game_type == "TRPG":
+            category_prefix, previous_no = "終了卓(TRPG)", 3
+        elif game_type in ("MADMIS", "マダミス"):
+            category_prefix, previous_no = "終了卓(マダミス)", 2
+        else:
+            category_prefix, previous_no = "終了卓(その他)", 0
+        categories = sorted(
+            (cat for cat in interaction.guild.categories
+             if re.fullmatch(re.escape(category_prefix) + r"-\d+", cat.name)),
+            key=lambda cat: int(cat.name.rsplit("-", 1)[1]), reverse=True,
+        )
+        await interaction.response.defer(ephemeral=True)
+        try:
+            target = next((cat for cat in categories if len(cat.channels) < 45), None)
+            if target is None:
+                next_no = max([previous_no] + [int(cat.name.rsplit("-", 1)[1]) for cat in categories]) + 1
+                source = categories[0] if categories else ch.category
+                target = await interaction.guild.create_category(
+                    f"{category_prefix}-{next_no}",
+                    overwrites=source.overwrites if source else None,
+                    reason="つぶ卓 終了卓カテゴリー追加",
+                )
+            await ch.edit(category=target, sync_permissions=False, reason="つぶ卓 卓終了")
+            with db() as c:
+                c.execute("UPDATE sessions SET ended_at=? WHERE id=? AND ended_at IS NULL", (iso_now(), self.sid))
+            await interaction.followup.send(f"終了卓へ移動しました：{ch.mention}", ephemeral=True)
+        except discord.HTTPException as exc:
+            log_error(f"session_finish sid={self.sid}", exc)
+            await interaction.followup.send("移動に失敗しました。Botの『チャンネルの管理』権限を確認してください。", ephemeral=True)
+
+
+_registered_button_views = False
+
+
+def restore_discord_buttons():
+    global _registered_button_views
+    if _registered_button_views:
+        return
+    bot.add_view(RecruitmentButtons())
+    with db() as c:
+        waiting = c.execute("SELECT id,schedule_pending,guide_message FROM recruitments WHERE waiting_channel_id IS NOT NULL").fetchall()
+        decisions = c.execute("SELECT id FROM recruitments WHERE waiting_channel_id IS NOT NULL").fetchall()
+        sessions = c.execute("""SELECT s.id,r.guide_message FROM sessions s
+                              JOIN recruitments r ON r.id=s.recruitment_id""").fetchall()
+    for r in waiting:
+        bot.add_view(WaitingButtons(int(r["id"]), True, bool((r["guide_message"] or "").strip())))
+    for r in decisions:
+        bot.add_view(DecideButton(int(r["id"])))
+    for s in sessions:
+        bot.add_view(SessionButtons(int(s["id"]), bool((s["guide_message"] or "").strip())))
+        bot.add_view(FinishButton(int(s["id"])))
+    _registered_button_views = True
+
+
 async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
     action = "ADD" if added else "REMOVE"
     try:
@@ -3077,6 +3363,9 @@ async def handle_reaction(payload: discord.RawReactionActionEvent, added: bool):
                 f"[REACTION:{action}] recruitment not found for message={payload.message_id}",
                 flush=True,
             )
+            return
+        # 既存投稿だけリアクションを扱う。新規ボタン投稿へのリアクションは登録に使わない。
+        if r["signup_mode"] == "button":
             return
 
         kind = "participant" if eid == JOIN_EMOJI_ID else "spectator"
@@ -3224,95 +3513,16 @@ async def on_raw_reaction_remove(payload):
     await handle_reaction(payload, False)
 
 
-async def predeadline_unanswered_check():
-    """v109: 回答期限の前日20:00に、未回答操作の参加者だけメンション通知する。
-
-    通常の日程調整/募集と、成立後の再日程調整の両方が対象。
-    全て「-」で保存済みの人は回答済みとして扱う。
-    """
-    target_day = now_jst().date() + timedelta(days=1)
-    guild=bot.get_guild(GUILD_ID)
-
-    # 通常の募集・ホーム日程調整・再募集
-    with db() as c:
-        rows=c.execute(
-            """SELECT * FROM recruitments
-               WHERE COALESCE(predeadline_notified,0)=0
-                 AND status IN ('RECRUITING','WAITING_GM_DECISION','FAILED')"""
-        ).fetchall()
-    for r in rows:
-        try: deadline=datetime.fromisoformat(r['deadline']).astimezone(JST)
-        except Exception: continue
-        if deadline.date()!=target_day: continue
-        rid=int(r['id'])
-        with db() as c:
-            targets={str(x['discord_id']) for x in c.execute(
-                "SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1",(rid,)
-            ).fetchall()}
-            submitted={str(x['discord_id']) for x in c.execute(
-                "SELECT discord_id FROM answer_submissions WHERE recruitment_id=?",(rid,)
-            ).fetchall()}
-        targets.discard(str(r['gm_discord_id']))
-        unanswered=sorted(targets-submitted)
-        if not unanswered:
-            with db() as c: c.execute("UPDATE recruitments SET predeadline_notified=1 WHERE id=?",(rid,))
-            continue
-        ch=None
-        if guild and r['waiting_channel_id']:
-            ch=guild.get_channel(int(r['waiting_channel_id']))
-            if ch is None:
-                try: ch=await guild.fetch_channel(int(r['waiting_channel_id']))
-                except Exception: ch=None
-        if ch is None: continue
-        mentions=' '.join(f'<@{uid}>' for uid in unanswered)
-        await ch.send('📅 **日程回答のお願い**\n'+mentions+'\n\n回答期限が明日です！まだ回答していない方は日程入力をお願いします。')
-        with db() as c: c.execute("UPDATE recruitments SET predeadline_notified=1 WHERE id=?",(rid,))
-        print(f"[PREDEADLINE] recruitment rid={rid} count={len(unanswered)}",flush=True)
-
-    # 成立後のGM専用URLから開始した再日程調整
-    with db() as c:
-        reschedules=c.execute(
-            """SELECT sr.*,s.channel_id,r.gm_discord_id
-                 FROM session_reschedules sr
-                 JOIN sessions s ON s.id=sr.session_id
-                 JOIN recruitments r ON r.id=s.recruitment_id
-                WHERE sr.status='OPEN' AND sr.deadline IS NOT NULL
-                  AND COALESCE(sr.predeadline_notified,0)=0"""
-        ).fetchall()
-    for rs in reschedules:
-        try:
-            raw=str(rs['deadline'])
-            deadline=datetime.fromisoformat(raw if 'T' in raw else raw+'T21:00:00').replace(tzinfo=JST) if '+' not in raw else datetime.fromisoformat(raw).astimezone(JST)
-        except Exception:
-            continue
-        if deadline.date()!=target_day: continue
-        rsid=int(rs['id']); session_id=int(rs['session_id'])
-        with db() as c:
-            targets={str(x['discord_id']) for x in c.execute("SELECT discord_id FROM session_members WHERE session_id=?",(session_id,)).fetchall()}
-            submitted={str(x['discord_id']) for x in c.execute("SELECT discord_id FROM session_reschedule_submissions WHERE reschedule_id=?",(rsid,)).fetchall()}
-        targets.discard(str(rs['gm_discord_id']))
-        unanswered=sorted(targets-submitted)
-        if not unanswered:
-            with db() as c: c.execute("UPDATE session_reschedules SET predeadline_notified=1 WHERE id=?",(rsid,))
-            continue
-        ch=None
-        if guild and rs['channel_id']:
-            ch=guild.get_channel(int(rs['channel_id']))
-            if ch is None:
-                try: ch=await guild.fetch_channel(int(rs['channel_id']))
-                except Exception: ch=None
-        if ch is None: continue
-        mentions=' '.join(f'<@{uid}>' for uid in unanswered)
-        await ch.send('📅 **日程回答のお願い**\n'+mentions+'\n\n回答期限が明日です！まだ回答していない方は日程入力をお願いします。')
-        with db() as c: c.execute("UPDATE session_reschedules SET predeadline_notified=1 WHERE id=?",(rsid,))
-        print(f"[PREDEADLINE] session-reschedule id={rsid} count={len(unanswered)}",flush=True)
+deadline_notice_lock = asyncio.Lock()
 
 
 async def deadline_check():
-    """
-    募集期限日の20:00に、その日が期限の卓だけ1回通知する。
-    20:00を逃した過去日の卓には後追い通知しない。
-    """
+    """回答期限日の20:00に、未回答者を含む回答状況を通知する。"""
+    async with deadline_notice_lock:
+        await _deadline_check_once()
+
+
+async def _deadline_check_once():
     today = now_jst().date()
 
     with db() as c:
@@ -3320,7 +3530,7 @@ async def deadline_check():
             """SELECT *
                FROM recruitments
                WHERE deadline_notified=0
-                 AND status IN ('RECRUITING','WAITING_GM_DECISION','FAILED')"""
+                 AND status IN ('RECRUITING','WAITING_GM_DECISION','CONFIRMED','FAILED')"""
         ).fetchall()
 
     for r in rows:
@@ -3330,10 +3540,31 @@ async def deadline_check():
         if deadline.date() != today:
             continue
 
-        candidates = [
-            x for x in candidate_rows(r["id"])
-            if len(x["yes"]) >= int(r["min_players"])
-        ]
+        per_day_time, _ = recruitment_schedule_slots(int(r["id"]))
+        candidates = [x for x in (candidate_slot_rows(int(r["id"])) if per_day_time else candidate_rows(int(r["id"])))
+                      if len(x["yes"]) >= int(r["min_players"])]
+        with db() as c:
+            participants = {str(x["discord_id"]) for x in c.execute(
+                "SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1",
+                (int(r["id"]),)).fetchall()}
+            submitted = {str(x["discord_id"]) for x in c.execute(
+                "SELECT discord_id FROM answer_submissions WHERE recruitment_id=?", (int(r["id"]),)).fetchall()}
+            assigned = {str(x["discord_id"]) for x in c.execute(
+                """SELECT sm.discord_id FROM session_members sm JOIN sessions s ON sm.session_id=s.id
+                   WHERE s.recruitment_id=? AND s.cancelled_at IS NULL""", (int(r["id"]),)).fetchall()}
+        participants -= assigned
+        participants.discard(str(r["gm_discord_id"]))
+        if r["status"] == "CONFIRMED":
+            if not participants:
+                with db() as c:
+                    c.execute("UPDATE recruitments SET deadline_notified=1 WHERE id=?", (r["id"],))
+                continue
+            candidates = [{**x, "yes": [u for u in x["yes"] if str(u) not in assigned],
+                           "maybe": [u for u in x.get("maybe", []) if str(u) not in assigned]}
+                          for x in candidates]
+            candidates = [x for x in candidates if len(x["yes"]) >= int(r["min_players"])]
+        answered = sorted(participants & submitted)
+        unanswered = sorted(participants - submitted)
 
         guild = bot.get_guild(GUILD_ID)
         ch = (
@@ -3349,24 +3580,24 @@ async def deadline_check():
                 ch = None
 
         if ch:
+            lines = ['⏰ **回答期限となりました。**',
+                     '回答済み：' + ('、'.join(f'<@{uid}>' for uid in answered) if answered else 'なし'),
+                     '未回答：' + ('、'.join(f'<@{uid}>' for uid in unanswered) if unanswered else 'なし')]
+            if unanswered:
+                lines.append('未回答の方は、日程回答をお願いします。')
             if candidates:
-                lines = [
-                    f'・{x["date"]}：○ {len(x["yes"])}人'
-                    for x in candidates
-                ]
-                await ch.send(
-                    '⏰ **本日が募集期限です。**\n\n'
-                    '現在、募集人数に到達している開催候補日があります。\n'
-                    + "\n".join(lines)
-                    + f'\n\nGMは以下から開催日を選択できます。\n{BASE_URL}/r/{r["id"]}/decide'
-                )
+                lines.append('人数を満たした日程：\n' + '\n'.join(
+                    f'・{x["date"]} {x.get("time", "")}：○{len(x["yes"])}人 △{len(x.get("maybe", []))}人'
+                    for x in candidates))
+                lines.append('GMは日程を確定できます。')
             else:
-                await ch.send(
-                    '⏰ **本日が募集期限です。**\n\n'
-                    '現時点では必要人数が集まっている日程がありません。\n'
-                    f'必要に応じて、以下より再日程調整できます。\n'
-                    f'{BASE_URL}/r/{r["id"]}/reschedule'
-                )
+                lines.append('現在、必要人数を満たす日程はありません。GMは再日程調整できます。')
+            view = (DecideButton(int(r['id'])) if candidates else
+                    WaitingButtons(int(r['id']), has_detail=bool((r['guide_message'] or '').strip()),
+                                   answer_url=f'{BASE_URL}/r/{r["id"]}'))
+            await send_long(ch, '\n\n'.join(lines),
+                            allowed_mentions=discord.AllowedMentions(users=bool(unanswered), everyone=False, roles=False),
+                            view=view)
 
         with db() as c:
             c.execute(
@@ -3427,7 +3658,8 @@ async def session_reminder_task(session_id: int):
             guild=bot.get_guild(GUILD_ID)
             ch=guild.get_channel(int(sess['channel_id'])) if guild and sess and sess['channel_id'] else None
             if ch and r:
-                await ch.send(f'🔔 **開始1時間前リマインド**\n\n『{r["scenario_name"]}』\n本日{sl["start_time"]}開始です！')
+                await ch.send(f'🔔 **開始1時間前リマインド**\n\n『{r["scenario_name"]}』\n本日{sl["start_time"]}開始です！',
+                              silent=in_quiet_hours(), view=FinishButton(session_id))
             with db() as c:
                 c.execute('UPDATE session_slots SET reminder_sent=1 WHERE id=?',(int(sl['id']),))
     except asyncio.CancelledError:
@@ -3500,6 +3732,12 @@ async def run_achievement_check(run_date=None, notify=True):
     if achievement_run_done(d):
         return []
     now_text = iso_now()
+    # 停止期間中に20時の差分処理を逃した日は、カレンダーを正として前日まで追いつく。
+    with db() as c:
+        last = c.execute("SELECT meta_value FROM achievement_meta WHERE meta_key='profile_cache_as_of'").fetchone()
+    previous = (date.fromisoformat(d) - timedelta(days=1)).isoformat()
+    if last and str(last["meta_value"]) < previous:
+        catch_up_profile_stats(str(last["meta_value"]), previous, now_text)
     # v69: 20時は「当日の未処理卓」だけを差分加算。過去履歴の全再集計はしない。
     apply_profile_daily_delta(d, now_text)
     new_rows = evaluate_achievements(d, now_text)
@@ -3581,14 +3819,9 @@ async def bootstrap_achievements():
 @tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def deadline_scheduler():
     try:
-        await predeadline_unanswered_check()
-    except Exception as e:
-        log_error("predeadline_unanswered_scheduler", e)
-    try:
         await deadline_check()
     except Exception as e:
-        log_error("deadline_scheduler", e)
-
+        log_error("answer_deadline_scheduler", e)
     # v69: 当日20時に当日分だけ差分反映して称号を判定
     try:
         await run_achievement_check(now_jst().date().isoformat(), notify=True)
@@ -3600,6 +3833,68 @@ async def deadline_scheduler():
         cleanup_old_data()
     except Exception as e:
         log_error("old_data_cleanup", e)
+
+
+weekly_schedule_lock = asyncio.Lock()
+
+
+async def post_weekly_schedule():
+    """月曜開始の7日分を、指定チャンネルへ週1回だけ掲示する。"""
+    async with weekly_schedule_lock:
+        await _post_weekly_schedule_once()
+
+
+async def _post_weekly_schedule_once():
+    if not WEEKLY_SCHEDULE_CHANNEL_ID:
+        return
+    now = now_jst()
+    monday = now.date() - timedelta(days=now.weekday())
+    with db() as c:
+        if c.execute("SELECT 1 FROM weekly_schedule_posts WHERE week_start=?", (monday.isoformat(),)).fetchone():
+            return
+    guild = bot.get_guild(GUILD_ID)
+    channel = guild.get_channel(WEEKLY_SCHEDULE_CHANNEL_ID) if guild else None
+    if channel is None and guild:
+        channel = await guild.fetch_channel(WEEKLY_SCHEDULE_CHANNEL_ID)
+    if channel is None:
+        raise RuntimeError("週予定の送信先チャンネルが見つかりません")
+    weekdays = "月火水木金土日"
+    rows = calendar_entries(monday.isoformat(), (monday + timedelta(days=7)).isoformat())
+    lines = ["📅 **今週の予定**"]
+    for item, _members in rows:
+        d = date.fromisoformat(str(item["event_date"]))
+        kind = {"MADMIS": "マダミス", "マダミス": "マダミス", "TRPG": "TRPG", "EVENT": "イベント"}.get(
+            str(item["game_type"]), str(item["game_type"]))
+        start_time = str(item.get("start_time") or "").strip()
+        suffix = f" {start_time}〜" if start_time and start_time != "未定" else ""
+        lines.append(f'{d.month}/{d.day}({weekdays[d.weekday()]})：{kind}『{item["scenario_name"]}』{suffix}')
+    if not rows:
+        lines.append("今週の予定はまだありません。")
+    text = "\n".join(lines)
+    # Discordの1投稿あたり2000文字制限を超えても週内の予定を落とさない。
+    sent = None
+    for chunk in split_text(text):
+        message = await channel.send(chunk, silent=in_quiet_hours(), allowed_mentions=discord.AllowedMentions.none())
+        if sent is None:
+            sent = message
+    with db() as c:
+        c.execute("INSERT OR IGNORE INTO weekly_schedule_posts(week_start,message_id,posted_at) VALUES(?,?,?)",
+                  (monday.isoformat(), str(sent.id), iso_now()))
+
+
+@tasks.loop(time=time(hour=8, minute=0, tzinfo=JST))
+async def weekly_schedule_scheduler():
+    if now_jst().weekday() != 0:
+        return
+    try:
+        await post_weekly_schedule()
+    except Exception as e:
+        log_error("weekly_schedule_scheduler", e)
+
+
+@weekly_schedule_scheduler.before_loop
+async def before_weekly_schedule_scheduler():
+    await bot.wait_until_ready()
 
 
 @deadline_scheduler.before_loop
@@ -3629,20 +3924,29 @@ async def on_member_update(before: discord.Member, after: discord.Member):
 async def on_ready():
     global _reminders_restored
     print(f"Discord ready: {bot.user}")
+    restore_discord_buttons()
+    if now_jst().weekday() == 0 and now_jst().time() >= time(8,0):
+        try:
+            await post_weekly_schedule()
+        except Exception as e:
+            log_error("weekly_schedule_catchup", e)
     try:
         await sync_registered_member_profiles()
     except Exception as e:
         log_error("registered_member_sync", e)
     try:
         await bootstrap_achievements()
+        # 誤った日付別集計を導入済みの場合に限り、一度だけ従来の卓識別で再集計。
+        now = now_jst()
+        as_of = now.date() if now.time() >= time(20, 0) else now.date() - timedelta(days=1)
+        ensure_count_identity_v3(as_of.isoformat(), iso_now())
     except Exception as e:
         log_error("achievement_bootstrap", e)
-    # v109: 20時以降にBotが再起動した場合も、同日の「期限前日」未回答通知だけ追いつく。
     try:
         if now_jst().time() >= time(20,0):
-            await predeadline_unanswered_check()
+            await deadline_check()
     except Exception as e:
-        log_error("predeadline_unanswered_catchup", e)
+        log_error("answer_deadline_catchup", e)
     try:
         deleted_images = cleanup_posted_recruitment_images()
         if deleted_images:
@@ -4970,6 +5274,11 @@ async def calendar_manual_add(
         guest_participant_names=[x.strip() for x in guest_participant_names.splitlines() if x.strip()],
     )
 
+    try:
+        _session_change_reconcile_if_needed(event_date)
+    except Exception as e:
+        log_error(f"calendar_manual_add_reconcile date={event_date}", e)
+
     d = date.fromisoformat(event_date)
     return RedirectResponse(
         f"/calendar?month={d.strftime('%Y-%m')}",
@@ -4988,7 +5297,6 @@ async def calendar_edit_details(
     require_login(request); await require_csrf(request)
     detail_before, _ = calendar_session_detail(calendar_session_id)
     old_day_for_stats = original_event_date or str(detail_before['event_date'] if detail_before else '')
-    old_profile_record = profile_delta_record_for_calendar_session(calendar_session_id)
     if not scenario_name.strip(): raise HTTPException(400, "シナリオ名 / イベント名を入力してください")
     if game_type not in {"TRPG", "MADMIS", "EVENT"}: raise HTTPException(400, "種別が不正です")
     try:
@@ -5015,21 +5323,12 @@ async def calendar_edit_details(
     if sync_result and sync_result.get('session_id'):
         schedule_session_reminder(int(sync_result['session_id']))
 
-    # v118: カレンダー編集による集計補正は、集計境界に影響するケースだけ。
-    # 1) 集計済みの過去卓を今日/未来へ移す
-    # 2) 当日20:00以降に当日の卓を編集する
-    # 過去→過去、未来→未来、当日20時前は何もしない。全履歴再同期もしない。
+    # 過去日追加・過去→過去の編集・未来→過去も集計と実績へ反映する。
+    # 手動編集は頻度が低いため、履歴からの再集計を優先して整合性を保つ。
     try:
-        now = now_jst()
-        old_day = date.fromisoformat(str(old_day_for_stats))
-        new_day = date.fromisoformat(str(event_date))
-        boundary_change = old_day < now.date() and new_day >= now.date()
-        today_after_cutoff = now.hour >= 20 and old_day == now.date()
-        if boundary_change or today_after_cutoff:
-            if old_profile_record and remove_profile_record_delta(old_profile_record, iso_now()):
-                # 移動先が既に集計対象なら、その日だけ差分再加算。今日20時前/未来は20時処理に任せる。
-                if new_day < now.date() or (new_day == now.date() and now.hour >= 20):
-                    apply_profile_daily_delta(new_day.isoformat(), iso_now())
+        if _session_change_needs_reconcile(old_day_for_stats) or _session_change_needs_reconcile(event_date):
+            cutoff = now_jst().date() if now_jst().hour >= 20 else now_jst().date() - timedelta(days=1)
+            reconcile_profile_stats(cutoff.isoformat(), iso_now())
     except Exception as e:
         log_error(f'calendar_edit_delta_reconcile calendar_session_id={calendar_session_id}', e)
 
@@ -5070,6 +5369,11 @@ async def calendar_delete(
         iso_now(),
     ):
         raise HTTPException(404, "予定が見つかりません")
+    try:
+        if detail_before:
+            _session_change_reconcile_if_needed(str(detail_before["event_date"]))
+    except Exception as e:
+        log_error(f"calendar_delete_reconcile calendar_session_id={calendar_session_id}", e)
 
     if detail_before and detail_before["event_date"]:
         try:
@@ -5670,7 +5974,7 @@ async def simple_schedule_submit(
     else:
         mn, mx, var, target = 1, 99, 1, None
 
-    deadline = datetime.fromisoformat(deadline_date + "T21:00:00").replace(tzinfo=JST)
+    deadline = datetime.fromisoformat(deadline_date + "T20:00:00").replace(tzinfo=JST)
     sv = start_time.strip() or "未定"
     creator_name = user_display(str(uid))
 
@@ -5728,7 +6032,8 @@ async def simple_schedule_submit(
         f"{time_line}{players_line}"
         f"回答期限：**{deadline.strftime('%Y/%m/%d')}**\n\n"
         f"以下のURLよりご回答ください！\n"
-        f"{BASE_URL}/r/{rid}"
+        f"{BASE_URL}/r/{rid}",
+        silent=in_quiet_hours(),
     )
 
     with db() as c:
@@ -5855,7 +6160,7 @@ async def new_form(request: Request):
             <label class='field' style='margin-top:12px'>
               <div class='field-box tall no-icon'>
                 <textarea name='guide_message'
-                  placeholder='卓成立時の案内文（任意）&#10;事前準備・キャラクター作成など'></textarea>
+                  placeholder='シナリオ詳細（任意）&#10;ボタンからの詳細表示と成立卓チャンネルへの案内に使用'></textarea>
               </div>
             </label>
           </div>
@@ -6023,7 +6328,7 @@ async def new_submit(
         ).isoformat()
 
     deadline = datetime.fromisoformat(
-        deadline_date + "T21:00:00"
+        deadline_date + "T20:00:00"
     ).replace(tzinfo=JST)
 
     initial_status = (
@@ -6600,7 +6905,7 @@ async def recruitment_page(rid: int, request: Request):
         elif spectator:
             note_html = "<div class='viewer-note'>観戦希望では日程回答はありません。PLの回答状況を確認できます。</div>"
         else:
-            note_html = "<div class='viewer-note'>この日程調整の回答対象ではありません。</div>" if is_simple_schedule(r) else "<div class='viewer-note'>回答するにはDiscord募集メッセージの「参加」リアクションを押してください。</div>"
+            note_html = "<div class='viewer-note'>この日程調整の回答対象ではありません。</div>" if is_simple_schedule(r) else "<div class='viewer-note'>回答するにはDiscordの募集投稿で「参加」ボタンを押してください。以前の投稿は参加リアクションから登録できます。</div>"
 
         schedule_block = f"""
         {note_html}
@@ -6635,66 +6940,11 @@ async def recruitment_page(rid: int, request: Request):
             )
         else:
             if is_simple_schedule(r):
-                dbtn=f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>" if available else "<span class='btn alt' style='opacity:.55;pointer-events:none'>必要人数待ち</span>"
-                done_ids = submitted_user_ids(rid)
-                with db() as c:
-                    reminder_targets = c.execute(
-                        """SELECT discord_id
-                           FROM members
-                           WHERE recruitment_id=?
-                             AND member_type='participant'
-                             AND active=1
-                             AND discord_id<>?
-                           ORDER BY joined_at""",
-                        (rid, r["gm_discord_id"]),
-                    ).fetchall()
-                pending_ids = [
-                    str(x["discord_id"])
-                    for x in reminder_targets
-                    if str(x["discord_id"]) not in done_ids
-                ]
-                guild_for_names = bot.get_guild(GUILD_ID)
-                pending_names = []
-                for pending_id in pending_ids:
-                    member_obj = guild_for_names.get_member(int(pending_id)) if guild_for_names else None
-                    pending_names.append(member_obj.display_name if member_obj else user_display(pending_id))
-                pending_text = "、".join(pending_names) if pending_names else "なし"
-                confirm_text = json.dumps(
-                    f"リマインド対象：{pending_text}\n\n上記の方へリマインド通知を送信しますがよろしいですか？",
-                    ensure_ascii=False,
-                )
-                nudge_disabled = " disabled style='opacity:.55;cursor:not-allowed'" if not pending_ids else ""
-                nudge_confirm = "" if not pending_ids else f" onclick='return confirm({confirm_text})'"
-                # 上段の「日程を決定」と「リマインド」は完全に同じサイズで横並び。
-                if available:
-                    dbtn = (
-                        f"<a class='btn green' "
-                        f"style='width:100%;height:100%;box-sizing:border-box;"
-                        f"display:flex;align-items:center;justify-content:center;text-align:center' "
-                        f"href='/r/{rid}/decide'>日程を決定</a>"
-                    )
-                else:
-                    dbtn = (
-                        "<span class='btn alt' "
-                        "style='width:100%;height:100%;box-sizing:border-box;"
-                        "display:flex;align-items:center;justify-content:center;text-align:center;"
-                        "opacity:.55;pointer-events:none'>必要人数待ち</span>"
-                    )
-
-                gm_buttons=(
-                    f"<div class='gm-actions'>"
-                    f"<div style='display:grid;grid-template-columns:1fr 1fr;gap:10px;width:100%;align-items:stretch'>"
-                    f"<div style='min-width:0;display:flex'>{dbtn}</div>"
-                    f"<form method='post' action='/r/{rid}/nudge' "
-                    f"style='margin:0;min-width:0;display:flex'>{csrf_field(request)}"
-                    f"<button class='btn alt' "
-                    f"style='width:100%;height:100%;box-sizing:border-box;"
-                    f"display:flex;align-items:center;justify-content:center;text-align:center' "
-                    f"type='submit'{nudge_disabled}{nudge_confirm}>リマインド</button>"
-                    f"</form></div>"
-                    f"<a class='btn alt' style='width:100%;box-sizing:border-box;text-align:center;justify-content:center' "
-                    f"href='/r/{rid}/reschedule'>再日程調整</a>"
-                    f"</div>"
+                dbtn = (f"<a class='btn green' href='/r/{rid}/decide'>日程を決定</a>"
+                        if available else "<span class='btn alt' style='opacity:.55;pointer-events:none'>必要人数待ち</span>")
+                gm_buttons = (
+                    f"<div class='gm-actions'>{dbtn}"
+                    f"<a class='btn alt' href='/r/{rid}/reschedule'>再日程調整</a></div>"
                 )
             else:
                 gm_buttons=(
@@ -6826,25 +7076,6 @@ async def save_answer(rid: int, request: Request, answers: str = Form("{}"), com
         log_error(f"availability_notify rid={rid}", e)
 
     return RedirectResponse(f"/r/{rid}", status_code=303)
-
-
-@app.post("/r/{rid}/nudge")
-async def nudge_unanswered(rid:int,request:Request):
-    uid=require_login(request); await require_csrf(request); r=get_recruitment(rid)
-    if not r or str(uid)!=str(r["gm_discord_id"]) or not is_simple_schedule(r): raise HTTPException(403)
-    done=submitted_user_ids(rid)
-    with db() as c: rows=c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='participant' AND active=1",(rid,)).fetchall()
-    pending=[str(x["discord_id"]) for x in rows if str(x["discord_id"]) not in done]
-    if not pending: return RedirectResponse(f"/r/{rid}",status_code=303)
-    guild=bot.get_guild(GUILD_ID); ch=guild.get_channel(int(r["waiting_channel_id"])) if guild and r["waiting_channel_id"] else None
-    if not ch: raise HTTPException(404,"送信先チャンネルが見つかりません")
-    await ch.send(
-        "**日程調整のリマインド**\n"
-        + " ".join(f"<@{x}>" for x in pending)
-        + f"\nまだ回答が完了していません😢\nお時間ある際に以下のリンクよりご回答をお願いします！\n\n{BASE_URL}/r/{rid}",
-        silent=in_quiet_hours(),
-    )
-    return RedirectResponse(f"/r/{rid}",status_code=303)
 
 
 @app.get("/r/{rid}/decide", response_class=HTMLResponse)
@@ -7090,8 +7321,11 @@ async def decide_submit(request: Request, rid: int):
             gm_label=r['gm_name_override'] if is_simple_schedule(r) and r['gm_name_override'] else f'<@{uid}>'
             role_label='主催' if r['game_type']=='EVENT' else 'GM'
             slot_lines='\n'.join(f'・{d} {t}〜' for d,t in slots)
-            manage_text='' if is_simple_schedule(r) else f'\n\n日程変更・開催中止は以下のリンクよりお願いします！（GM専用）\n{BASE_URL}/session/{sid}/manage'
-            await send_long(ch,f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日時：\n{slot_lines}\n\n{role_label}：{gm_label}\n参加者：\n{mentions}{manage_text}')
+            await send_long(ch,f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日時：\n{slot_lines}\n\n{role_label}：{gm_label}\n参加者：\n{mentions}')
+            if not is_simple_schedule(r):
+                details = (r["guide_message"] or "").strip()
+                await send_long(ch, f'📖 **シナリオ詳細**\n\n{details}' if details else '卓の管理',
+                                view=SessionButtons(sid, has_detail=bool(details)))
 
         waiting_ch=None
         if r['waiting_channel_id']:
@@ -7137,8 +7371,9 @@ def _session_change_needs_reconcile(old_event_date: str) -> bool:
 def _session_change_reconcile_if_needed(old_event_date: str):
     if not _session_change_needs_reconcile(old_event_date):
         return
-    # 開催後変更は例外処理。普段は20時当日差分だけで、ここでは現在日までを一度だけ再同期する。
-    cutoff_resync_v83(now_jst().date().isoformat(), iso_now())
+    now = now_jst()
+    cutoff = now.date() if now.hour >= 20 else now.date() - timedelta(days=1)
+    reconcile_profile_stats(cutoff.isoformat(), iso_now())
 
 
 def _session_feature_silent() -> bool:
@@ -7249,7 +7484,8 @@ async def session_reschedule_new_submit(session_id:int,request:Request):
     reschedule_id=create_session_reschedule(session_id,start_time,deadline,dates,iso_now(),candidate_slots=slots,per_day_time=per_day_time)
     ch=await _session_channel(session_id)
     if ch:
-        await ch.send(f'開催日の再調整を開始しました。\n以下から回答してください。\n{BASE_URL}/session-reschedule/{reschedule_id}',silent=_session_feature_silent())
+        await ch.send('開催日の再調整を開始しました。下のボタンから回答してください。',
+                      silent=in_quiet_hours(), view=AnswerButton(f'{BASE_URL}/session-reschedule/{reschedule_id}'))
     return RedirectResponse(f'/session-reschedule/{reschedule_id}',303)
 
 
@@ -7466,7 +7702,7 @@ async def session_reschedule_confirm(reschedule_id:int,request:Request):
     ch=await _session_channel(int(rs['session_id']))
     if ch:
         old='\n'.join(f'・{d} {t}〜' for d,t in result['old_slots']); new='\n'.join(f'・{d} {t}〜' for d,t in result['new_slots'])
-        await ch.send(f'開催日が変更されました！\n\n変更前：\n{old}\n\n変更後：\n{new}',silent=_session_feature_silent())
+        await ch.send(f'開催日が変更されました！\n\n変更前：\n{old}\n\n変更後：\n{new}',silent=in_quiet_hours())
     schedule_session_reminder(int(rs['session_id']))
     return RedirectResponse(f"/session/{int(rs['session_id'])}/manage",303)
 
@@ -7727,7 +7963,7 @@ async def schedule_start_submit(
     schedule_slots = parse_schedule_slots(dates, start_time, per_day_time, str(adv_form.get('schedule_slots_json') or ''))
 
     deadline = datetime.fromisoformat(
-        deadline_date + "T21:00:00"
+        deadline_date + "T20:00:00"
     ).replace(tzinfo=JST)
 
     with db() as c:
@@ -7751,7 +7987,6 @@ async def schedule_start_submit(
                    status='RECRUITING',
                    schedule_pending=0,
                    deadline_notified=0,
-                   predeadline_notified=0,
                    availability_notified=0
                WHERE id=?""",
             (
@@ -7787,12 +8022,16 @@ async def schedule_start_submit(
     if channel is None:
         channel = await create_waiting_channel(rid)
 
-    await channel.send(
+    await send_long(
+        channel,
         "## 📅 日程調整を開始しました\n\n"
         f"開始時間：**{start_time}〜**\n"
-        f"回答期限：**{deadline_date} 21:00**\n\n"
-        "以下のリンクから日程を回答してください。\n"
-        f"{BASE_URL}/r/{rid}"
+        f"回答期限：**{deadline_date}**\n"
+        f"募集人数：**{updated['min_players']}〜{updated['max_players']}人**\n"
+        f"プレイ時間：**{updated['play_time']}**\n\n"
+        "下のボタンから日程を回答してください。",
+        view=WaitingButtons(rid, has_detail=bool((updated['guide_message'] or '').strip()),
+                            answer_url=f"{BASE_URL}/r/{rid}"),
     )
 
     print(
@@ -7936,7 +8175,7 @@ async def reschedule_submit(
     schedule_slots = parse_schedule_slots(dates, start_time, per_day_time, str(adv_form.get('schedule_slots_json') or ''))
 
     deadline = datetime.fromisoformat(
-        deadline_date + "T21:00:00"
+        deadline_date + "T20:00:00"
     ).replace(tzinfo=JST)
 
     # 再日程調整時は、DBだけでなくDiscord上の「現在のリアクション」を
@@ -8129,10 +8368,13 @@ async def reschedule_submit(
                 "## 🔄 再日程調整\n\n"
                 f"『{r['scenario_name']}』の再日程調整を開始しました。\n\n"
                 f"開始時間：**{start_time}〜**\n"
-                f"回答期限：**{deadline_date} 21:00**\n\n"
-                "以下のリンクから新しい日程を回答してください。\n"
-                f"{BASE_URL}/r/{new_id}"
+                f"回答期限：**{deadline_date}**\n"
+                f"募集人数：**{r['min_players']}〜{r['max_players']}人**\n"
+                f"プレイ時間：**{r['play_time']}**\n\n"
+                "下のボタンから新しい日程を回答してください。"
             ),
+            view=WaitingButtons(new_id, has_detail=bool((r['guide_message'] or '').strip()),
+                                answer_url=f"{BASE_URL}/r/{new_id}"),
         )
     except Exception as e:
         log_error(f"reschedule_message rid={new_id}", e)
@@ -8165,6 +8407,7 @@ async def main():
     web_task = asyncio.create_task(server.serve())
     if DISCORD_TOKEN:
         deadline_scheduler.start()
+        weekly_schedule_scheduler.start()
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
         await asyncio.gather(web_task, bot_task)
     else:
