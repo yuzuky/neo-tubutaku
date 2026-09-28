@@ -35,7 +35,7 @@ class CachedStaticFiles(StaticFiles):
 from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
-from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, reconcile_profile_stats, catch_up_profile_stats, ensure_count_identity_v3, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, assigned_recruitment_members, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, hide_calendar_session, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
+from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, reconcile_profile_stats, catch_up_profile_stats, ensure_calendar_recount_v4, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, assigned_recruitment_members, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -1258,17 +1258,6 @@ button,input,textarea,select{font:inherit}
 .calendar-edit-date-field{margin-top:0!important;margin-bottom:14px!important}
 .calendar-edit-date-field .field-box{width:100%;box-sizing:border-box}
 .calendar-edit-date-field input[type='date']{width:100%;box-sizing:border-box}
-.calendar-danger-block{
-  margin-top:16px;
-  padding:13px;
-  border:1px solid rgba(234,179,8,.34);
-  border-radius:14px;
-  background:rgba(234,179,8,.05);
-}
-.calendar-danger-block.delete{
-  border-color:rgba(239,68,68,.35);
-  background:rgba(239,68,68,.05);
-}
 .danger-confirm-line{
   display:flex;
   align-items:center;
@@ -1279,29 +1268,16 @@ button,input,textarea,select{font:inherit}
 .danger-confirm-line input{
   width:auto;
 }
-.danger-question{
-  margin:8px 0 10px;
-  color:#9eabbc;
-  font-size:.78rem;
-}
-.calendar-hide-btn,
 .calendar-delete-btn{
   width:100%;
   padding:10px;
   border-radius:11px;
   border:1px solid transparent;
+  background:#4a171d;
+  color:#ff8f9a;
   font-weight:900;
   cursor:pointer;
 }
-.calendar-hide-btn{
-  background:#4a3a13;
-  color:#f8d66d;
-}
-.calendar-delete-btn{
-  background:#4a171d;
-  color:#ff8f9a;
-}
-.calendar-hide-btn:disabled,
 .calendar-delete-btn:disabled{
   opacity:.35;
   cursor:not-allowed;
@@ -2185,6 +2161,7 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
 }}
 .calendar-save-btn{{
   width:100%;
+  box-sizing:border-box;
   margin-top:14px;
   padding:12px;
   border:1px solid rgba(34,197,94,.38);
@@ -2195,39 +2172,28 @@ def page(title: str, body: str, request: Optional[Request] = None) -> HTMLRespon
   cursor:pointer;
 }}
 .calendar-danger-actions{{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:8px;
+  width:100%;
   margin-top:12px;
 }}
-.calendar-hide-small,
 .calendar-delete-small{{
-  padding:8px 10px;
-  border-radius:10px;
-  font-size:.78rem;
-  font-weight:900;
-  cursor:pointer;
-}}
-.calendar-hide-small{{
-  border:1px solid rgba(234,179,8,.35);
-  background:rgba(234,179,8,.10);
-  color:#f3cc5c;
-}}
-.calendar-delete-small{{
+  display:block;
+  width:100%;
+  box-sizing:border-box;
+  padding:12px;
+  border-radius:12px;
   border:1px solid rgba(239,68,68,.38);
   background:rgba(239,68,68,.10);
   color:#ff8d96;
+  font-size:inherit;
+  font-weight:900;
+  cursor:pointer;
 }}
 .calendar-danger-confirm{{
   display:none;
   margin-top:12px;
   padding:12px;
-  border:1px solid rgba(234,179,8,.35);
+  border:1px solid rgba(239,68,68,.36);
   border-radius:12px;
-  background:rgba(234,179,8,.05);
-}}
-.calendar-danger-confirm.delete{{
-  border-color:rgba(239,68,68,.36);
   background:rgba(239,68,68,.05);
 }}
 .calendar-danger-confirm.open{{
@@ -3985,10 +3951,10 @@ async def on_ready():
         log_error("registered_member_sync", e)
     try:
         await bootstrap_achievements()
-        # 誤った日付別集計を導入済みの場合に限り、一度だけ従来の卓識別で再集計。
+        # この版の初回起動だけカレンダー履歴から再集計。以後は通常の日次差分に戻る。
         now = now_jst()
         as_of = now.date() if now.time() >= time(20, 0) else now.date() - timedelta(days=1)
-        ensure_count_identity_v3(as_of.isoformat(), iso_now())
+        ensure_calendar_recount_v4(as_of.isoformat(), iso_now())
     except Exception as e:
         log_error("achievement_bootstrap", e)
     try:
@@ -4777,29 +4743,11 @@ async def calendar_page(request: Request, month: str = ""):
               </form>
 
               <div class='calendar-danger-actions'>
-                <button class='calendar-hide-small' type='button'
-                        onclick="openDangerConfirm('hide')">非表示</button>
                 <button class='calendar-delete-small' type='button'
-                        onclick="openDangerConfirm('delete')">削除</button>
+                        onclick="openDeleteConfirm()">削除</button>
               </div>
 
-              <div class='calendar-danger-confirm' id='hideDangerConfirm'>
-                <p>本当にこの卓をカレンダーから非表示にしますか？</p>
-                <label class='danger-confirm-line'>
-                  <input type='checkbox' id='hideConfirmCheck'
-                         onchange='syncDangerButtons()'>
-                  <span>確認しました</span>
-                </label>
-                <form method='post' action='/calendar/hide'>
-                  {csrf_field(request)}
-                  <input type='hidden' class='calendarDangerSessionId'
-                         name='calendar_session_id'>
-                  <button class='calendar-hide-btn' id='hideCalendarBtn'
-                          type='submit' disabled>カレンダーから非表示</button>
-                </form>
-              </div>
-
-              <div class='calendar-danger-confirm delete' id='deleteDangerConfirm'>
+              <div class='calendar-danger-confirm' id='deleteDangerConfirm'>
                 <p>本当にこの卓データを完全に削除しますか？</p>
                 <label class='danger-confirm-line'>
                   <input type='checkbox' id='deleteConfirmCheck'
@@ -5089,9 +5037,7 @@ async def calendar_page(request: Request, month: str = ""):
           document.getElementById('calendarEditPanel').classList.remove('open');
           const detailDateRow=document.getElementById('calendarDetailDateRow');
           if(detailDateRow) detailDateRow.style.display='block';
-          document.getElementById('hideDangerConfirm').classList.remove('open');
           document.getElementById('deleteDangerConfirm').classList.remove('open');
-          document.getElementById('hideConfirmCheck').checked=false;
           document.getElementById('deleteConfirmCheck').checked=false;
           syncDangerButtons();
 
@@ -5234,27 +5180,17 @@ async def calendar_page(request: Request, month: str = ""):
           }}
         }}
 
-        function openDangerConfirm(kind){{
-          const hide=document.getElementById('hideDangerConfirm');
+        function openDeleteConfirm(){{
           const del=document.getElementById('deleteDangerConfirm');
-          if(hide) hide.classList.toggle('open',kind==='hide');
-          if(del) del.classList.toggle('open',kind==='delete');
-
-          if(kind==='hide'){{
-            document.getElementById('hideConfirmCheck').checked=false;
-          }}else{{
-            document.getElementById('deleteConfirmCheck').checked=false;
-          }}
+          if(del) del.classList.toggle('open');
+          document.getElementById('deleteConfirmCheck').checked=false;
           syncDangerButtons();
         }}
 
         function syncDangerButtons(){{
-          const hideCheck=document.getElementById('hideConfirmCheck');
           const deleteCheck=document.getElementById('deleteConfirmCheck');
-          const hideBtn=document.getElementById('hideCalendarBtn');
           const deleteBtn=document.getElementById('deleteCalendarBtn');
 
-          if(hideBtn) hideBtn.disabled=!(hideCheck && hideCheck.checked);
           if(deleteBtn) deleteBtn.disabled=!(deleteCheck && deleteCheck.checked);
         }}
 
@@ -5382,27 +5318,6 @@ async def calendar_edit_details(
         log_error(f'calendar_edit_delta_reconcile calendar_session_id={calendar_session_id}', e)
 
     return RedirectResponse(f"/calendar?month={edited_day.strftime('%Y-%m')}", status_code=303)
-
-@app.post("/calendar/hide")
-async def calendar_hide(
-    request: Request,
-    calendar_session_id: int = Form(...),
-):
-    require_login(request)
-    await require_csrf(request)
-    detail_before, _ = calendar_session_detail(calendar_session_id)
-
-    if not hide_calendar_session(calendar_session_id):
-        raise HTTPException(404, "予定が見つかりません")
-
-    if detail_before and detail_before["event_date"]:
-        try:
-            d = date.fromisoformat(str(detail_before["event_date"]))
-            return RedirectResponse(f"/calendar?month={d.strftime('%Y-%m')}", status_code=303)
-        except ValueError:
-            pass
-    return RedirectResponse("/calendar", status_code=303)
-
 
 @app.post("/calendar/delete")
 async def calendar_delete(
