@@ -2977,15 +2977,7 @@ async def post_recruitment(rid: int):
 
     gm_name = user_display(str(r["gm_discord_id"]))
 
-    if int(r["schedule_pending"] or 0):
-        closing = (
-            '参加希望の方は下のボタンから登録してください。\n'
-            '日程調整は後日行います！'
-        )
-    else:
-        closing = (
-            '参加希望の方は下のボタンから登録し、日程を回答してください！'
-        )
+    closing = '参加希望の方はボタンを押してください👍'
 
     header = (
         f'## 『{r["scenario_name"]}』\n'
@@ -3125,7 +3117,18 @@ class RecruitmentButtons(discord.ui.View):
                              username=excluded.username,display_name=excluded.display_name,
                              avatar_url=excluded.avatar_url,updated_at=excluded.updated_at""",
                           (uid, member.name, member.display_name, str(member.display_avatar.url), iso_now()))
-            # 閲覧権限が付いたチャンネルをそのまま使ってもらう。登録の追加投稿は行わない。
+            # 操作者への案内は不要だが、待機チャンネルの参加・観戦通知は残す。
+            try:
+                ch = interaction.guild.get_channel(int(r["waiting_channel_id"])) if r["waiting_channel_id"] else None
+                if ch is None and r["waiting_channel_id"]:
+                    ch = await interaction.guild.fetch_channel(int(r["waiting_channel_id"]))
+                if ch:
+                    announcement = (f'<@{uid}> が参加しました🎉' if kind == 'participant'
+                                    else f'<@{uid}> が観戦に登録しました👀')
+                    await ch.send(announcement, silent=True)
+            except Exception as announce_error:
+                # 登録と権限付与は完了済み。通知だけの失敗を登録失敗として返さない。
+                log_error(f"recruitment_join_announcement rid={r['id']}", announce_error)
         except Exception as e:
             log_error(f"recruitment_button kind={kind} rid={r['id']}", e)
             await interaction.followup.send("登録に失敗しました。少し待って再度お試しください。", ephemeral=True)
@@ -3173,12 +3176,12 @@ class WaitingButtons(discord.ui.View):
             self.start.callback = self.start_schedule
             self.add_item(self.start)
 
-    @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.success)
     async def overview(self, interaction: discord.Interaction, button: discord.ui.Button):
         r = get_recruitment(self.rid)
         await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ概要**\n\n{r["description"]}' if r else "募集が見つかりません。")
 
-    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="シナリオ詳細", style=discord.ButtonStyle.primary)
     async def details(self, interaction: discord.Interaction, button: discord.ui.Button):
         r = get_recruitment(self.rid)
         if not r or not (r["guide_message"] or "").strip():
