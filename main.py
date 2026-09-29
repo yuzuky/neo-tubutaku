@@ -3886,10 +3886,18 @@ async def _post_weekly_schedule_once():
     if not rows:
         lines.append("今週の予定はまだありません。")
     text = "\n".join(lines)
+    calendar_view = discord.ui.View()
+    calendar_view.add_item(discord.ui.Button(
+        label="カレンダーを表示",
+        url=f"{BASE_URL}/calendar?month={monday.strftime('%Y-%m')}",
+    ))
     # Discordの1投稿あたり2000文字制限を超えても週内の予定を落とさない。
     sent = None
     for chunk in split_text(text):
-        message = await channel.send(chunk, silent=in_quiet_hours(), allowed_mentions=discord.AllowedMentions.none())
+        message = await channel.send(
+            chunk, silent=True, view=calendar_view if sent is None else None,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         if sent is None:
             sent = message
     with db() as c:
@@ -3897,7 +3905,7 @@ async def _post_weekly_schedule_once():
                   (monday.isoformat(), str(sent.id), iso_now()))
 
 
-@tasks.loop(time=time(hour=8, minute=0, tzinfo=JST))
+@tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def weekly_schedule_scheduler():
     if now_jst().weekday() != 0:
         return
@@ -3940,7 +3948,7 @@ async def on_ready():
     global _reminders_restored
     print(f"Discord ready: {bot.user}")
     restore_discord_buttons()
-    if now_jst().weekday() == 0 and now_jst().time() >= time(8,0):
+    if now_jst().weekday() == 0 and now_jst().time() >= time(20,0):
         try:
             await post_weekly_schedule()
         except Exception as e:
