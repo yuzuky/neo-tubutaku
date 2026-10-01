@@ -7295,10 +7295,6 @@ async def decide_submit(request: Request, rid: int):
             slot_lines='\n'.join(f'・{d} {t}〜' for d,t in slots)
             await send_long(ch,f'## 『{r["scenario_name"]}』\n**{round_no}陣が成立しました🎉**\n\n開催日時：\n{slot_lines}\n\n{role_label}：{gm_label}\n参加者：\n{mentions}',
                             view=SessionButtons(sid, has_detail=bool((r["guide_message"] or "").strip())) if not is_simple_schedule(r) else None)
-            if not is_simple_schedule(r):
-                details = (r["guide_message"] or "").strip()
-                if details:
-                    await send_long(ch, f'📖 **シナリオ詳細**\n\n{details}')
 
         waiting_ch=None
         if r['waiting_channel_id']:
@@ -7371,6 +7367,21 @@ async def _session_channel(session_id: int):
         return None
 
 
+def gm_only_button_page(request: Request) -> HTMLResponse:
+    """GM用リンクをGM以外が開いた場合の案内画面。"""
+    return page(
+        "GM専用",
+        """
+        <a class='back-link' href='/'>‹ 戻る</a>
+        <div class='card' style='text-align:center'>
+          <h2>このボタンはGMのみ押せます</h2>
+          <p class='muted'>操作する卓のGMに確認してください。</p>
+        </div>
+        """,
+        request,
+    )
+
+
 @app.get("/session/{session_id}/manage", response_class=HTMLResponse)
 async def session_manage(session_id: int, request: Request):
     uid = request.session.get("user_id")
@@ -7380,7 +7391,7 @@ async def session_manage(session_id: int, request: Request):
     if not detail:
         raise HTTPException(404)
     if str(uid) != str(detail["gm_discord_id"]):
-        raise HTTPException(403, "GM専用ページです")
+        return gm_only_button_page(request)
     if detail.get("cancelled_at"):
         return page("開催管理", "<div class='card'><h2>開催中止済みです</h2></div>", request)
     member_html = "".join(f"<li>{esc(x['display_name'])}</li>" for x in members)
@@ -7406,7 +7417,7 @@ async def session_reschedule_new(session_id: int, request: Request):
     if not uid: return RedirectResponse(f'/login?next=/session/{session_id}/reschedule/new')
     detail,_members=session_management_detail(session_id)
     if not detail: raise HTTPException(404)
-    if str(uid)!=str(detail['gm_discord_id']): raise HTTPException(403)
+    if str(uid)!=str(detail['gm_discord_id']): return gm_only_button_page(request)
     default_deadline=(now_jst().date()+timedelta(days=7)).isoformat()
     weekday_jp=['月','火','水','木','金','土','日']
     cards=[]
@@ -7689,7 +7700,7 @@ async def session_cancel_form(session_id: int, request: Request):
     if not detail:
         raise HTTPException(404)
     if str(uid)!=str(detail['gm_discord_id']):
-        raise HTTPException(403)
+        return gm_only_button_page(request)
     return page("開催中止",f"""
       <div class='card' style='text-align:center'>
         <h2 style='text-align:center'>本当に開催中止にしますか？</h2>
