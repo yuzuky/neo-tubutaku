@@ -3941,7 +3941,12 @@ async def sync_registered_member_profiles():
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     if after.guild.id != GUILD_ID: return
-    refresh_registered_member_profile(str(after.id),after.name,after.display_name,str(after.display_avatar.url),iso_now())
+    if not refresh_registered_member_profile(str(after.id),after.name,after.display_name,str(after.display_avatar.url),iso_now()):
+        with db() as c:
+            c.execute(
+                "UPDATE users SET username=?,display_name=?,avatar_url=?,updated_at=? WHERE discord_id=?",
+                (after.name,after.display_name,str(after.display_avatar.url),iso_now(),str(after.id)),
+            )
 
 @bot.event
 async def on_ready():
@@ -4033,13 +4038,29 @@ async def auth_callback(request: Request, code: str, state: str = ""):
         user_res.raise_for_status()
         u = user_res.json()
     uid = str(u["id"])
-    display = u.get("global_name") or u.get("username") or uid
+    account_name = u.get("username") or uid
+    display = u.get("global_name") or account_name
     avatar = f'https://cdn.discordapp.com/avatars/{uid}/{u["avatar"]}.png' if u.get("avatar") else ""
+    guild = bot.get_guild(GUILD_ID)
+    member = await fetch_member(guild, uid) if guild else None
+    if member:
+        display = member.display_name
+        avatar = str(member.display_avatar.url)
+    else:
+        # Discordのメンバー取得が一時的に失敗しても、保存済みのサーバー名を守る。
+        with db() as c:
+            previous = c.execute("SELECT display_name FROM registered_members WHERE discord_id=?", (uid,)).fetchone()
+            if previous is None:
+                previous = c.execute("SELECT display_name FROM users WHERE discord_id=?", (uid,)).fetchone()
+        if previous and previous["display_name"]:
+            display = str(previous["display_name"])
     with db() as c:
         c.execute(
             "INSERT INTO users(discord_id,username,display_name,avatar_url,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(discord_id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,avatar_url=excluded.avatar_url,updated_at=excluded.updated_at",
-            (uid, u.get("username", display), display, avatar, iso_now()),
+            (uid, account_name, display, avatar, iso_now()),
         )
+    if member:
+        refresh_registered_member_profile(uid, account_name, display, avatar, iso_now())
     request.session["user_id"] = uid
     return RedirectResponse(request.session.pop("login_next", "/"), status_code=303)
 
