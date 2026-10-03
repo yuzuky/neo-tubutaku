@@ -3209,9 +3209,9 @@ class SessionButtons(discord.ui.View):
         if not has_detail:
             self.remove_item(self.scenario)
 
-        if legacy:
-            self.remove_item(self.overview)
-        else:
+        # 旧メッセージの操作ボタンも受け付ける。概要は新旧どちらにも登録し、
+        # Bot再起動後も custom_id に対応するコールバックを残す。
+        if not legacy:
             self.remove_item(self.change)
             self.remove_item(self.cancel)
             self.add_item(discord.ui.Button(label="日程変更(GM用)", style=discord.ButtonStyle.link,
