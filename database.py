@@ -5,6 +5,7 @@ import sqlite3
 import hashlib
 import json
 import unicodedata
+from contextvars import ContextVar
 from contextlib import contextmanager
 
 # ============================================================
@@ -13,9 +14,14 @@ from contextlib import contextmanager
 # ============================================================
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "/data/tsubutaku.db")
+_active_calendar_transaction = ContextVar('active_calendar_transaction', default=None)
 
 @contextmanager
 def db():
+    current = _active_calendar_transaction.get()
+    if current is not None:
+        yield current
+        return
     conn = sqlite3.connect(DATABASE_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
@@ -23,6 +29,29 @@ def db():
         yield conn
         conn.commit()
     finally:
+        conn.close()
+
+
+@contextmanager
+def atomic_calendar_update():
+    """予定・集計を同じSQLiteトランザクションで確定する。"""
+    if _active_calendar_transaction.get() is not None:
+        raise RuntimeError('カレンダー更新トランザクションの入れ子はできません')
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    conn.execute('PRAGMA foreign_keys=ON')
+    token = None
+    try:
+        conn.execute('BEGIN IMMEDIATE')
+        token = _active_calendar_transaction.set(conn)
+        yield
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        if token is not None:
+            _active_calendar_transaction.reset(token)
         conn.close()
 
 
@@ -412,6 +441,32 @@ def init_db():
 
             CREATE INDEX IF NOT EXISTS idx_profile_processed_tables_date
                 ON profile_processed_tables(event_date);
+            CREATE TABLE IF NOT EXISTS calendar_count_ledger (
+                table_key TEXT PRIMARY KEY, event_date TEXT NOT NULL, game_type TEXT NOT NULL,
+                scenario_name TEXT NOT NULL, gm_discord_id TEXT NOT NULL, member_ids TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_calendar_count_scenario
+                ON calendar_count_ledger(game_type,scenario_name,event_date);
+            CREATE TABLE IF NOT EXISTS calendar_count_totals (
+                scope TEXT PRIMARY KEY, total INTEGER NOT NULL DEFAULT 0,
+                trpg INTEGER NOT NULL DEFAULT 0, madamis INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS calendar_count_members (
+                scope TEXT NOT NULL, role TEXT NOT NULL, discord_id TEXT NOT NULL,
+                n INTEGER NOT NULL, PRIMARY KEY(scope,role,discord_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_calendar_count_members_rank
+                ON calendar_count_members(scope,role,n DESC);
+            CREATE TABLE IF NOT EXISTS calendar_count_scenarios (
+                scope TEXT NOT NULL,game_type TEXT NOT NULL,scenario_name TEXT NOT NULL,
+                n INTEGER NOT NULL, PRIMARY KEY(scope,game_type,scenario_name)
+            );
+            CREATE TABLE IF NOT EXISTS calendar_count_first_scenarios (
+                game_type TEXT NOT NULL,scenario_name TEXT NOT NULL,first_date TEXT NOT NULL,
+                PRIMARY KEY(game_type,scenario_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_calendar_identity_candidate
+                ON calendar_sessions(game_type, TRIM(scenario_name), event_date, id);
             CREATE INDEX IF NOT EXISTS idx_profile_pair_totals_user_count
                 ON profile_pair_totals(discord_id, table_count DESC);
             CREATE INDEX IF NOT EXISTS idx_profile_active_days_user_date
@@ -560,7 +615,7 @@ def backfill_calendar_history():
         ).fetchall()
 
         for row in rows:
-            c.execute(
+            inserted = c.execute(
                 """INSERT OR IGNORE INTO calendar_sessions(
                        source_session_id,source_recruitment_id,game_type,
                        scenario_name,event_date,start_time,gm_discord_id,calendar_visible,created_at
@@ -578,6 +633,10 @@ def backfill_calendar_history():
                 (row["session_id"],),
             ).fetchone()
             if not cal:
+                continue
+            # 既存のカレンダー予定は編集・再日程調整済みの参加者を正とする。
+            # 起動のたびに元の成立卓からPLを足すと、外した人が復活して集計がずれる。
+            if not inserted.rowcount:
                 continue
             members = c.execute(
                 "SELECT discord_id FROM session_members WHERE session_id=?",
@@ -1014,7 +1073,7 @@ def permanently_delete_calendar_session(calendar_session_id: int, deleted_at: st
     - source session が残っていても backfill で復活しないよう tombstone を残す。
     - 削除卓だけを根拠に自動付与されていた PASSED は、同じ人・同じシナリオの
       別カレンダー卓が残っていない場合に scenario_progress から除外する。
-    - calendar_stats は calendar_sessions を直接集計するため、削除後は累計からも外れる。
+    - 呼び出し元が同じトランザクション内で集計表からも削除する。
     """
     with db() as c:
         row = c.execute(
@@ -1679,78 +1738,33 @@ def scenario_detail(game_type: str, scenario_name: str):
 
 
 def calendar_stats(period_start: str | None = None, period_end: str | None = None):
-    """イベントを除外し、同一シナリオ+GM+PL構成の複数日開催を1卓として集計。"""
+    """差分更新済みの集計表だけを読む。イベントは含まない。"""
+    ensure_calendar_summary_cache()
+    scope = str(_activity_year_for_date(period_start)) if period_start and period_end else 'ALL'
     with db() as c:
-        clauses=["cs.game_type IN ('TRPG','MADMIS','マダミス')"]
-        params=[]
-        if period_start and period_end:
-            clauses += ["cs.event_date>=?", "cs.event_date<?"]
-            params += [period_start, period_end]
-        where="WHERE "+" AND ".join(clauses)
-        rows=c.execute(f"SELECT cs.* FROM calendar_sessions cs {where} ORDER BY cs.event_date,cs.id",params).fetchall()
-        unique={}
-        for r in rows:
-            mid=tuple(sorted(str(x["discord_id"]) for x in c.execute(
-                "SELECT discord_id FROM calendar_session_members WHERE calendar_session_id=?",(r["id"],)).fetchall()))
-            guests=tuple(sorted(str(x["display_name"]).strip() for x in c.execute(
-                "SELECT display_name FROM calendar_guest_members WHERE calendar_session_id=?",(r["id"],)).fetchall()))
-            gt='MADMIS' if str(r['game_type'])=='マダミス' else str(r['game_type'])
-            gm_key=('guest:'+str(r['gm_guest_name']).strip()) if str(r['gm_guest_name'] or '').strip() else ('id:'+str(r['gm_discord_id'] or ''))
-            key=(gt,str(r['scenario_name']).strip(),gm_key,mid,guests)
-            unique.setdefault(key,r)
-        vals=list(unique.items())
-        total=len(vals)
-        trpg=sum(1 for k,_ in vals if k[0]=='TRPG')
-        madamis=sum(1 for k,_ in vals if k[0]=='MADMIS')
-        scenario_sets={'TRPG':set(),'MADMIS':set()}
-        for k,_ in vals: scenario_sets[k[0]].add(k[1])
-
-        # ランキングは表示専用guestを除外し、重複卓も1回だけ。
-        gm_counts={}; pl_counts={}
-        for k,r in vals:
-            gid=str(r['gm_discord_id'] or '')
-            if gid and not str(r['gm_guest_name'] or '').strip(): gm_counts[gid]=gm_counts.get(gid,0)+1
-            for uid in k[3]: pl_counts[uid]=pl_counts.get(uid,0)+1
-        def top_rows(counts):
-            out=[]
-            for uid,n in sorted(counts.items(), key=lambda z:(-z[1],z[0]))[:3]:
-                u=c.execute("SELECT COALESCE(display_name,username,discord_id) AS display_name FROM users WHERE discord_id=?",(uid,)).fetchone()
-                out.append({'discord_id':uid,'display_name':str(u['display_name']) if u else uid,'n':n})
-            return out
-        return {'total':total,'trpg':trpg,'madamis':madamis,'event':0,
-                'scenario_count':len(scenario_sets['TRPG']|scenario_sets['MADMIS']),
-                'trpg_scenarios':len(scenario_sets['TRPG']),
-                'madamis_scenarios':len(scenario_sets['MADMIS']),
-                'gm_top':top_rows(gm_counts),'pl_top':top_rows(pl_counts)}
+        totals=c.execute("SELECT * FROM calendar_count_totals WHERE scope=?",(scope,)).fetchone()
+        scenarios=c.execute("SELECT game_type,scenario_name FROM calendar_count_scenarios WHERE scope=?",(scope,)).fetchall()
+        def top_rows(role):
+            rows=c.execute("""SELECT cm.discord_id,cm.n,
+                        COALESCE(u.display_name,u.username,cm.discord_id) AS display_name
+                        FROM calendar_count_members cm LEFT JOIN users u ON u.discord_id=cm.discord_id
+                        WHERE cm.scope=? AND cm.role=? ORDER BY cm.n DESC,cm.discord_id LIMIT 3""",
+                        (scope,role)).fetchall()
+            return [dict(r) for r in rows]
+        trpg_names={r['scenario_name'] for r in scenarios if r['game_type']=='TRPG'}
+        madamis_names={r['scenario_name'] for r in scenarios if r['game_type']=='MADMIS'}
+        return {'total':int(totals['total']) if totals else 0,
+                'trpg':int(totals['trpg']) if totals else 0,
+                'madamis':int(totals['madamis']) if totals else 0,'event':0,
+                'scenario_count':len(trpg_names|madamis_names),'trpg_scenarios':len(trpg_names),
+                'madamis_scenarios':len(madamis_names),'gm_top':top_rows('GM'),'pl_top':top_rows('PL')}
 
 def new_scenario_count(period_start: str, period_end: str) -> int:
     """その年度に初めて履歴へ登場したTRPG/マダミスのシナリオ数。"""
+    ensure_calendar_summary_cache()
     with db() as c:
-        row = c.execute(
-            """SELECT COUNT(*) AS n
-               FROM (
-                 SELECT
-                   CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END AS gt,
-                   cs.scenario_name
-                 FROM calendar_sessions cs
-                 WHERE cs.event_date>=?
-                   AND cs.event_date<?
-                   AND cs.game_type IN ('TRPG','MADMIS','マダミス')
-                   AND cs.scenario_name<>''
-                 GROUP BY gt, cs.scenario_name
-                 HAVING NOT EXISTS (
-                   SELECT 1
-                   FROM calendar_sessions old
-                   WHERE
-                     (CASE WHEN old.game_type='マダミス' THEN 'MADMIS' ELSE old.game_type END)
-                       =
-                     (CASE WHEN cs.game_type='マダミス' THEN 'MADMIS' ELSE cs.game_type END)
-                     AND old.scenario_name=cs.scenario_name
-                     AND old.event_date<?
-                 )
-               )""",
-            (period_start, period_end, period_start),
-        ).fetchone()
+        row=c.execute("SELECT COUNT(*) AS n FROM calendar_count_first_scenarios WHERE first_date>=? AND first_date<? AND scenario_name<>''",
+                      (period_start,period_end)).fetchone()
     return int(row["n"])
 
 
@@ -2070,6 +2084,8 @@ def refresh_profile_caches(as_of_date: str, updated_at: str, records=None):
         from datetime import date as _date
         cutoff = _date.fromisoformat(str(as_of_date))
         current_ay = cutoff.year if cutoff.month >= 6 else cutoff.year - 1
+        # 先の予定を登録した年度の卓数も表示できるようにする。
+        current_ay = max(current_ay, max((_activity_year_for_date(r["date"]) for r in records), default=current_ay))
         first_year = min(2024, min((_activity_year_for_date(r["date"]) for r in records), default=2024))
 
         c.execute("DELETE FROM profile_stats_cache")
@@ -2215,6 +2231,41 @@ def reconcile_profile_stats(as_of_date: str, updated_at: str):
             [(gm, scenario, count) for (gm, scenario), count in counts.items()],
         )
     evaluate_achievements(str(as_of_date), str(updated_at))
+
+
+def reconcile_all_calendar_profile_stats(as_of_date: str, updated_at: str):
+    """未来の予定も含む全カレンダー履歴から個人集計を再構築する。"""
+    with db() as c:
+        records = _unique_table_records(c)
+    refresh_profile_caches(str(as_of_date), str(updated_at), records=records)
+    with db() as c:
+        counts = {}
+        for row in records:
+            gm, scenario = str(row.get("gm") or ""), str(row.get("scenario") or "").strip()
+            if gm and scenario:
+                counts[(gm, scenario)] = counts.get((gm, scenario), 0) + 1
+        c.execute("DELETE FROM achievement_scenario_gm_totals")
+        c.executemany(
+            "INSERT INTO achievement_scenario_gm_totals(discord_id,scenario_name,gm_count) VALUES(?,?,?)",
+            [(gm, scenario, count) for (gm, scenario), count in counts.items()],
+        )
+    return evaluate_achievements(str(as_of_date), str(updated_at))
+
+
+def ensure_calendar_recount_v5(as_of_date: str, updated_at: str) -> bool:
+    """登録時加算への移行時だけ、未来卓を含むカレンダー全体と同期する。"""
+    with db() as c:
+        done = c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='calendar_recount_v5_done' AND meta_value='1'"
+        ).fetchone()
+    if done:
+        return False
+    reconcile_all_calendar_profile_stats(str(as_of_date), str(updated_at))
+    with db() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('calendar_recount_v5_done','1')"
+        )
+    return True
 
 
 def ensure_count_identity_v3(as_of_date: str, updated_at: str) -> bool:
@@ -2567,7 +2618,7 @@ def _refresh_pair_top_for_user(c, uid: str, updated_at: str):
         )
 
 
-def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
+def apply_profile_daily_delta(event_date: str, updated_at: str, advance_checkpoint: bool = True) -> int:
     """v69: 指定日の未処理卓だけをプロフィールキャッシュへ加算する。
 
     過去の全履歴は読まない。初回v69移行時だけ refresh_profile_caches() で
@@ -2577,6 +2628,8 @@ def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
     with db() as c:
         records = _unique_table_records_for_date(c, day)
         if not records:
+            if not advance_checkpoint:
+                return 0
             c.execute(
                 "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_as_of',?)",
                 (day,),
@@ -2702,10 +2755,11 @@ def apply_profile_daily_delta(event_date: str, updated_at: str) -> int:
             )
             _refresh_pair_top_for_user(c, uid, str(updated_at))
 
-        c.execute(
-            "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_as_of',?)",
-            (day,),
-        )
+        if advance_checkpoint:
+            c.execute(
+                "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_as_of',?)",
+                (day,),
+            )
         c.execute(
             "INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('profile_cache_updated_at',?)",
             (str(updated_at),),
@@ -2725,6 +2779,169 @@ def profile_delta_record_for_calendar_session(calendar_session_id: int):
         rec={"id":int(r["id"]),"date":str(r["event_date"]),"game_type":_achievement_gt(r["game_type"]),"scenario":str(r["scenario_name"] or "").strip(),"gm":"" if str(r["gm_guest_name"] or "").strip() else str(r["gm_discord_id"] or ""),"gm_guest":str(r["gm_guest_name"] or "").strip(),"members":members,"guests":guests}
         rec["table_key"]=_record_table_key(rec)
         return rec
+
+
+def apply_profile_calendar_registration(calendar_session_id: int, as_of_date: str, updated_at: str) -> int:
+    """カレンダー登録時に1卓を加算。同一卓のより古い日付は年度を補正する。"""
+    rec = profile_delta_record_for_calendar_session(calendar_session_id)
+    if not rec:
+        return 0
+    sync_calendar_summary_keys([rec])
+    with db() as c:
+        previous = c.execute(
+            "SELECT event_date FROM profile_processed_tables WHERE table_key=?",
+            (rec["table_key"],),
+        ).fetchone()
+    if previous and str(rec["date"]) < str(previous["event_date"]):
+        # 同じ卓の代表日だけを移す。過去の全履歴は再構築しない。
+        old = dict(rec, date=str(previous["event_date"]))
+        remove_profile_record_delta(old, updated_at)
+        apply_profile_daily_delta(str(rec["date"]), updated_at, advance_checkpoint=False)
+        return 0
+    return apply_profile_daily_delta(str(rec["date"]), updated_at, advance_checkpoint=False)
+
+
+def _calendar_identity_representative(record):
+    """同一構成の現存予定から最も早い1件だけを取得する。"""
+    if not record:
+        return None
+    key = str(record.get("table_key") or _record_table_key(record))
+    scenario = str(record.get("scenario") or "").strip()
+    gt = str(record.get("game_type") or "")
+    types = ("MADMIS", "マダミス") if gt == "MADMIS" else ("TRPG",)
+    with db() as c:
+        candidates = c.execute(
+            "SELECT id FROM calendar_sessions WHERE game_type IN (" + ",".join("?" for _ in types) + ") AND TRIM(scenario_name)=? ORDER BY event_date,id",
+            (*types, scenario),
+        ).fetchall()
+    for row in candidates:
+        current = profile_delta_record_for_calendar_session(int(row["id"]))
+        if current and current["table_key"] == key:
+            return current
+    return None
+
+
+def _calendar_count_adjust(c, record, delta):
+    gt=str(record['game_type'])
+    scenario=str(record['scenario_name'])
+    gm=str(record['gm_discord_id'])
+    members=json.loads(record['member_ids'])
+    for scope in ('ALL',str(_activity_year_for_date(str(record['event_date'])))):
+        c.execute("""INSERT INTO calendar_count_totals(scope,total,trpg,madamis) VALUES(?,?,?,?)
+                  ON CONFLICT(scope) DO UPDATE SET total=total+excluded.total,
+                  trpg=trpg+excluded.trpg,madamis=madamis+excluded.madamis""",
+                  (scope,delta,delta if gt=='TRPG' else 0,delta if gt=='MADMIS' else 0))
+        c.execute("""INSERT INTO calendar_count_scenarios(scope,game_type,scenario_name,n) VALUES(?,?,?,?)
+                  ON CONFLICT(scope,game_type,scenario_name) DO UPDATE SET n=n+excluded.n""",
+                  (scope,gt,scenario,delta))
+        c.execute("DELETE FROM calendar_count_scenarios WHERE scope=? AND game_type=? AND scenario_name=? AND n<=0",
+                  (scope,gt,scenario))
+        for role,uid in ([('GM',gm)] if gm else [])+[('PL',str(uid)) for uid in members]:
+            c.execute("""INSERT INTO calendar_count_members(scope,role,discord_id,n) VALUES(?,?,?,?)
+                      ON CONFLICT(scope,role,discord_id) DO UPDATE SET n=n+excluded.n""",
+                      (scope,role,uid,delta))
+            c.execute("DELETE FROM calendar_count_members WHERE scope=? AND role=? AND discord_id=? AND n<=0",
+                      (scope,role,uid))
+
+
+def _calendar_count_row(record):
+    return (str(record['table_key']) if 'table_key' in record else _record_table_key(record),
+            str(record['date']),str(record['game_type']),str(record['scenario']).strip(),
+            str(record.get('gm') or ''),json.dumps(sorted(set(record.get('members') or ())),ensure_ascii=False))
+
+
+def _calendar_count_update_first(c, pairs):
+    for gt,scenario in pairs:
+        row=c.execute("SELECT MIN(event_date) AS first_date FROM calendar_count_ledger WHERE game_type=? AND scenario_name=?",
+                      (gt,scenario)).fetchone()
+        if row and row['first_date']:
+            c.execute("""INSERT INTO calendar_count_first_scenarios(game_type,scenario_name,first_date) VALUES(?,?,?)
+                      ON CONFLICT(game_type,scenario_name) DO UPDATE SET first_date=excluded.first_date""",
+                      (gt,scenario,str(row['first_date'])))
+        else:
+            c.execute("DELETE FROM calendar_count_first_scenarios WHERE game_type=? AND scenario_name=?",(gt,scenario))
+
+
+def rebuild_calendar_summary_cache():
+    """初回と管理者による修復時だけ全カレンダーを走査する。"""
+    with db() as c:
+        c.execute('SAVEPOINT calendar_summary')
+        try:
+            records=_unique_table_records(c)
+            for name in ('calendar_count_ledger','calendar_count_totals','calendar_count_members',
+                         'calendar_count_scenarios','calendar_count_first_scenarios'):
+                c.execute('DELETE FROM '+name)
+            pairs=set()
+            for record in records:
+                row=_calendar_count_row(record)
+                c.execute("INSERT INTO calendar_count_ledger(table_key,event_date,game_type,scenario_name,gm_discord_id,member_ids) VALUES(?,?,?,?,?,?)",row)
+                _calendar_count_adjust(c,dict(zip(('table_key','event_date','game_type','scenario_name','gm_discord_id','member_ids'),row)),1)
+                pairs.add((row[2],row[3]))
+            _calendar_count_update_first(c,pairs)
+            c.execute("INSERT OR REPLACE INTO achievement_meta(meta_key,meta_value) VALUES('calendar_summary_v1_done','1')")
+            c.execute('RELEASE SAVEPOINT calendar_summary')
+            return len(records)
+        except Exception:
+            c.execute('ROLLBACK TO SAVEPOINT calendar_summary')
+            c.execute('RELEASE SAVEPOINT calendar_summary')
+            raise
+
+
+def ensure_calendar_summary_cache():
+    with db() as c:
+        done=c.execute("SELECT 1 FROM achievement_meta WHERE meta_key='calendar_summary_v1_done' AND meta_value='1'").fetchone()
+    if not done:
+        rebuild_calendar_summary_cache()
+
+
+def sync_calendar_summary_keys(records):
+    """変更前後の卓キーだけを代表予定と照合し、集計を差分更新する。"""
+    samples={str(r['table_key']):r for r in records if r}
+    if not samples:
+        return
+    ensure_calendar_summary_cache()
+    representatives={key:_calendar_identity_representative(sample) for key,sample in samples.items()}
+    with db() as c:
+        c.execute('SAVEPOINT calendar_summary')
+        try:
+            pairs=set()
+            for key,representative in representatives.items():
+                old=c.execute('SELECT * FROM calendar_count_ledger WHERE table_key=?',(key,)).fetchone()
+                new=_calendar_count_row(representative) if representative else None
+                if old and new and tuple(old[k] for k in ('table_key','event_date','game_type','scenario_name','gm_discord_id','member_ids'))==new:
+                    continue
+                if old:
+                    _calendar_count_adjust(c,old,-1)
+                    c.execute('DELETE FROM calendar_count_ledger WHERE table_key=?',(key,))
+                    pairs.add((str(old['game_type']),str(old['scenario_name'])))
+                if new:
+                    c.execute('INSERT INTO calendar_count_ledger(table_key,event_date,game_type,scenario_name,gm_discord_id,member_ids) VALUES(?,?,?,?,?,?)',new)
+                    _calendar_count_adjust(c,dict(zip(('table_key','event_date','game_type','scenario_name','gm_discord_id','member_ids'),new)),1)
+                    pairs.add((new[2],new[3]))
+            _calendar_count_update_first(c,pairs)
+            c.execute('RELEASE SAVEPOINT calendar_summary')
+        except Exception:
+            c.execute('ROLLBACK TO SAVEPOINT calendar_summary')
+            c.execute('RELEASE SAVEPOINT calendar_summary')
+            raise
+
+
+def apply_profile_calendar_change(before, after_calendar_session_id: int | None, updated_at: str):
+    """編集・削除後に、変更された同一卓キーだけを差し引き／加算する。"""
+    after = profile_delta_record_for_calendar_session(after_calendar_session_id) if after_calendar_session_id else None
+    keys = {r["table_key"]: r for r in (before, after) if r}
+    sync_calendar_summary_keys(keys.values())
+    for key, sample in keys.items():
+        with db() as c:
+            processed = c.execute("SELECT event_date FROM profile_processed_tables WHERE table_key=?", (key,)).fetchone()
+        representative = _calendar_identity_representative(sample)
+        if processed and (not representative or str(processed["event_date"]) != str(representative["date"]) or (before and key == before["table_key"] and (not after or before != after))):
+            # 旧代表卓が消えた場合と、同一キー内の日付移動を扱う。
+            remove_profile_record_delta(dict(sample, date=str(processed["event_date"])), updated_at)
+            processed = None
+        if representative and not processed:
+            apply_profile_daily_delta(str(representative["date"]), updated_at, advance_checkpoint=False)
+    return evaluate_achievements(updated_at[:10], updated_at)
 
 
 def remove_profile_record_delta(record, updated_at: str) -> bool:
