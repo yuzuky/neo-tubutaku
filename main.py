@@ -36,6 +36,7 @@ from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, reconcile_profile_stats, catch_up_profile_stats, ensure_calendar_recount_v4, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, assigned_recruitment_members, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
+from database import reconcile_all_calendar_profile_stats, ensure_calendar_recount_v5, apply_profile_calendar_registration, apply_profile_calendar_change, ensure_calendar_summary_cache, rebuild_calendar_summary_cache, atomic_calendar_update, ensure_achievement_revocation_v1
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3738,39 +3739,22 @@ async def post_achievement_notifications(new_rows):
     await channel.send("\n".join(lines), silent=True)
 
 
-async def run_achievement_check(run_date=None, notify=True):
-    d = str(run_date or now_jst().date().isoformat())
-    if achievement_run_done(d):
-        return []
-    now_text = iso_now()
-    # 停止期間中に20時の差分処理を逃した日は、カレンダーを正として前日まで追いつく。
-    with db() as c:
-        last = c.execute("SELECT meta_value FROM achievement_meta WHERE meta_key='profile_cache_as_of'").fetchone()
-    previous = (date.fromisoformat(d) - timedelta(days=1)).isoformat()
-    if last and str(last["meta_value"]) < previous:
-        catch_up_profile_stats(str(last["meta_value"]), previous, now_text)
-    # v69: 20時は「当日の未処理卓」だけを差分加算。過去履歴の全再集計はしない。
-    apply_profile_daily_delta(d, now_text)
-    new_rows = evaluate_achievements(d, now_text)
-    mark_achievement_run(d, now_text)
-    if notify:
-        await post_achievement_notifications(new_rows)
-    return new_rows
-
-
 async def bootstrap_achievements():
-    """v65初回だけ過去実績を静かに反映。以後は20時判定で新規解除を通知。"""
+    """旧版の移行処理。登録時集計へ移行済みなら再実行しない。"""
+    with db() as c:
+        if c.execute(
+            "SELECT 1 FROM achievement_meta WHERE meta_key='calendar_recount_v5_done' AND meta_value='1'"
+        ).fetchone():
+            return
     now = now_jst()
     today = now.date()
     if not achievement_bootstrapped():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         stamp = iso_now()
-        # 初回導入時だけ現在の履歴からキャッシュを作成。以後の通常更新は毎日20時のみ。
+        # 旧版の初回導入処理。この後v5で未来卓も含めて再構築する。
         refresh_profile_caches(as_of.isoformat(), stamp)
         evaluate_achievements(as_of.isoformat(), stamp)
         mark_achievement_bootstrapped()
-        if now.time() >= time(20,0):
-            mark_achievement_run(today.isoformat(), stamp)
         return
     # v75初回だけ、現在のカレンダーを唯一の正としてプロフィール・称号派生データを完全再構築。
     # 称号は一度全削除して再判定するが、過去分の獲得通知は送らない。
@@ -3780,8 +3764,6 @@ async def bootstrap_achievements():
         stamp = iso_now()
         full_derived_rebuild_v75(as_of.isoformat(), stamp)
         # 20時以降に再構築した場合、当日分は既に再構築へ含まれているので処理済みにする。
-        if now.time() >= time(20,0):
-            mark_achievement_run(today.isoformat(), stamp)
         return
 
     # v83初回だけ、未来卓を除外して現在時点の確定卓だけから派生データを再同期。
@@ -3791,8 +3773,6 @@ async def bootstrap_achievements():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         stamp = iso_now()
         cutoff_resync_v83(as_of.isoformat(), stamp)
-        if now.time() >= time(20,0):
-            mark_achievement_run(today.isoformat(), stamp)
         return
 
     # v90: テスト中の変更で派生集計が乱れたため、一度だけカレンダーを正として再取得。
@@ -3801,8 +3781,6 @@ async def bootstrap_achievements():
         as_of = today if now.time() >= time(20,0) else today - timedelta(days=1)
         stamp = iso_now()
         calendar_resync_v90(as_of.isoformat(), stamp)
-        if now.time() >= time(20,0):
-            mark_achievement_run(today.isoformat(), stamp)
         return
 
     # v74初回だけ、プロフィール集計キャッシュをカレンダー履歴から正しい値で作り直す。
@@ -3822,23 +3800,12 @@ async def bootstrap_achievements():
         ensure_scenario_gm_counter_initialized(as_of.isoformat(), iso_now())
         # 既に5回以上回しているシナリオも、移行時は通知を飛ばさず解除だけ反映。
         evaluate_achievements(as_of.isoformat(), iso_now())
-    # 20時にBotが落ちていた場合は、その日の起動時に1回だけ追いつく。
-    if now.time() >= time(20,0) and not achievement_run_done(today.isoformat()):
-        await run_achievement_check(today.isoformat(), notify=True)
-
-
 @tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def deadline_scheduler():
     try:
         await deadline_check()
     except Exception as e:
         log_error("answer_deadline_scheduler", e)
-    # v69: 当日20時に当日分だけ差分反映して称号を判定
-    try:
-        await run_achievement_check(now_jst().date().isoformat(), notify=True)
-    except Exception as e:
-        log_error("achievement_scheduler", e)
-
     # DB肥大化防止：3か月を超えた卓を1日1回だけ削除
     try:
         cleanup_old_data()
@@ -3964,10 +3931,18 @@ async def on_ready():
         log_error("registered_member_sync", e)
     try:
         await bootstrap_achievements()
-        # この版の初回起動だけカレンダー履歴から再集計。以後は通常の日次差分に戻る。
+        # 登録時集計への移行時だけ、未来卓を含むカレンダー全体から再構築する。
         now = now_jst()
         as_of = now.date() if now.time() >= time(20, 0) else now.date() - timedelta(days=1)
-        ensure_calendar_recount_v4(as_of.isoformat(), iso_now())
+        with db() as c:
+            v5_done = c.execute(
+                "SELECT 1 FROM achievement_meta WHERE meta_key='calendar_recount_v5_done' AND meta_value='1'"
+            ).fetchone()
+        if not v5_done:
+            ensure_calendar_recount_v4(as_of.isoformat(), iso_now())
+        ensure_calendar_recount_v5(as_of.isoformat(), iso_now())
+        ensure_calendar_summary_cache()
+        ensure_achievement_revocation_v1(now.date().isoformat(), iso_now())
     except Exception as e:
         log_error("achievement_bootstrap", e)
     try:
@@ -4162,8 +4137,21 @@ async def admin_page(request: Request):
         "<div class='admin-username'>@"+esc(r["username"])+" ・ ID "+esc(r["discord_id"])+"</div></div></div>"
         for r in rows
     ) or "<div class='muted small'>登録済みメンバーはいません。</div>"
-    body="<div class='card admin-card'><a class='btn alt admin-back-btn' href='/'>← ホームに戻る</a><h2 class='admin-title'>⚙ ネオ・ツブタク管理</h2><p class='admin-sub'>yuzuky専用管理画面</p>"          "<h3>Discordユーザーを登録</h3><form class='admin-id-form' method='post' action='/admin/member/lookup'>"+csrf_field(request)+          "<input type='text' inputmode='numeric' name='discord_id' placeholder='DiscordユーザーID' required><button class='btn green' type='submit'>確認</button></form>"          "<div class='muted small'>BotがこのDiscordサーバーの実在メンバーか確認してから登録します。</div>"          "<h3 style='margin-top:24px'>登録済みメンバー</h3><div class='admin-member-list'>"+member_rows+"</div></div>"
+    body="<div class='card admin-card'><a class='btn alt admin-back-btn' href='/'>← ホームに戻る</a><h2 class='admin-title'>⚙ ネオ・ツブタク管理</h2><p class='admin-sub'>yuzuky専用管理画面</p>"          "<h3>Discordユーザーを登録</h3><form class='admin-id-form' method='post' action='/admin/member/lookup'>"+csrf_field(request)+          "<input type='text' inputmode='numeric' name='discord_id' placeholder='DiscordユーザーID' required><button class='btn green' type='submit'>確認</button></form>"          "<div class='muted small'>BotがこのDiscordサーバーの実在メンバーか確認してから登録します。</div>"          "<h3 style='margin-top:24px'>登録済みメンバー</h3><div class='admin-member-list'>"+member_rows+"</div>"          "<h3 style='margin-top:24px'>集計の修復</h3><p class='muted small'>カレンダーの全予定から卓数・ランキング・個人実績を数え直します。条件を満たさなくなった称号と装備も取り消します。予定そのものは変更しません。</p>"          "<form method='post' action='/admin/rebuild-calendar-stats'>"+csrf_field(request)+          "<button class='btn alt' type='submit'>カレンダーから再集計</button></form></div>"
     return page("管理",body,request)
+
+@app.post('/admin/rebuild-calendar-stats', response_class=HTMLResponse)
+async def admin_rebuild_calendar_stats(request: Request):
+    require_yuzuky_admin(request)
+    await require_csrf(request)
+    try:
+        with atomic_calendar_update():
+            rebuilt=rebuild_calendar_summary_cache()
+            reconcile_all_calendar_profile_stats(now_jst().date().isoformat(),iso_now())
+    except Exception as e:
+        log_error('admin_rebuild_calendar_stats',e)
+        return page('再集計エラー',"<div class='card admin-card'><p class='warn'>再集計に失敗しました。時間をおいて再試行してください。</p><a class='btn alt' href='/admin'>管理画面に戻る</a></div>",request)
+    return page('再集計完了',f"<div class='card admin-card'><h2>再集計が完了しました</h2><p>{rebuilt}卓を基準に集計を更新しました。</p><a class='btn alt' href='/admin'>管理画面に戻る</a></div>",request)
 
 @app.post("/admin/member/lookup", response_class=HTMLResponse)
 async def admin_member_lookup(request: Request, discord_id: str=Form(...)):
@@ -5276,22 +5264,31 @@ async def calendar_manual_add(
             gm_discord_id = ""; gm_guest_name = ""; participant_ids = []; guest_participant_names = ""
     # TRPG/マダミスはGMなしでも登録可能。
 
-    add_manual_calendar_session(
-        game_type=game_type,
-        scenario_name=scenario_name.strip(),
-        event_date=event_date,
-        start_time=start_time.strip() or "未定",
-        gm_discord_id=str(gm_discord_id),
-        participant_ids=[str(x) for x in participant_ids],
-        created_at=iso_now(),
-        gm_guest_name=gm_guest_name.strip(),
-        guest_participant_names=[x.strip() for x in guest_participant_names.splitlines() if x.strip()],
-    )
-
     try:
-        _session_change_reconcile_if_needed(event_date)
+        with atomic_calendar_update():
+            calendar_id = add_manual_calendar_session(
+                game_type=game_type,
+                scenario_name=scenario_name.strip(),
+                event_date=event_date,
+                start_time=start_time.strip() or "未定",
+                gm_discord_id=str(gm_discord_id),
+                participant_ids=[str(x) for x in participant_ids],
+                created_at=iso_now(),
+                gm_guest_name=gm_guest_name.strip(),
+                guest_participant_names=[x.strip() for x in guest_participant_names.splitlines() if x.strip()],
+            )
+            new_titles = []
+            if game_type != "EVENT":
+                apply_profile_calendar_registration(calendar_id, now_jst().date().isoformat(), iso_now())
+                new_titles = evaluate_achievements(now_jst().date().isoformat(), iso_now())
     except Exception as e:
-        log_error(f"calendar_manual_add_reconcile date={event_date}", e)
+        log_error(f"calendar_manual_add_stats date={event_date}", e)
+        raise HTTPException(500, "予定と集計を保存できませんでした。再試行してください")
+    if new_titles:
+        try:
+            await post_achievement_notifications(new_titles)
+        except Exception as e:
+            log_error(f"calendar_manual_add_achievement_notice calendar_id={calendar_id}",e)
 
     d = date.fromisoformat(event_date)
     return RedirectResponse(
@@ -5310,41 +5307,45 @@ async def calendar_edit_details(
 ):
     require_login(request); await require_csrf(request)
     detail_before, _ = calendar_session_detail(calendar_session_id)
-    old_day_for_stats = original_event_date or str(detail_before['event_date'] if detail_before else '')
+    stats_before = profile_delta_record_for_calendar_session(calendar_session_id)
     if not scenario_name.strip(): raise HTTPException(400, "シナリオ名 / イベント名を入力してください")
     if game_type not in {"TRPG", "MADMIS", "EVENT"}: raise HTTPException(400, "種別が不正です")
     try:
         edited_day = date.fromisoformat(event_date)
     except ValueError:
         raise HTTPException(400, "開催日が不正です")
-    sync_result=sync_linked_session_from_calendar_edit(
-        calendar_session_id, original_event_date or str(detail_before['event_date'] if detail_before else ''),
-        original_start_time or str(detail_before['start_time'] if detail_before else ''),
-        event_date, scenario_name, gm_discord_id, [str(x) for x in participant_ids], game_type=game_type
-    )
-    if sync_result and sync_result.get('error')=='duplicate_slot':
-        raise HTTPException(400, "同じ卓に同一の開催日時がすでに登録されています")
-    if not update_calendar_session_details(calendar_session_id, scenario_name, gm_discord_id,
-        [str(x) for x in participant_ids], gm_guest_name,
-        [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type,
-        event_date=event_date):
-        raise HTTPException(404, "予定が見つかりません")
-    # 複数日卓ではcalendar_sessionsの代表日時を最初のslotへ揃える。
-    with db() as c:
-        first=c.execute("SELECT event_date,start_time FROM calendar_session_slots WHERE calendar_session_id=? ORDER BY event_date,start_time LIMIT 1",(int(calendar_session_id),)).fetchone()
-        if first:
-            c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",(str(first['event_date']),str(first['start_time']),int(calendar_session_id)))
-    if sync_result and sync_result.get('session_id'):
-        schedule_session_reminder(int(sync_result['session_id']))
-
-    # 過去日追加・過去→過去の編集・未来→過去も集計と実績へ反映する。
-    # 手動編集は頻度が低いため、履歴からの再集計を優先して整合性を保つ。
     try:
-        if _session_change_needs_reconcile(old_day_for_stats) or _session_change_needs_reconcile(event_date):
-            cutoff = now_jst().date() if now_jst().hour >= 20 else now_jst().date() - timedelta(days=1)
-            reconcile_profile_stats(cutoff.isoformat(), iso_now())
+        with atomic_calendar_update():
+            sync_result=sync_linked_session_from_calendar_edit(
+                calendar_session_id, original_event_date or str(detail_before['event_date'] if detail_before else ''),
+                original_start_time or str(detail_before['start_time'] if detail_before else ''),
+                event_date, scenario_name, gm_discord_id, [str(x) for x in participant_ids], game_type=game_type
+            )
+            if sync_result and sync_result.get('error')=='duplicate_slot':
+                raise HTTPException(400, "同じ卓に同一の開催日時がすでに登録されています")
+            if not update_calendar_session_details(calendar_session_id, scenario_name, gm_discord_id,
+                [str(x) for x in participant_ids], gm_guest_name,
+                [x.strip() for x in guest_participant_names.splitlines() if x.strip()], game_type=game_type,
+                event_date=event_date):
+                raise HTTPException(404, "予定が見つかりません")
+            # 複数日卓ではcalendar_sessionsの代表日時を最初のslotへ揃える。
+            with db() as c:
+                first=c.execute("SELECT event_date,start_time FROM calendar_session_slots WHERE calendar_session_id=? ORDER BY event_date,start_time LIMIT 1",(int(calendar_session_id),)).fetchone()
+                if first:
+                    c.execute("UPDATE calendar_sessions SET event_date=?,start_time=? WHERE id=?",(str(first['event_date']),str(first['start_time']),int(calendar_session_id)))
+            new_titles = apply_profile_calendar_change(stats_before, calendar_session_id, iso_now())
+    except HTTPException:
+        raise
     except Exception as e:
         log_error(f'calendar_edit_delta_reconcile calendar_session_id={calendar_session_id}', e)
+        raise HTTPException(500, "予定と集計を保存できませんでした。再試行してください")
+    if sync_result and sync_result.get('session_id'):
+        schedule_session_reminder(int(sync_result['session_id']))
+    if new_titles:
+        try:
+            await post_achievement_notifications(new_titles)
+        except Exception as e:
+            log_error(f"calendar_edit_achievement_notice calendar_session_id={calendar_session_id}",e)
 
     return RedirectResponse(f"/calendar?month={edited_day.strftime('%Y-%m')}", status_code=303)
 
@@ -5356,17 +5357,19 @@ async def calendar_delete(
     require_login(request)
     await require_csrf(request)
     detail_before, _ = calendar_session_detail(calendar_session_id)
+    stats_before = profile_delta_record_for_calendar_session(calendar_session_id)
 
-    if not permanently_delete_calendar_session(
-        calendar_session_id,
-        iso_now(),
-    ):
-        raise HTTPException(404, "予定が見つかりません")
     try:
-        if detail_before:
-            _session_change_reconcile_if_needed(str(detail_before["event_date"]))
+        with atomic_calendar_update():
+            if not permanently_delete_calendar_session(calendar_session_id, iso_now()):
+                raise HTTPException(404, "予定が見つかりません")
+            if stats_before:
+                apply_profile_calendar_change(stats_before, None, iso_now())
+    except HTTPException:
+        raise
     except Exception as e:
         log_error(f"calendar_delete_reconcile calendar_session_id={calendar_session_id}", e)
+        raise HTTPException(500, "予定と集計を保存できませんでした。再試行してください")
 
     if detail_before and detail_before["event_date"]:
         try:
@@ -7330,40 +7333,37 @@ async def decide_submit(request: Request, rid: int):
             await waiting_ch.send(f'{label}\n{slot_lines}\n参加者：{member_mentions}',silent=True)
 
         reminder_channel_id = str(ch.id) if ch else (str(waiting_ch.id) if waiting_ch else None)
-        with db() as c:
-            c.execute('UPDATE sessions SET channel_id=? WHERE id=?',(reminder_channel_id,sid))
-            c.execute("UPDATE recruitments SET status='CONFIRMED' WHERE id=?",(rid,))
-        cal_id=archive_confirmed_session(
-            source_session_id=sid,source_recruitment_id=rid,game_type=r['game_type'],scenario_name=r['scenario_name'],
-            event_date=event_date,start_time=start_time,gm_discord_id=uid,participant_ids=selected,created_at=iso_now(),
-            calendar_visible=(bool(int(r['calendar_visible'] or 0)) if r['game_type']=='EVENT' else True),slots=slots,
-        )
+        with atomic_calendar_update():
+            with db() as c:
+                c.execute('UPDATE sessions SET channel_id=? WHERE id=?',(reminder_channel_id,sid))
+                c.execute("UPDATE recruitments SET status='CONFIRMED' WHERE id=?",(rid,))
+            cal_id=archive_confirmed_session(
+                source_session_id=sid,source_recruitment_id=rid,game_type=r['game_type'],scenario_name=r['scenario_name'],
+                event_date=event_date,start_time=start_time,gm_discord_id=uid,participant_ids=selected,created_at=iso_now(),
+                calendar_visible=(bool(int(r['calendar_visible'] or 0)) if r['game_type']=='EVENT' else True),slots=slots,
+            )
+            new_titles=[]
+            if cal_id and r['game_type'] in {'TRPG', 'MADMIS', 'マダミス'}:
+                apply_profile_calendar_registration(cal_id, now_jst().date().isoformat(), iso_now())
+                new_titles=evaluate_achievements(now_jst().date().isoformat(), iso_now())
         if reminder_channel_id: schedule_session_reminder(sid)
     except Exception as e:
         log_error(f'decide_submit rid={rid}',e)
         return page('Discordエラー',"<div class='card'><p class='warn'>Discord側でエラーが発生し、卓の作成に失敗しました。権限やチャンネル設定を確認してください。</p></div>",request)
+
+    if new_titles:
+        try:
+            await post_achievement_notifications(new_titles)
+        except Exception as e:
+            log_error(f'decide_achievement_notice session_id={sid}', e)
 
     summary='<br>'.join(f'{esc(d)} {esc(t)}〜' for d,t in slots)
     title='日程決定' if is_simple_schedule(r) else '卓成立'
     return page(title,f"<div class='card'><h2>🎉 {esc(r['scenario_name'])} {'' if is_simple_schedule(r) else str(round_no)+'陣'}が成立しました！</h2><p>{summary}</p><a class='btn' href='/r/{rid}'>日程ページへ戻る</a></div>",request)
 
 
-def _session_change_needs_reconcile(old_event_date: str) -> bool:
-    """20時差分に既に入った可能性がある卓だけ、変更時に一度整合性を取り直す。"""
-    try:
-        old_day = date.fromisoformat(str(old_event_date))
-    except Exception:
-        return False
-    now = now_jst()
-    return old_day < now.date() or (old_day == now.date() and now.hour >= 20)
-
-
-def _session_change_reconcile_if_needed(old_event_date: str):
-    if not _session_change_needs_reconcile(old_event_date):
-        return
-    now = now_jst()
-    cutoff = now.date() if now.hour >= 20 else now.date() - timedelta(days=1)
-    reconcile_profile_stats(cutoff.isoformat(), iso_now())
+def _reconcile_session_calendar_change(before, calendar_session_id=None):
+    apply_profile_calendar_change(before, calendar_session_id, iso_now())
 
 
 def _session_feature_silent() -> bool:
@@ -7697,13 +7697,19 @@ async def session_reschedule_confirm(reschedule_id:int,request:Request):
     selected=list(dict.fromkeys(str(x) for x in form.getlist('member_id') if str(x) in allowed_common))
     if not (minp <= len(selected) <= maxp):
         raise HTTPException(400,f'参加者を{minp}〜{maxp}人選択してください')
-    result=confirm_session_reschedule_slots(reschedule_id,chosen,selected)
-    if not result: raise HTTPException(400,'参加人数または選択内容を確認してください')
+    detail_before, _ = session_management_detail(int(rs['session_id']))
+    calendar_id = detail_before.get('calendar_session_id') if detail_before else None
+    stats_before = profile_delta_record_for_calendar_session(calendar_id) if calendar_id else None
     try:
-        old_dates=list(dict.fromkeys(d for d,_ in result['old_slots']))
-        target=next((d for d in old_dates if _session_change_needs_reconcile(d)),None)
-        if target:_session_change_reconcile_if_needed(target)
-    except Exception as e: log_error(f'session_reschedule_reconcile id={reschedule_id}',e)
+        with atomic_calendar_update():
+            result=confirm_session_reschedule_slots(reschedule_id,chosen,selected)
+            if not result: raise HTTPException(400,'参加人数または選択内容を確認してください')
+            _reconcile_session_calendar_change(stats_before, calendar_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log_error(f'session_reschedule_reconcile id={reschedule_id}',e)
+        raise HTTPException(500,'日程と集計を保存できませんでした。再試行してください')
     ch=await _session_channel(int(rs['session_id']))
     if ch:
         old='\n'.join(f'・{d} {t}〜' for d,t in result['old_slots']); new='\n'.join(f'・{d} {t}〜' for d,t in result['new_slots'])
@@ -7747,15 +7753,20 @@ async def session_cancel_submit(session_id: int, request: Request):
     form=await request.form()
     if str(form.get('confirmed') or '')!='1':
         raise HTTPException(400,"確認チェックが必要です")
-    old_date=str(detail['event_date'])
-    cancelled=cancel_confirmed_session(session_id,iso_now())
-    if not cancelled:
-        raise HTTPException(404)
-    cancel_session_reminder(session_id)
+    calendar_id = detail.get('calendar_session_id')
+    stats_before = profile_delta_record_for_calendar_session(calendar_id) if calendar_id else None
     try:
-        _session_change_reconcile_if_needed(old_date)
+        with atomic_calendar_update():
+            cancelled=cancel_confirmed_session(session_id,iso_now())
+            if not cancelled:
+                raise HTTPException(404)
+            _reconcile_session_calendar_change(stats_before)
+    except HTTPException:
+        raise
     except Exception as e:
         log_error(f"session_cancel_reconcile id={session_id}",e)
+        raise HTTPException(500,'中止と集計を保存できませんでした。再試行してください')
+    cancel_session_reminder(session_id)
     ch=await _session_channel(session_id)
     if ch:
         await ch.send(
