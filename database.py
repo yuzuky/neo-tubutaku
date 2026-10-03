@@ -3141,14 +3141,14 @@ def _insert_unlock(c, uid, key, context_key, name, rarity, secret, context_label
 
 
 def evaluate_achievements(as_of_date: str, unlocked_at: str):
-    """v69: 表示キャッシュだけで固定称号を判定する軽量版。
+    """現在の集計値から称号を再判定し、未達成なら解除・装備も外す。
 
-    毎日20時に過去履歴を再走査しない。シナリオ5回 / 年間MVPの新規判定は
-    いったん停止し、既に解除済みの称号はそのまま保持する。
+    旧年間MVPは現在の判定ルールがないため、この判定では変更しない。
     """
     new_rows = []
     with db() as c:
         defs = {x["key"]: x for x in FIXED_ACHIEVEMENTS}
+        managed_keys = set(defs) | {"scenario_5"}
         rows = c.execute(
             """SELECT ps.*,rm.discord_id
                  FROM profile_stats_cache ps
@@ -3156,6 +3156,7 @@ def evaluate_achievements(as_of_date: str, unlocked_at: str):
         ).fetchall()
         for row in rows:
             uid = str(row["discord_id"])
+            valid = set()
             values = {
                 "pl": int(row["pl_count"]),
                 "gm": int(row["gm_count"]),
@@ -3174,6 +3175,7 @@ def evaluate_achievements(as_of_date: str, unlocked_at: str):
                 if d["kind"] not in values:
                     continue
                 if values[d["kind"]] >= d["target"]:
+                    valid.add((d["key"], ""))
                     _insert_unlock(c, uid, d["key"], "", d["name"], d["rarity"], d["secret"], None, unlocked_at, new_rows)
 
             # 生き別れの兄弟だけは相手別の累計キャッシュから判定できるので継続。
@@ -3184,6 +3186,7 @@ def evaluate_achievements(as_of_date: str, unlocked_at: str):
             ).fetchall():
                 other = str(pr["partner_discord_id"])
                 label = f"{_display_name(c, other)}と{d['target']}卓同卓"
+                valid.add((d["key"], other))
                 _insert_unlock(c, uid, d["key"], other, d["name"], d["rarity"], 1, label, unlocked_at, new_rows)
 
             # v70: シナリオ5回は専用カウンターだけを見るので軽量。
@@ -3194,10 +3197,38 @@ def evaluate_achievements(as_of_date: str, unlocked_at: str):
             ).fetchall():
                 scenario = str(sr["scenario_name"] or "").strip()
                 if scenario:
+                    valid.add(("scenario_5", scenario))
                     _insert_unlock(c, uid, "scenario_5", scenario, scenario, "black", 1,
                                    f"{scenario}を5回回す", unlocked_at, new_rows)
 
+            for unlock in c.execute(
+                "SELECT id,achievement_key,context_key FROM achievement_unlocks WHERE discord_id=?",
+                (uid,),
+            ).fetchall():
+                key = str(unlock["achievement_key"])
+                identity = (key, str(unlock["context_key"] or ""))
+                if key in managed_keys and identity not in valid:
+                    # equipped_titles の外部キー ON DELETE CASCADE により装備も解除。
+                    c.execute("DELETE FROM achievement_unlocks WHERE id=?", (int(unlock["id"]),))
+
     return new_rows
+
+
+def ensure_achievement_revocation_v1(as_of_date: str, updated_at: str) -> bool:
+    """初回導入時だけ既存称号を現在の集計値と照合する。"""
+    with db() as c:
+        done=c.execute("SELECT 1 FROM achievement_meta WHERE meta_key='achievement_revocation_v1_done'").fetchone()
+    if done:
+        return False
+    with atomic_calendar_update():
+        with db() as c:
+            done=c.execute("SELECT 1 FROM achievement_meta WHERE meta_key='achievement_revocation_v1_done'").fetchone()
+        if done:
+            return False
+        evaluate_achievements(as_of_date,updated_at)
+        with db() as c:
+            c.execute("INSERT INTO achievement_meta(meta_key,meta_value) VALUES('achievement_revocation_v1_done',?)",(str(updated_at),))
+    return True
 
 def achievement_collection(discord_id: str):
     """v68: 称号進捗も20時更新のプロフィールキャッシュから表示する。"""
