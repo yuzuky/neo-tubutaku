@@ -234,6 +234,65 @@ def get_recruitment(rid: int):
         return c.execute("SELECT * FROM recruitments WHERE id=?", (rid,)).fetchone()
 
 
+def recruitment_family_ids(rid: int, conn=None) -> list[int]:
+    """同一募集の再調整系列。シナリオ名が同じ別募集とは混ぜない。"""
+    if conn is None:
+        with db() as c:
+            return recruitment_family_ids(rid, c)
+    root, seen = int(rid), set()
+    while root not in seen:
+        seen.add(root)
+        row = conn.execute('SELECT parent_id FROM recruitments WHERE id=?', (root,)).fetchone()
+        if not row or row[0] is None:
+            break
+        root = int(row[0])
+    rows = conn.execute('''WITH RECURSIVE family(id) AS (
+        SELECT id FROM recruitments WHERE id=? UNION
+        SELECT r.id FROM recruitments r JOIN family f ON r.parent_id=f.id
+    ) SELECT id FROM family''', (root,)).fetchall()
+    return [int(x[0]) for x in rows]
+
+
+def next_round_number(rid: int, conn=None) -> int:
+    if conn is None:
+        with db() as c:
+            return next_round_number(rid, c)
+    ids = recruitment_family_ids(rid, conn)
+    if not ids:
+        return 1
+    marks = ','.join('?' for _ in ids)
+    return int(conn.execute(f'SELECT COALESCE(MAX(round_no),0)+1 FROM sessions WHERE recruitment_id IN ({marks})', ids).fetchone()[0])
+
+
+def effective_roster(rid: int) -> dict[str, set[str]]:
+    """元の登録と成立履歴は保持し、開催初日から次陣では観戦と見なす。"""
+    with db() as c:
+        ids = recruitment_family_ids(rid, c)
+        if not ids:
+            return {'participant': set(), 'spectator': set()}
+        marks = ','.join('?' for _ in ids)
+        played = {str(x[0]) for x in c.execute(f'''
+            SELECT DISTINCT sm.discord_id FROM session_members sm
+            JOIN sessions s ON s.id=sm.session_id
+            WHERE s.recruitment_id IN ({marks}) AND s.cancelled_at IS NULL
+              AND s.event_date<=?''', [*ids, now_jst().date().isoformat()])}
+        rows = c.execute('SELECT discord_id,member_type FROM members WHERE recruitment_id=? AND active=1', (rid,)).fetchall()
+    spectators = {str(x['discord_id']) for x in rows if x['member_type']=='spectator'}
+    participants = {str(x['discord_id']) for x in rows if x['member_type']=='participant'}
+    spectators |= participants & played
+    participants -= spectators
+    return {'participant': participants, 'spectator': spectators}
+
+
+_raw_candidate_slot_rows = candidate_slot_rows
+
+def candidate_slot_rows(rid: int):
+    allowed = effective_roster(rid)['participant'] - assigned_recruitment_members(rid)
+    return [{**x, 'yes':[u for u in x['yes'] if str(u) in allowed],
+             'maybe':[u for u in x['maybe'] if str(u) in allowed]}
+            for x in _raw_candidate_slot_rows(rid)]
+
+
 def latest_reschedule_id(rid: int) -> int:
     """元募集から再日程調整の子をたどり、現在の最新募集IDを返す。"""
     current = int(rid)
@@ -482,6 +541,8 @@ def get_gm_dates(rid: int) -> list[str]:
 
 
 def is_active_member(rid: int, uid: str, kind: Optional[str] = None) -> bool:
+    if kind in ('participant', 'spectator'):
+        return str(uid) in effective_roster(rid)[kind]
     with db() as c:
         if kind:
             row = c.execute("""SELECT 1 FROM members m WHERE m.recruitment_id=? AND m.discord_id=?
@@ -565,7 +626,9 @@ def candidate_rows(rid: int):
                 "yes": [x[0] for x in yes],
                 "maybe": [x[0] for x in maybe],
             })
-    return result
+    allowed = effective_roster(rid)['participant'] - assigned_recruitment_members(rid)
+    return [{**x, 'yes':[u for u in x['yes'] if str(u) in allowed],
+             'maybe':[u for u in x['maybe'] if str(u) in allowed]} for x in result]
 
 
 def month_dates() -> list[str]:
@@ -3032,13 +3095,32 @@ class RecruitmentButtons(discord.ui.View):
             log_error(f"recruitment_button kind={kind} rid={r['id']}", e)
             await interaction.followup.send("登録に失敗しました。少し待って再度お試しください。", ephemeral=True)
 
-    @discord.ui.button(label="参加", style=discord.ButtonStyle.success, custom_id="tsubutaku:join")
+    @discord.ui.button(label="参加", style=discord.ButtonStyle.success, custom_id="tsubutaku:join", row=0)
     async def join(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.choose(interaction, "participant")
 
-    @discord.ui.button(label="観戦", style=discord.ButtonStyle.primary, custom_id="tsubutaku:watch")
+    @discord.ui.button(label="観戦", style=discord.ButtonStyle.primary, custom_id="tsubutaku:watch", row=0)
     async def watch(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.choose(interaction, "spectator")
+
+    @discord.ui.button(label="参加者確認", style=discord.ButtonStyle.danger,
+                       custom_id="tsubutaku:roster", row=0)
+    async def roster(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild_id != GUILD_ID or not interaction.message:
+            await interaction.response.send_message('募集が見つかりません。', ephemeral=True)
+            return
+        with db() as c:
+            r = c.execute('SELECT id FROM recruitments WHERE recruitment_message_id=?',
+                          (str(interaction.message.id),)).fetchone()
+        if not r:
+            await interaction.response.send_message('募集が見つかりません。', ephemeral=True)
+            return
+        roster = effective_roster(latest_reschedule_id(int(r['id'])))
+        lines = []
+        for kind, label in [('participant','参加'), ('spectator','観戦')]:
+            names = sorted(user_display(uid) for uid in roster[kind])
+            lines.append(f'**{label}：{len(names)}人**\n' + ('、'.join(names) if names else 'なし'))
+        await ephemeral_text(interaction, '\n\n'.join(lines))
 
     @discord.ui.button(label="募集詳細", style=discord.ButtonStyle.primary, custom_id="tsubutaku:detail")
     async def detail(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3049,6 +3131,14 @@ class RecruitmentButtons(discord.ui.View):
             await interaction.response.send_message("募集が見つかりません。", ephemeral=True)
             return
         await ephemeral_text(interaction, f'**{r["scenario_name"]}：シナリオ詳細**\n\n{r["guide_message"] or "詳細は登録されていません。"}')
+
+
+class NextRoundButtons(discord.ui.View):
+    def __init__(self, rid: int):
+        super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(
+            label=f'{next_round_number(rid)}陣募集(GM用)',
+            url=f'{BASE_URL}/r/{rid}/next-round', style=discord.ButtonStyle.link))
 
 
 class WaitingButtons(discord.ui.View):
@@ -3246,6 +3336,43 @@ class FinishButton(discord.ui.View):
 
 
 _registered_button_views = False
+_recruitment_rosters_refreshed = False
+
+
+async def refresh_recruitment_roster_buttons():
+    """既存のボタン式募集にも参加者確認を追加。本文・添付は変更しない。"""
+    global _recruitment_rosters_refreshed
+    if _recruitment_rosters_refreshed:
+        return
+    guild = bot.get_guild(GUILD_ID)
+    if guild is None:
+        return
+    with db() as c:
+        rows = c.execute('''SELECT recruitment_message_id,recruitment_channel_id
+            FROM recruitments WHERE signup_mode='button'
+            AND recruitment_message_id IS NOT NULL
+            AND recruitment_channel_id IS NOT NULL''').fetchall()
+    all_ok = True
+    for row in rows:
+        try:
+            ch = guild.get_channel(int(row['recruitment_channel_id']))
+            if ch is None:
+                ch = await guild.fetch_channel(int(row['recruitment_channel_id']))
+            msg = await ch.fetch_message(int(row['recruitment_message_id']))
+            buttons = [button for line in msg.components for button in line.children]
+            expected = ['tsubutaku:join','tsubutaku:watch','tsubutaku:roster']
+            if (len(msg.components)==1
+                    and [getattr(b,'custom_id',None) for b in buttons]==expected
+                    and buttons[2].style==discord.ButtonStyle.danger
+                    and not buttons[2].emoji):
+                continue
+            await msg.edit(view=RecruitmentButtons())
+        except discord.NotFound:
+            continue
+        except Exception as e:
+            all_ok = False
+            log_error('recruitment_roster_refresh', e)
+    _recruitment_rosters_refreshed = all_ok
 
 
 def restore_discord_buttons():
@@ -3805,6 +3932,26 @@ async def _post_weekly_schedule_once():
     with db() as c:
         c.execute("INSERT OR IGNORE INTO weekly_schedule_posts(week_start,message_id,posted_at) VALUES(?,?,?)",
                   (monday.isoformat(), str(sent.id), iso_now()))
+    print(f'[WEEKLY] sent week={monday.isoformat()} channel={WEEKLY_SCHEDULE_CHANNEL_ID} message={sent.id}', flush=True)
+
+
+@tasks.loop(minutes=5)
+async def weekly_schedule_retry():
+    # 定時送信は別途20時に実行。停止・一時エラー時のみ今週分を補完。
+    now = now_jst()
+    monday = now.date() - timedelta(days=now.weekday())
+    due = datetime.combine(monday, time(20, 0), tzinfo=JST)
+    if now < due:
+        return
+    try:
+        await post_weekly_schedule()
+    except Exception as e:
+        log_error('weekly_schedule_retry', e)
+
+
+@weekly_schedule_retry.before_loop
+async def before_weekly_schedule_retry():
+    await bot.wait_until_ready()
 
 
 @tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
@@ -3855,6 +4002,10 @@ async def on_ready():
     global _reminders_restored
     print(f"Discord ready: {bot.user}")
     restore_discord_buttons()
+    try:
+        await refresh_recruitment_roster_buttons()
+    except Exception as e:
+        log_error('recruitment_roster_refresh_startup', e)
     try:
         cleanup_old_data()
     except Exception as e:
@@ -6649,7 +6800,8 @@ async def recruitment_page(rid: int, request: Request):
     comment = cm["comment"] if cm else ""
     gm_name = r["gm_name_override"] if is_simple_schedule(r) and r["gm_name_override"] else ((gm_user["display_name"] or gm_user["username"]) if gm_user else user_display(r["gm_discord_id"]))
 
-    pl_uids = [x["discord_id"] for x in active]
+    allowed = effective_roster(rid)['participant'] - assigned_recruitment_members(rid)
+    pl_uids = [x["discord_id"] for x in active if str(x['discord_id']) in allowed]
     weekday_jp = ["月","火","水","木","金","土","日"]
 
     rows = candidate_slot_rows(rid) if per_day_time else candidate_rows(rid)
@@ -7077,7 +7229,7 @@ async def decide_form(rid: int, request: Request):
     <form class='card' method='post' action='/r/{rid}/decide' onsubmit='return validateDecision()'>
       {csrf_field(request)}
       <h2>開催日を決定</h2>
-      <label class='round-number-row'><input type='number' min='1' name='round_no' value='1' required><span>陣目</span></label>
+      <p>陣数は成立順に自動採番されます。</p>
 
       <label class='checkbox-row' style='margin:16px 0 4px'>
         <input type='checkbox' id='multiDay' name='multi_day' value='1' onchange='toggleMultiDay()'>
@@ -7204,8 +7356,6 @@ async def decide_submit(request: Request, rid: int):
     r=get_recruitment(rid)
     if not r or str(uid)!=str(r['gm_discord_id']): raise HTTPException(403)
     form=await request.form()
-    try: round_no=int(form.get('round_no') or 1)
-    except Exception: round_no=1
     multi_day=str(form.get('multi_day') or '')=='1'
     selected_keys=[str(x) for x in form.getlist('selected_slot')]
     per_day_time,_=recruitment_schedule_slots(rid)
@@ -7238,8 +7388,8 @@ async def decide_submit(request: Request, rid: int):
     event_date,start_time=slots[0]
 
     with db() as c:
-        if c.execute('SELECT 1 FROM sessions WHERE recruitment_id=? AND round_no=?',(rid,round_no)).fetchone():
-            raise HTTPException(400,'その陣数はすでに使われています')
+        c.execute('BEGIN IMMEDIATE')
+        round_no = next_round_number(rid, c)
         cur=c.execute('INSERT INTO sessions(recruitment_id,round_no,event_date,start_time,created_at) VALUES(?,?,?,?,?)',(rid,round_no,event_date,start_time,iso_now()))
         sid=int(cur.lastrowid)
         c.executemany('INSERT INTO session_members(session_id,discord_id) VALUES(?,?)',[(sid,u) for u in selected])
@@ -7256,9 +7406,9 @@ async def decide_submit(request: Request, rid: int):
                 member=await fetch_member(guild,puid)
                 if member: overwrites[member]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
             if not is_simple_schedule(r):
-                with db() as c: spectators=c.execute("SELECT discord_id FROM members WHERE recruitment_id=? AND member_type='spectator' AND active=1",(rid,)).fetchall()
+                spectators = effective_roster(rid)['spectator']
                 for sp in spectators:
-                    member=await fetch_member(guild,sp[0])
+                    member=await fetch_member(guild,sp)
                     if member: overwrites[member]=discord.PermissionOverwrite(view_channel=True,send_messages=True,read_message_history=True)
             ch=await guild.create_text_channel(safe_channel_name(f'{r["scenario_name"]}-{round_no}陣'),category=category,overwrites=overwrites,topic=f'つぶ卓 成立 ID:{sid}')
             mentions='\n'.join(f'・<@{x}>' for x in selected)
@@ -7278,7 +7428,10 @@ async def decide_submit(request: Request, rid: int):
             member_mentions='、'.join(f'<@{x}>' for x in selected)
             slot_lines='\n'.join(f'・**{d} {t}〜**' for d,t in slots)
             label=f"✅ **{r['scenario_name']} の開催日時が決定しました**" if is_simple_schedule(r) else f'✅ **{round_no}陣の開催日時が決定しました**'
-            await waiting_ch.send(f'{label}\n{slot_lines}\n参加者：{member_mentions}',silent=True)
+            next_view = None
+            if not is_simple_schedule(r):
+                next_view = NextRoundButtons(rid)
+            await waiting_ch.send(f'{label}\n{slot_lines}\n参加者：{member_mentions}',silent=True,view=next_view)
 
         reminder_channel_id = str(ch.id) if ch else (str(waiting_ch.id) if waiting_ch else None)
         with atomic_calendar_update():
@@ -7315,8 +7468,7 @@ def _reconcile_session_calendar_change(before, calendar_session_id=None):
 
 
 def _session_feature_silent() -> bool:
-    # 成立後の変更通知だけは指定どおり 0:00〜9:00 をサイレントにする。
-    return now_jst().hour < 9
+    return in_quiet_hours()
 
 
 async def _session_channel(session_id: int):
@@ -8010,6 +8162,20 @@ async def schedule_start_submit(
     )
 
 
+@app.get('/r/{rid}/next-round')
+async def next_round_form(rid: int, request: Request):
+    uid = request.session.get('user_id')
+    if not uid:
+        return RedirectResponse(f'/login?next=/r/{rid}/next-round', status_code=303)
+    r = get_recruitment(rid)
+    if not r:
+        raise HTTPException(404)
+    if str(uid) != str(r['gm_discord_id']):
+        return gm_only_button_page(request)
+    latest = latest_reschedule_id(rid)
+    return RedirectResponse(f'/r/{latest}/reschedule', status_code=303)
+
+
 @app.get("/r/{rid}/reschedule", response_class=HTMLResponse)
 async def reschedule_form(rid: int, request: Request):
     uid = request.session.get("user_id")
@@ -8376,6 +8542,7 @@ async def main():
     if DISCORD_TOKEN:
         deadline_scheduler.start()
         weekly_schedule_scheduler.start()
+        weekly_schedule_retry.start()
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
         await asyncio.gather(web_task, bot_task)
     else:
