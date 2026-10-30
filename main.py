@@ -3272,6 +3272,45 @@ class SessionButtons(discord.ui.View):
         await self.action(interaction, "cancel")
 
 
+_finish_action_lock = asyncio.Lock()
+
+
+class FinishConfirmation(discord.ui.View):
+    def __init__(self, sid: int, gm_id: int):
+        super().__init__(timeout=60)
+        self.sid = int(sid)
+        self.gm_id = int(gm_id)
+        self.used = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.gm_id:
+            await interaction.response.send_message('終了操作はGMだけが行えます。', ephemeral=True)
+            return False
+        if self.used or self.is_finished():
+            await interaction.response.send_message('この確認は終了しています。元の終了ボタンからやり直してください。', ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label='終了する', style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.interaction_check(interaction):
+            return
+        self.used = True
+        self.stop()
+        await interaction.response.edit_message(content='終了処理を確認しています…', view=None)
+        # 複数の確認画面から押されても、直列に状態を再確認する。
+        async with _finish_action_lock:
+            await FinishButton(self.sid).execute(interaction, confirmed=True)
+
+    @discord.ui.button(label='キャンセル', style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self.interaction_check(interaction):
+            return
+        self.used = True
+        self.stop()
+        await interaction.response.edit_message(content='終了操作をキャンセルしました。', view=None)
+
+
 class FinishButton(discord.ui.View):
     def __init__(self, sid: int):
         super().__init__(timeout=None)
@@ -3280,15 +3319,24 @@ class FinishButton(discord.ui.View):
 
     @discord.ui.button(label="終了", style=discord.ButtonStyle.success)
     async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.execute(interaction)
+
+    async def execute(self, interaction: discord.Interaction, confirmed: bool = False):
+        async def respond(message):
+            if interaction.response.is_done():
+                await interaction.followup.send(message, ephemeral=True)
+            else:
+                await interaction.response.send_message(message, ephemeral=True)
+
         detail, _ = session_management_detail(self.sid)
         if not detail or detail.get("cancelled_at") or detail.get("ended_at"):
-            await interaction.response.send_message("この卓は終了済み、または操作できません。", ephemeral=True)
+            await respond("この卓は終了済み、または操作できません。")
             return
         if str(interaction.user.id) != str(detail["gm_discord_id"]):
-            await interaction.response.send_message("終了操作はGMだけが行えます。", ephemeral=True)
+            await respond("終了操作はGMだけが行えます。")
             return
         if str(detail["event_date"]) > now_jst().date().isoformat():
-            await interaction.response.send_message("開催日以降に終了できます。", ephemeral=True)
+            await respond("開催日以降に終了できます。")
             return
         starts = []
         for slot in get_session_slots(self.sid):
@@ -3297,11 +3345,17 @@ class FinishButton(discord.ui.View):
             except ValueError:
                 pass
         if starts and now_jst() < max(starts):
-            await interaction.response.send_message("最後の開催開始時刻以降に終了できます。", ephemeral=True)
+            await respond("最後の開催開始時刻以降に終了できます。")
             return
         ch = interaction.guild.get_channel(int(detail["channel_id"])) if detail.get("channel_id") else None
         if not ch or not isinstance(ch, discord.TextChannel) or not ch.topic or f"つぶ卓 成立 ID:{self.sid}" not in ch.topic:
-            await interaction.response.send_message("成立卓チャンネルが見つかりません。", ephemeral=True)
+            await respond("成立卓チャンネルが見つかりません。")
+            return
+        if not confirmed:
+            await interaction.response.send_message(
+                'この卓を終了し、終了卓カテゴリーへ移動しますか？\n'
+                '※チャンネルは削除されません。\n60秒以内に選択してください。',
+                ephemeral=True, view=FinishConfirmation(self.sid, interaction.user.id))
             return
         game_type = str(detail["game_type"])
         if game_type == "TRPG":
@@ -3315,7 +3369,8 @@ class FinishButton(discord.ui.View):
              if re.fullmatch(re.escape(category_prefix) + r"-\d+", cat.name)),
             key=lambda cat: int(cat.name.rsplit("-", 1)[1]), reverse=True,
         )
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         try:
             target = next((cat for cat in categories if len(cat.channels) < 45), None)
             if target is None:
@@ -3733,7 +3788,7 @@ async def session_reminder_task(session_id: int):
             ch=guild.get_channel(int(sess['channel_id'])) if guild and sess and sess['channel_id'] else None
             if ch and r:
                 await ch.send(f'🔔 **開始1時間前リマインド**\n\n『{r["scenario_name"]}』\n本日{sl["start_time"]}開始です！',
-                              silent=in_quiet_hours(), view=FinishButton(session_id))
+                              silent=in_quiet_hours())
             with db() as c:
                 c.execute('UPDATE session_slots SET reminder_sent=1 WHERE id=?',(int(sl['id']),))
     except asyncio.CancelledError:
@@ -3768,6 +3823,91 @@ async def restore_reminder_tasks():
         ).fetchall()
     for row in rows:
         schedule_session_reminder(int(row['session_id']))
+
+
+_finish_notice_lock = asyncio.Lock()
+
+
+async def post_finish_notices():
+    """最終開催日の翌日20時。日程は送信直前にも再取得する。"""
+    async with _finish_notice_lock:
+        now = now_jst()
+        with db() as c:
+            c.execute('''CREATE TABLE IF NOT EXISTS session_finish_notices (
+                session_id INTEGER PRIMARY KEY,
+                last_event_date TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            )''')
+            # 初回導入前の古い卓へ一斉送信しない。当日以降に期限を迎えるものから。
+            c.execute("INSERT OR IGNORE INTO achievement_meta(meta_key,meta_value) VALUES('finish_notice_since',?)",
+                      (now.date().isoformat(),))
+            since = c.execute("SELECT meta_value FROM achievement_meta WHERE meta_key='finish_notice_since'").fetchone()[0]
+            ids = [int(x[0]) for x in c.execute('''SELECT s.id FROM sessions s
+                WHERE s.cancelled_at IS NULL AND s.ended_at IS NULL AND s.channel_id IS NOT NULL
+                AND NOT EXISTS (SELECT 1 FROM session_reschedules sr
+                                WHERE sr.session_id=s.id AND sr.status='OPEN')''')]
+        for sid in ids:
+            try:
+                with db() as c:
+                    row = c.execute('''SELECT s.*,r.gm_discord_id FROM sessions s
+                        JOIN recruitments r ON r.id=s.recruitment_id WHERE s.id=?''', (sid,)).fetchone()
+                    notice = c.execute('SELECT last_event_date FROM session_finish_notices WHERE session_id=?', (sid,)).fetchone()
+                    pending = c.execute("SELECT 1 FROM session_reschedules WHERE session_id=? AND status='OPEN'", (sid,)).fetchone()
+                if not row or row['ended_at'] or row['cancelled_at'] or pending:
+                    continue
+                slots = get_session_slots(sid)
+                last_date = max([str(x['event_date']) for x in slots] or [str(row['event_date'])])
+                due_date = date.fromisoformat(last_date) + timedelta(days=1)
+                due = datetime.combine(due_date, time(20, 0), tzinfo=JST)
+                if due_date.isoformat() < since or now < due or (notice and notice[0] == last_date):
+                    continue
+                guild = bot.get_guild(GUILD_ID)
+                if not guild:
+                    continue
+                ch = guild.get_channel(int(row['channel_id']))
+                if ch is None:
+                    ch = await guild.fetch_channel(int(row['channel_id']))
+                # 簡単日程調整の共有チャンネルは移動できないため、案内対象にしない。
+                if not isinstance(ch, discord.TextChannel) or not ch.topic or f'つぶ卓 成立 ID:{sid}' not in ch.topic:
+                    continue
+                # チャンネル取得中に中止・変更された場合は、次の巡回で再評価する。
+                fresh, _ = session_management_detail(sid)
+                if not fresh or fresh.get('ended_at') or fresh.get('cancelled_at'):
+                    continue
+                fresh_slots = get_session_slots(sid)
+                fresh_last = max([str(x['event_date']) for x in fresh_slots] or [str(fresh['event_date'])])
+                with db() as c:
+                    pending = c.execute("SELECT 1 FROM session_reschedules WHERE session_id=? AND status='OPEN'", (sid,)).fetchone()
+                if fresh_last != last_date or pending:
+                    continue
+                await ch.send(
+                    f'<@{row["gm_discord_id"]}>\n'
+                    '卓を終了卓カテゴリーへ移動する場合は、以下の［終了］ボタンを押してください。\n'
+                    '※チャンネルは削除されません。',
+                    silent=True, view=FinishButton(sid),
+                    allowed_mentions=discord.AllowedMentions(
+                        users=[discord.Object(id=int(row['gm_discord_id']))], everyone=False, roles=False))
+                with db() as c:
+                    c.execute('''INSERT INTO session_finish_notices(session_id,last_event_date,sent_at)
+                        VALUES(?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+                        last_event_date=excluded.last_event_date,sent_at=excluded.sent_at''',
+                        (sid,last_date,iso_now()))
+            except Exception as e:
+                log_error(f'finish_notice sid={sid}', e)
+
+
+@tasks.loop(minutes=5)
+async def finish_notice_retry():
+    try:
+        await post_finish_notices()
+    except Exception as e:
+        log_error('finish_notice_retry', e)
+
+
+@finish_notice_retry.before_loop
+async def before_finish_notice_retry():
+    await bot.wait_until_ready()
 
 
 async def post_achievement_notifications(new_rows):
@@ -3864,6 +4004,10 @@ async def bootstrap_achievements():
         evaluate_achievements(as_of.isoformat(), iso_now())
 @tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
 async def deadline_scheduler():
+    try:
+        await post_finish_notices()
+    except Exception as e:
+        log_error('finish_notice_scheduler', e)
     try:
         await deadline_check()
     except Exception as e:
@@ -8543,6 +8687,7 @@ async def main():
         deadline_scheduler.start()
         weekly_schedule_scheduler.start()
         weekly_schedule_retry.start()
+        finish_notice_retry.start()
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
         await asyncio.gather(web_task, bot_task)
     else:
