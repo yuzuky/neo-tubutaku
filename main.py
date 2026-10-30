@@ -204,96 +204,29 @@ def split_text(text: str, limit: int = 1900) -> list[str]:
     return chunks
 
 
+def schedule_expired(r, at=None):
+    """日程調整は作成から90日間。成立卓の管理期限とは独立。"""
+    if not r:
+        return False
+    created = datetime.fromisoformat(str(r["created_at"]))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=JST)
+    return (at or now_jst()) >= created + timedelta(days=90)
+
+
 def cleanup_old_data():
-    """3か月（90日）を超えた募集と関連データ・未参照画像を削除する。"""
-    cutoff = (now_jst() - timedelta(days=90)).isoformat(timespec="seconds")
-    candidate_image_paths = []
-    session_ids = []
-
+    """90日経過した調整の回答だけ整理。募集・成立・実績は削除しない。"""
+    cutoff = (now_jst() - timedelta(days=90)).isoformat()
     with db() as c:
-        old = c.execute(
-            "SELECT id, image_path FROM recruitments WHERE created_at < ?",
-            (cutoff,),
-        ).fetchall()
-
-        if not old:
-            return 0
-
-        ids = [int(x["id"]) for x in old]
-        marks = ",".join("?" for _ in ids)
-
-        img_rows = c.execute(
-            f"""SELECT image_path
-                FROM recruitment_images
-                WHERE recruitment_id IN ({marks})""",
-            tuple(ids),
-        ).fetchall()
-        candidate_image_paths.extend(
-            [str(x["image_path"]) for x in img_rows if x["image_path"]]
-        )
-        candidate_image_paths.extend(
-            [str(x["image_path"]) for x in old if x["image_path"]]
-        )
-
-        c.execute(
-            f"""UPDATE recruitments
-                SET parent_id=NULL
-                WHERE parent_id IN ({marks})
-                  AND id NOT IN ({marks})""",
-            tuple(ids) + tuple(ids),
-        )
-
-        srows = c.execute(
-            f"SELECT id FROM sessions WHERE recruitment_id IN ({marks})",
-            tuple(ids),
-        ).fetchall()
-        session_ids = [int(x["id"]) for x in srows]
-
-        if session_ids:
-            smarks = ",".join("?" for _ in session_ids)
-            c.execute(
-                f"DELETE FROM session_members WHERE session_id IN ({smarks})",
-                tuple(session_ids),
+        removed = 0
+        for table in ("answers", "slot_answers", "answer_submissions"):
+            cur = c.execute(
+                f"DELETE FROM {table} WHERE recruitment_id IN "
+                "(SELECT id FROM recruitments WHERE julianday(created_at)<=julianday(?))",
+                (cutoff,),
             )
-
-        c.execute(
-            f"DELETE FROM sessions WHERE recruitment_id IN ({marks})",
-            tuple(ids),
-        )
-        c.execute(
-            f"DELETE FROM recruitments WHERE id IN ({marks})",
-            tuple(ids),
-        )
-
-        # 他の現存卓から参照されていない画像だけ削除対象にする
-        deletable = []
-        for path in set(candidate_image_paths):
-            still_multi = c.execute(
-                "SELECT 1 FROM recruitment_images WHERE image_path=? LIMIT 1",
-                (path,),
-            ).fetchone()
-            still_legacy = c.execute(
-                "SELECT 1 FROM recruitments WHERE image_path=? LIMIT 1",
-                (path,),
-            ).fetchone()
-            if not still_multi and not still_legacy:
-                deletable.append(path)
-
-    for p in deletable:
-        try:
-            path = Path(p)
-            if path.exists() and UPLOAD_DIR in path.parents:
-                path.unlink()
-        except Exception as e:
-            log_error("cleanup_old_image", e)
-
-    for sid in session_ids:
-        task = reminder_tasks.get(sid) if "reminder_tasks" in globals() else None
-        if task and not task.done():
-            task.cancel()
-
-    print(f"[CLEANUP] deleted {len(ids)} recruitments older than 90 days", flush=True)
-    return len(ids)
+            removed += cur.rowcount
+    return removed
 
 
 def get_recruitment(rid: int):
@@ -2683,9 +2616,8 @@ def in_quiet_hours(dt: datetime | None = None) -> bool:
 
 
 def in_overnight_mute(dt: datetime | None = None) -> bool:
-    """開催可能通知は指定された0:00〜6:00だけ通知音を抑える。"""
-    dt = dt or now_jst()
-    return 0 <= dt.hour < 6
+    """通常通知は21:00〜翌9:00で統一する。"""
+    return in_quiet_hours(dt)
 
 
 async def ephemeral_text(interaction: discord.Interaction, message: str):
@@ -2791,7 +2723,7 @@ async def notify_availability_if_needed(rid: int):
     日程調整チャンネルへ通知する。
     """
     r = get_recruitment(rid)
-    if not r:
+    if not r or schedule_expired(r):
         return
 
     # 既に通知済みなら何もしない
@@ -3090,8 +3022,8 @@ class RecruitmentButtons(discord.ui.View):
                 if ch is None and r["waiting_channel_id"]:
                     ch = await interaction.guild.fetch_channel(int(r["waiting_channel_id"]))
                 if ch:
-                    announcement = (f'<@{uid}> が参加しました🎉' if kind == 'participant'
-                                    else f'<@{uid}> が観戦に登録しました👀')
+                    announcement = (f'<@{uid}>が参加を押しました🎉' if kind == 'participant'
+                                    else f'<@{uid}>が観戦を押しました👀')
                     await ch.send(announcement, silent=True)
             except Exception as announce_error:
                 # 登録と権限付与は完了済み。通知だけの失敗を登録失敗として返さない。
@@ -3131,6 +3063,12 @@ class WaitingButtons(discord.ui.View):
             self.remove_item(self.details)
         if not legacy:
             self.remove_item(self.reschedule)
+        # 後日日程調整では「日程調整開始」を2列目の左端に置く。
+        if pending:
+            self.start = discord.ui.Button(label="日程調整開始", style=discord.ButtonStyle.success,
+                                           custom_id=f"tsubutaku:start:{rid}", row=1)
+            self.start.callback = self.start_schedule
+            self.add_item(self.start)
         if answer_url:
             self.add_item(discord.ui.Button(label="日程を回答する", style=discord.ButtonStyle.link,
                                             url=answer_url, row=1))
@@ -3138,11 +3076,6 @@ class WaitingButtons(discord.ui.View):
             # URLを直接開くリンクボタン。Web側でGMだけに再日程調整を許可する。
             self.add_item(discord.ui.Button(label="再日程調整(GM用)", style=discord.ButtonStyle.link,
                                             url=f"{BASE_URL}/r/{rid}/reschedule", row=1))
-        if pending:
-            self.start = discord.ui.Button(label="日程調整開始", style=discord.ButtonStyle.success,
-                                           custom_id=f"tsubutaku:start:{rid}", row=1)
-            self.start.callback = self.start_schedule
-            self.add_item(self.start)
 
     @discord.ui.button(label="シナリオ概要", style=discord.ButtonStyle.success, row=0)
     async def overview(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -3540,6 +3473,8 @@ async def _deadline_check_once():
         ).fetchall()
 
     for r in rows:
+        if schedule_expired(r):
+            continue
         deadline = datetime.fromisoformat(r["deadline"]).astimezone(JST)
 
         # 当日だけ。昨日以前・明日以降は通知しない。
@@ -3806,7 +3741,7 @@ async def deadline_scheduler():
         await deadline_check()
     except Exception as e:
         log_error("answer_deadline_scheduler", e)
-    # DB肥大化防止：3か月を超えた卓を1日1回だけ削除
+    # 90日経過した調整の回答だけを整理。成立卓・募集本体は保持する。
     try:
         cleanup_old_data()
     except Exception as e:
@@ -3920,6 +3855,10 @@ async def on_ready():
     global _reminders_restored
     print(f"Discord ready: {bot.user}")
     restore_discord_buttons()
+    try:
+        cleanup_old_data()
+    except Exception as e:
+        log_error("answer_cleanup_startup", e)
     if now_jst().weekday() == 0 and now_jst().time() >= time(20,0):
         try:
             await post_weekly_schedule()
@@ -3964,6 +3903,20 @@ async def on_ready():
 # ------------------------ FastAPI -------------------------
 
 app = FastAPI(title="つぶ卓")
+
+@app.middleware("http")
+async def expired_schedule_guard(request: Request, call_next):
+    # 再調整の新規作成は許可。成立卓の /session 系統には適用しない。
+    match = re.fullmatch(r"/r/(\d+)(?:/(answer|all-unavailable|decide|schedule/start))?/?",
+                         request.url.path)
+    if match:
+        r = get_recruitment(int(match.group(1)))
+        if r and schedule_expired(r):
+            return HTMLResponse(
+                "<h2>この日程調整は終了しました</h2>"
+                "<p>作成から90日が経過したため、回答の閲覧・変更・日程確定はできません。</p>"
+                "<a href='/join'>一覧に戻る</a>", status_code=410)
+    return await call_next(request)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax", https_only=BASE_URL.startswith("https://"))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 app.mount("/static", CachedStaticFiles(directory=str(STATIC_DIR)), name="static")
@@ -5604,13 +5557,8 @@ async def join_list(request: Request):
     if not uid:
         return RedirectResponse("/login?next=/join")
 
-    # 一覧を開いたタイミングでも軽量な90日整理を実行
-    try:
-        cleanup_old_data()
-    except Exception as e:
-        log_error("join_cleanup", e)
-
-    cutoff = (now_jst() - timedelta(days=90)).isoformat(timespec="seconds")
+    # 閲覧時は絞り込みだけ。削除は起動時と毎日20時にまとめる。
+    cutoff = (now_jst() - timedelta(days=90)).isoformat()
 
     with db() as c:
         rows = c.execute(
@@ -5634,7 +5582,7 @@ async def join_list(request: Request):
                       ) AS session_count
                FROM recruitments r
                LEFT JOIN users u ON u.discord_id=r.gm_discord_id
-               WHERE r.created_at >= ?
+               WHERE julianday(r.created_at) > julianday(?)
                  AND (
                    r.gm_discord_id=?
                    OR EXISTS (
