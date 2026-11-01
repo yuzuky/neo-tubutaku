@@ -36,7 +36,7 @@ from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from database import DATABASE_PATH, RARITY_LABELS, cutoff_resync_v83, cutoff_resync_v83_done, reconcile_profile_stats, catch_up_profile_stats, ensure_calendar_recount_v4, calendar_resync_v90, calendar_resync_v90_done, full_derived_rebuild_v75, full_derived_rebuild_v75_done, achievement_bootstrapped, achievement_collection, achievement_run_done, achievement_unlocks_for_user, add_manual_calendar_session, apply_profile_daily_delta, profile_delta_record_for_calendar_session, remove_profile_record_delta, archive_confirmed_session, assigned_recruitment_members, calendar_conflict_dates, calendar_conflicts_for_users, calendar_entries, calendar_manual_options, calendar_session_detail, calendar_stats, equipped_title, equipped_titles_map, evaluate_achievements, mark_achievement_bootstrapped, mark_achievement_run, new_scenario_count, permanently_delete_calendar_session, profile_cache_initialized, profile_cache_v74_resynced, mark_profile_cache_v74_resynced, profile_data, profile_delta_initialized, refresh_profile_caches, scenario_gm_counter_initialized, ensure_scenario_gm_counter_initialized, refresh_registered_member_profile, registered_member, registered_members, scenario_detail, scenario_progress_data, set_equipped_title, set_scenario_progress_status, update_calendar_session_details, update_calendar_session_members, sync_linked_session_from_calendar_edit, upsert_registered_member, cancel_confirmed_session, confirm_session_reschedule, create_session_reschedule, save_session_reschedule_answers, session_management_detail, session_reschedule_detail, set_recruitment_schedule_slots, recruitment_schedule_slots, save_slot_answers, recruitment_slot_answer_map, candidate_slot_rows, set_session_slots, get_session_slots, sync_calendar_session_slots, session_reschedule_slot_detail, save_session_reschedule_slot_answers, confirm_session_reschedule_slots, db
-from database import reconcile_all_calendar_profile_stats, ensure_calendar_recount_v5, apply_profile_calendar_registration, apply_profile_calendar_change, ensure_calendar_summary_cache, rebuild_calendar_summary_cache, atomic_calendar_update, ensure_achievement_revocation_v1
+from database import FIXED_ACHIEVEMENTS, reconcile_all_calendar_profile_stats, ensure_calendar_recount_v5, apply_profile_calendar_registration, apply_profile_calendar_change, ensure_calendar_summary_cache, rebuild_calendar_summary_cache, atomic_calendar_update, ensure_achievement_revocation_v1
 
 # ============================================================
 # つぶ卓 Bot + Web
@@ -3910,6 +3910,22 @@ async def before_finish_notice_retry():
     await bot.wait_until_ready()
 
 
+def achievement_notification_condition(row):
+    """判定側と同じ称号定義を使い、相手別・シナリオ別の条件も表示する。"""
+    key = str(row.get("achievement_key") or "")
+    context_label = str(row.get("context_label") or "").strip()
+    if key in {"pair_250", "scenario_5"} and context_label:
+        return context_label
+    if key == "scenario_5":
+        scenario = str(row.get("context_key") or row.get("title_name") or "").strip()
+        return f"{scenario}を5回回す" if scenario else "同じシナリオを5回回す"
+    definition = next((d for d in FIXED_ACHIEVEMENTS if d["key"] == key), None)
+    if definition:
+        return str(definition["condition"])
+    # 新規判定が停止している旧称号などは、存在しない条件を推測しない。
+    return context_label or "取得条件の記録なし"
+
+
 async def post_achievement_notifications(new_rows):
     if not new_rows:
         return
@@ -3932,13 +3948,24 @@ async def post_achievement_notifications(new_rows):
                 (str(r.get("discord_id") or ""),),
             ).fetchone()
             name = str(name_row["n"]) if name_row else str(r.get("discord_id") or "")
-            grouped.setdefault((rarity,title), []).append(name)
-    lines=["🏆 **称号獲得！**"]
-    for (rarity,title), names in grouped.items():
+            condition = achievement_notification_condition(r)
+            grouped.setdefault((rarity,title,condition), []).append(name)
+    header = "🏆 称号獲得 🎉"
+    message = header
+    for (rarity,title,condition), names in grouped.items():
         # 同一人・同一称号の動的解除が同時に複数あっても名前は重複表示しない
         names=list(dict.fromkeys(names))
-        lines.append(f"\n{rarity} **{title}** 取得🎉\n" + "、".join(names))
-    await channel.send("\n".join(lines), silent=True)
+        # Discordの本文上限に収まるように分割し、各投稿に見出しを付ける。
+        block = f"{rarity} {title}：{condition}\n" + "\n".join(f"・{name}" for name in names)
+        for part in split_text(block, 1800):
+            separator = "\n\n"
+            if len(message) + len(separator) + len(part) > 1900:
+                await channel.send(message, silent=True)
+                message = header
+                separator = "\n\n"
+            message += separator + part
+    if message != header:
+        await channel.send(message, silent=True)
 
 
 async def bootstrap_achievements():
@@ -4378,15 +4405,100 @@ async def admin_database_backup(request: Request):
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_page(request: Request):
     require_yuzuky_admin(request)
-    rows=registered_members()
+    with db() as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS admin_member_unregistrations (
+            discord_id TEXT PRIMARY KEY, unregistered_at TEXT NOT NULL)''')
+        removed={str(x[0]) for x in c.execute('SELECT discord_id FROM admin_member_unregistrations')}
+    rows=[r for r in registered_members() if str(r['discord_id']) not in removed]
     member_rows="".join(
-        "<div class='admin-member-row'><img class='admin-avatar' src='"+esc(r["avatar_url"] or "")+"' alt=''>"
+        "<div class='admin-member-row'><input type='checkbox' style='width:auto;flex:0 0 auto' form='member-removal-form' name='discord_ids' aria-label='非表示にするメンバーを選択' value='"+esc(r['discord_id'])+"'><img class='admin-avatar' src='"+esc(r["avatar_url"] or "")+"' alt=''>"
         "<div class='admin-member-main'><div class='admin-display'>"+esc(r["display_name"])+"</div>"
         "<div class='admin-username'>@"+esc(r["username"])+" ・ ID "+esc(r["discord_id"])+"</div></div></div>"
         for r in rows
     ) or "<div class='muted small'>登録済みメンバーはいません。</div>"
+    if rows:
+        member_rows += ("<form id='member-removal-form' method='post' action='/admin/member/unregister-confirm'>"
+                        +csrf_field(request)+"<button class='btn alt' type='submit'>選択したメンバーを非表示にする</button></form>")
+    hidden_rows=[r for r in registered_members() if str(r['discord_id']) in removed]
+    if hidden_rows:
+        member_rows += "<details style='margin-top:20px'><summary>非表示のメンバー（再表示できます）</summary>"
+        for r in hidden_rows:
+            member_rows += ("<form method='post' action='/admin/member/show' class='admin-member-row'>"+
+                csrf_field(request)+"<input type='hidden' name='discord_id' value='"+esc(r['discord_id'])+"'>"+
+                "<span>"+esc(r['display_name'] or r['username'])+"</span><button class='btn alt' type='submit'>再表示</button></form>")
+        member_rows += '</details>'
     body="<div class='card admin-card'><a class='btn alt admin-back-btn' href='/'>← ホームに戻る</a><h2 class='admin-title'>⚙ ネオ・ツブタク管理</h2><p class='admin-sub'>yuzuky専用管理画面</p>"          "<h3>Discordユーザーを登録</h3><form class='admin-id-form' method='post' action='/admin/member/lookup'>"+csrf_field(request)+          "<input type='text' inputmode='numeric' name='discord_id' placeholder='DiscordユーザーID' required><button class='btn green' type='submit'>確認</button></form>"          "<div class='muted small'>BotがこのDiscordサーバーの実在メンバーか確認してから登録します。</div>"          "<h3 style='margin-top:24px'>登録済みメンバー</h3><div class='admin-member-list'>"+member_rows+"</div>"          "<h3 style='margin-top:24px'>集計の修復</h3><p class='muted small'>カレンダーの全予定から卓数・ランキング・個人実績を数え直します。条件を満たさなくなった称号と装備も取り消します。予定そのものは変更しません。</p>"          "<form method='post' action='/admin/rebuild-calendar-stats'>"+csrf_field(request)+          "<button class='btn alt' type='submit'>カレンダーから再集計</button></form></div>"
     return page("管理",body,request)
+
+def ensure_member_unregistrations():
+    with db() as c:
+        c.execute('''CREATE TABLE IF NOT EXISTS admin_member_unregistrations (
+            discord_id TEXT PRIMARY KEY, unregistered_at TEXT NOT NULL)''')
+
+
+def hidden_member_ids():
+    ensure_member_unregistrations()
+    with db() as c:
+        return {str(x[0]) for x in c.execute('SELECT discord_id FROM admin_member_unregistrations')}
+
+
+@app.post('/admin/member/show')
+async def admin_member_show(request: Request, discord_id: str=Form(...)):
+    require_yuzuky_admin(request)
+    await require_csrf(request)
+    ensure_member_unregistrations()
+    with db() as c:
+        c.execute('DELETE FROM admin_member_unregistrations WHERE discord_id=?',(str(discord_id),))
+    return RedirectResponse('/admin',status_code=303)
+
+
+@app.post('/admin/member/unregister-confirm', response_class=HTMLResponse)
+async def admin_member_unregister_confirm(request: Request):
+    require_yuzuky_admin(request)
+    await require_csrf(request)
+    ensure_member_unregistrations()
+    form=await request.form()
+    ids=list(dict.fromkeys(str(x) for x in form.getlist('discord_ids')))
+    if not ids or len(ids)>50 or any(not x.isascii() or not x.isdigit() or len(x)>30 for x in ids):
+        raise HTTPException(400,'非表示にするメンバーを選択してください（最大50人）。')
+    with db() as c:
+        targets=[]
+        for uid in ids:
+            row=c.execute('''SELECT * FROM registered_members WHERE discord_id=?
+                AND NOT EXISTS (SELECT 1 FROM admin_member_unregistrations WHERE discord_id=?)''',(uid,uid)).fetchone()
+            if row is None:
+                raise HTTPException(400,'選択したメンバーの表示状態が変わりました。一覧から選び直してください。')
+            targets.append(row)
+    token=secrets.token_urlsafe(24)
+    request.session['member_unregister_confirmation']={'token':token,'ids':ids}
+    names='<ul>'+''.join('<li>'+esc(r['display_name'] or r['username'])+'（'+esc(r['discord_id'])+'）</li>' for r in targets)+'</ul>'
+    body=("<div class='card admin-card'><h2>選択したメンバーを非表示にしますか？</h2>"+names+
+          '<p>新しい卓の入力候補・通過済みリストから外します。過去の参加履歴・カレンダー上の名前・統計・実績は残ります。管理画面から再表示できます。</p>'+
+          "<form method='post' action='/admin/member/unregister'>"+csrf_field(request)+
+          "<input type='hidden' name='confirmation_token' value='"+esc(token)+"'>"+
+          "<div class='admin-confirm-actions'><a class='btn alt' href='/admin'>キャンセル</a>"+
+          "<button class='btn' style='background:#b83240' type='submit'>非表示にする</button></div></form></div>")
+    return page('非表示の確認',body,request)
+
+
+@app.post('/admin/member/unregister')
+async def admin_member_unregister(request: Request):
+    require_yuzuky_admin(request)
+    await require_csrf(request)
+    form=await request.form()
+    confirmation=request.session.get('member_unregister_confirmation') or {}
+    token=str(form.get('confirmation_token') or '')
+    if not token or not secrets.compare_digest(token,str(confirmation.get('token') or '')):
+        raise HTTPException(400,'確認画面から操作をやり直してください。')
+    ensure_member_unregistrations()
+    with db() as c:
+        for uid in confirmation['ids']:
+            c.execute('''INSERT INTO admin_member_unregistrations(discord_id,unregistered_at)
+                SELECT discord_id,? FROM registered_members WHERE discord_id=?
+                ON CONFLICT(discord_id) DO NOTHING''',(iso_now(),uid))
+    request.session.pop('member_unregister_confirmation',None)
+    return RedirectResponse('/admin',status_code=303)
+
 
 @app.post('/admin/rebuild-calendar-stats', response_class=HTMLResponse)
 async def admin_rebuild_calendar_stats(request: Request):
@@ -4415,6 +4527,10 @@ async def admin_member_lookup(request: Request, discord_id: str=Form(...)):
         except discord.Forbidden: raise HTTPException(503,"Botがメンバー情報を取得できません")
         except discord.HTTPException: raise HTTPException(503,"Discordからメンバー情報を取得できません")
     exists=registered_member(uid)
+    ensure_member_unregistrations()
+    with db() as c:
+        if c.execute('SELECT 1 FROM admin_member_unregistrations WHERE discord_id=?',(uid,)).fetchone():
+            exists=None
     msg="このユーザーはすでに登録済みです。最新情報へ更新しますか？" if exists else "この人を追加しますか？"
     button="最新情報に更新" if exists else "追加する"
     body="<div class='card admin-card'><h2 class='admin-title'>メンバー確認</h2><div class='admin-confirm'>"          "<img class='admin-avatar' src='"+esc(str(member.display_avatar.url))+"' alt=''><div class='admin-confirm-name'>"+esc(member.display_name)+"</div>"          "<div class='admin-confirm-user'>Discord名："+esc(member.name)+"</div><div class='admin-confirm-user'>ID："+esc(uid)+"</div>"          "<p><b>"+esc(msg)+"</b></p><form method='post' action='/admin/member/add'>"+csrf_field(request)+          "<input type='hidden' name='discord_id' value='"+esc(uid)+"'><div class='admin-confirm-actions'><a class='btn alt' href='/admin'>キャンセル</a>"          "<button class='btn green' type='submit'>"+esc(button)+"</button></div></form></div></div>"
@@ -4434,6 +4550,9 @@ async def admin_member_add(request: Request, discord_id: str=Form(...)):
         except discord.Forbidden: raise HTTPException(503,"Botがメンバー情報を取得できません")
         except discord.HTTPException: raise HTTPException(503,"Discordからメンバー情報を取得できません")
     upsert_registered_member(uid,member.name,member.display_name,str(member.display_avatar.url),iso_now())
+    ensure_member_unregistrations()
+    with db() as c:
+        c.execute('DELETE FROM admin_member_unregistrations WHERE discord_id=?',(uid,))
     return RedirectResponse("/admin",status_code=303)
 
 @app.get("/calendar", response_class=HTMLResponse)
@@ -4482,6 +4601,8 @@ async def calendar_page(request: Request, month: str = ""):
         yearly_stats.append(ys)
 
     progress_users, progress_scenarios, progress_statuses = scenario_progress_data()
+    hidden_ids = hidden_member_ids()
+    progress_users = [u for u in progress_users if str(u['discord_id']) not in hidden_ids]
     viewer_id = str(request.session.get("user_id") or "")
     profile_href = f"/profile/{viewer_id}" if viewer_id else "/login?next=/calendar"
 
@@ -4538,6 +4659,16 @@ async def calendar_page(request: Request, month: str = ""):
         f"</label>"
         for x in known_users
     )
+
+    # 新規入力の候補だけを絞る。既存予定の編集候補は残し、保存時の脱落を防ぐ。
+    visible_user_opts = ''.join(
+        f"<option value='{esc(str(x['discord_id']))}'>{esc(str(x['display_name']))}</option>"
+        for x in known_users if str(x['discord_id']) not in hidden_ids)
+    visible_pl_checks = ''.join(
+        f"<label class='manual-user-check'><input type='checkbox' name='participant_ids' "
+        f"value='{esc(str(x['discord_id']))}' data-name='{esc(str(x['display_name']))}'>"
+        f"<span>{esc(str(x['display_name']))}</span></label>"
+        for x in known_users if str(x['discord_id']) not in hidden_ids)
 
     cal = pycalendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(current.year, current.month)
@@ -4677,6 +4808,13 @@ async def calendar_page(request: Request, month: str = ""):
         gt = str(scenario["game_type"])
         name = str(scenario["scenario_name"])
         count, detail_rows = scenario_detail(gt, name)
+        # 名前ではなくIDで絞り、同名の別メンバーを巻き込まない。
+        with db() as c:
+            detail_rows = c.execute('''SELECT sp.discord_id,sp.status,
+                COALESCE(u.display_name,u.username,sp.discord_id) AS display_name
+                FROM scenario_progress sp LEFT JOIN registered_members u ON u.discord_id=sp.discord_id
+                WHERE sp.game_type=? AND sp.scenario_name=? ORDER BY display_name''',(gt,name)).fetchall()
+        detail_rows = [x for x in detail_rows if str(x['discord_id']) not in hidden_ids]
         scenario_detail_map[f"{gt}\x1f{name}"] = {
             "count": count,
             "passed": [
@@ -4789,7 +4927,7 @@ async def calendar_page(request: Request, month: str = ""):
                     <span class='field-label' id='manualGmLabel'>GM</span>
                     <select name='gm_discord_id'>
                       <option value='' disabled selected>選択してください</option>
-                      {user_opts}
+                      {visible_user_opts}
                       <option value=''>GMなし</option>
                     </select>
                   </div>
@@ -4802,7 +4940,7 @@ async def calendar_page(request: Request, month: str = ""):
 
               <div class='calendar-modal-row' id='manualPlField'>
                 <span class='calendar-modal-label' id='manualPlLabel'>PL（複数選択可）</span>
-                <div class='manual-user-list'>{pl_checks}</div>
+                <div class='manual-user-list'>{visible_pl_checks}</div>
                 <label class='guest-member-toggle' id='manualGuestMemberToggle'>
                   <input type='checkbox' id='manualGuestMemberCheck' onchange='syncGuestMemberInput("manual")'>
                   <span>新規参加者を追加</span>
