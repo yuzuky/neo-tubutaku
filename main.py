@@ -2707,6 +2707,9 @@ SIMPLE_SCHEDULE_ALLOWED_CATEGORIES = {
     "未定卓",
     "つぶ活",
 }
+SIMPLE_SCHEDULE_ALLOWED_CATEGORY_IDS = {
+    1487834996965376211,
+}
 
 YUZUKY_SPECIAL_USER_ID = "804350794371039272"
 
@@ -2723,7 +2726,8 @@ async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChann
     簡単日程調整で選択できるDiscordチャンネルを返す。
 
     条件:
-    - 指定カテゴリ（募集掲示板 / イベント / 卓一覧 / 未定卓 / つぶ活）配下
+    - 指定カテゴリ（募集掲示板 / イベント / 卓一覧 / 未定卓 / つぶ活、
+      または許可済みカテゴリID）配下
     - ログイン中ユーザー本人が View Channel を持つ
       （ロール/メンバー上書きで参加しているプライベートチャンネルも含む）
     - つぶ卓Botが View Channel / Send Messages を持つ
@@ -2742,7 +2746,11 @@ async def visible_sendable_channels_for_user(uid: str) -> list[discord.TextChann
     for ch in guild.text_channels:
         try:
             category_name = (ch.category.name or "").strip() if ch.category else ""
-            if category_name not in SIMPLE_SCHEDULE_ALLOWED_CATEGORIES:
+            category_id = int(ch.category.id) if ch.category else 0
+            if (
+                category_name not in SIMPLE_SCHEDULE_ALLOWED_CATEGORIES
+                and category_id not in SIMPLE_SCHEDULE_ALLOWED_CATEGORY_IDS
+            ):
                 continue
 
             user_perms = ch.permissions_for(member)
@@ -6239,7 +6247,7 @@ async def simple_schedule_form(request: Request):
                 </div>
               </div>
             </label>
-            <p class='muted small'>募集掲示板・イベント・卓一覧・未定卓・つぶ活からあなたが閲覧できるチャンネルのみ表示</p>
+            <p class='muted small'>指定カテゴリーから、あなたが閲覧できるチャンネルのみ表示</p>
           </div>
 
           <button id='simpleScheduleSubmitBtn' class='submit-btn' type='submit'>Discordへ送信して日程調整を作成</button>
