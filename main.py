@@ -119,6 +119,7 @@ JOIN_EMOJI_ID = env_int("JOIN_EMOJI_ID", 1486316302308999218)
 WATCH_EMOJI_ID = env_int("WATCH_EMOJI_ID", 1486316056711794748)
 TSUBUTTER_CHANNEL_ID = int(os.getenv('TSUBUTTER_CHANNEL_ID', '1278698568231817317'))
 WEEKLY_SCHEDULE_CHANNEL_ID = 1291212194557595720
+WEEKLY_SCHEDULE_POST_TIME = time(hour=8, minute=0, tzinfo=JST)
 DEVELOPER_USER_ID = "804350794371039272"  # yuzuky / 開発者テスト用
 
 PORT = env_int("PORT", 8000)
@@ -4054,23 +4055,12 @@ async def deadline_scheduler():
         log_error("old_data_cleanup", e)
 
 
-weekly_schedule_lock = asyncio.Lock()
-
-
 async def post_weekly_schedule():
-    """月曜開始の7日分を、指定チャンネルへ週1回だけ掲示する。"""
-    async with weekly_schedule_lock:
-        await _post_weekly_schedule_once()
-
-
-async def _post_weekly_schedule_once():
+    """月曜日の8:00に、その週の予定をミュートメッセージで掲示する。"""
     if not WEEKLY_SCHEDULE_CHANNEL_ID:
         return
     now = now_jst()
     monday = now.date() - timedelta(days=now.weekday())
-    with db() as c:
-        if c.execute("SELECT 1 FROM weekly_schedule_posts WHERE week_start=?", (monday.isoformat(),)).fetchone():
-            return
     guild = bot.get_guild(GUILD_ID)
     channel = guild.get_channel(WEEKLY_SCHEDULE_CHANNEL_ID) if guild else None
     if channel is None and guild:
@@ -4108,32 +4098,10 @@ async def _post_weekly_schedule_once():
         )
         if sent is None:
             sent = message
-    with db() as c:
-        c.execute("INSERT OR IGNORE INTO weekly_schedule_posts(week_start,message_id,posted_at) VALUES(?,?,?)",
-                  (monday.isoformat(), str(sent.id), iso_now()))
     print(f'[WEEKLY] sent week={monday.isoformat()} channel={WEEKLY_SCHEDULE_CHANNEL_ID} message={sent.id}', flush=True)
 
 
-@tasks.loop(minutes=5)
-async def weekly_schedule_retry():
-    # 定時送信は別途20時に実行。停止・一時エラー時のみ今週分を補完。
-    now = now_jst()
-    monday = now.date() - timedelta(days=now.weekday())
-    due = datetime.combine(monday, time(20, 0), tzinfo=JST)
-    if now < due:
-        return
-    try:
-        await post_weekly_schedule()
-    except Exception as e:
-        log_error('weekly_schedule_retry', e)
-
-
-@weekly_schedule_retry.before_loop
-async def before_weekly_schedule_retry():
-    await bot.wait_until_ready()
-
-
-@tasks.loop(time=time(hour=20, minute=0, tzinfo=JST))
+@tasks.loop(time=WEEKLY_SCHEDULE_POST_TIME)
 async def weekly_schedule_scheduler():
     if now_jst().weekday() != 0:
         return
@@ -4166,6 +4134,19 @@ async def sync_registered_member_profiles():
             except (discord.NotFound,discord.Forbidden,discord.HTTPException): continue
         refresh_registered_member_profile(uid,member.name,member.display_name,str(member.display_avatar.url),iso_now())
 
+
+@bot.event
+async def setup_hook():
+    """Discordクライアントの初期化後に定時タスクを1回だけ開始する。"""
+    for scheduled_task in (
+        deadline_scheduler,
+        weekly_schedule_scheduler,
+        finish_notice_retry,
+    ):
+        if not scheduled_task.is_running():
+            scheduled_task.start()
+
+
 @bot.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     if after.guild.id != GUILD_ID: return
@@ -4189,11 +4170,6 @@ async def on_ready():
         cleanup_old_data()
     except Exception as e:
         log_error("answer_cleanup_startup", e)
-    if now_jst().weekday() == 0 and now_jst().time() >= time(20,0):
-        try:
-            await post_weekly_schedule()
-        except Exception as e:
-            log_error("weekly_schedule_catchup", e)
     try:
         await sync_registered_member_profiles()
     except Exception as e:
@@ -8830,10 +8806,6 @@ async def main():
     server = uvicorn.Server(config)
     web_task = asyncio.create_task(server.serve())
     if DISCORD_TOKEN:
-        deadline_scheduler.start()
-        weekly_schedule_scheduler.start()
-        weekly_schedule_retry.start()
-        finish_notice_retry.start()
         bot_task = asyncio.create_task(bot.start(DISCORD_TOKEN))
         await asyncio.gather(web_task, bot_task)
     else:
